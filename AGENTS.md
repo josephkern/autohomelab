@@ -96,10 +96,14 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
 
 ## Pending follow-ups
 
-- [ ] **Capability snapshot** — run `scripts/capabilities.sh` for the pinned v0.22.0 image (needs
-  GPU free) → commit `backends/vllm/capabilities/0.22.0.txt`. Then expand the experiment queue
-  from the actual `--linear-backend`/`--kv-cache-dtype`/`--attention-backend`/`--moe-backend`
-  choice-lists instead of the research's hand-picked subset.
+- [ ] **NEXT LAB RUN → vLLM 0.23.0.** Released ~2026-06-12 (≈17h before 2026-06-13), a proper
+  *release* (not a nightly) → the legitimate image bump. At transition: pull `vllm/vllm-openai`
+  0.23.0, **pin by `sha256:` digest** in `image.lock`, `scripts/capabilities.sh` to verify the
+  version + **diff** the flag/backend surface vs 0.22.0, then re-baseline native-FP4 on 0.23.0 and
+  **re-verify the research-loop candidate queue against 0.23.0** (advice/kernels may differ). ~25GB
+  pull — confirm first (see [[check-docker-before-pulling]], [[pin-vllm-releases-not-nightlies]]).
+- [x] **Capability snapshot** — done: `backends/vllm/capabilities/0.22.0.txt` (+ caught
+  cu130-nightly = 0.19.2-dev). The research loop now supersedes hand-picking from choice-lists.
 - [ ] **Passwordless sudo (narrow)** — decide whether to allow `sysctl -w vm.drop_caches=3`
   (unified-memory cache hygiene before a run) and `nvidia-smi --gpu-reset` (recover a wedged GPU
   if `adapter down` ever isn't enough). Currently `drop_caches` is **skipped** (sudo unavailable
