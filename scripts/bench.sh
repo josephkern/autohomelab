@@ -26,7 +26,11 @@ RUNBOOK="${1:?usage: bench.sh <runbook.sh> [shape ...]}"; shift || true
 SHAPES=("$@"); [ "${#SHAPES[@]}" -eq 0 ] && SHAPES=("${SHAPE:-chat}")
 [ -f "$RUNBOOK" ] || { echo "runbook not found: $RUNBOOK" >&2; exit 1; }
 
-LEVELS=(1 4 8 16 32)                       # fixed by charter; results.tsv has exactly these columns
+# Routine matrix is lean (c1 sentinel + c16 bulk objective). Full characterization sweep:
+#   LEVELS_SET=1,4,8,16,32 scripts/bench.sh ...
+# results.tsv always has the 5 fixed columns; unrun levels stay `na` so runs stay comparable.
+IFS=',' read -ra LEVELS <<< "${LEVELS_SET:-1,16}"
+col_index() { case "$1" in 1) echo 0;; 4) echo 1;; 8) echo 2;; 16) echo 3;; 32) echo 4;; *) echo -1;; esac; }
 MAX_SECONDS="${MAX_SECONDS:-180}"
 TARGET="${TARGET:-http://${AHL_HOST:-127.0.0.1}:${AHL_PORT:-8000}}"
 CONTAINER=ahl-vllm
@@ -109,15 +113,16 @@ run_shape() {
   data="prompt_tokens=${prompt},prompt_tokens_stdev=$((prompt/4)),prompt_tokens_min=$((prompt/2)),prompt_tokens_max=$((prompt*2)),"
   data+="output_tokens=${output},output_tokens_stdev=$((output/4)),output_tokens_min=$((output/4)),output_tokens_max=$((output*2))"
 
-  echo "== $shape (p$prompt/o$output) per-level sweep @ ${LEVELS[*]} (max_s=$MAX_SECONDS, stall=$STALL_SECS) ==" >&2
-  local -a tps=(na na na na na); local i crashed=0 crash_level=""
-  for i in 0 1 2 3 4; do
-    echo "  -- c${LEVELS[$i]} --" >&2
-    if run_level "$bundle" "${LEVELS[$i]}" "$data"; then
-      tps[$i]="$TPS_OUT"; echo "     c${LEVELS[$i]} tok/s=$TPS_OUT" >&2
+  echo "== $shape (p$prompt/o$output) per-level sweep @ c${LEVELS[*]} (max_s=$MAX_SECONDS, stall=$STALL_SECS) ==" >&2
+  local -a tps=(na na na na na); local level idx crashed=0 crash_level=""
+  for level in "${LEVELS[@]}"; do
+    idx="$(col_index "$level")"; [ "$idx" -lt 0 ] && { echo "  skip invalid level $level" >&2; continue; }
+    echo "  -- c$level --" >&2
+    if run_level "$bundle" "$level" "$data"; then
+      tps[$idx]="$TPS_OUT"; echo "     c$level tok/s=$TPS_OUT" >&2
     else
-      tps[$i]="hang"; crashed=1; crash_level="${LEVELS[$i]}"
-      echo "  !! c${LEVELS[$i]} hung/crashed — keeping c<${LEVELS[$i]}, tearing down" >&2; break
+      tps[$idx]="hang"; crashed=1; crash_level="$level"
+      echo "  !! c$level hung/crashed — keeping lower levels, tearing down" >&2; break
     fi
   done
 

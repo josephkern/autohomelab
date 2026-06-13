@@ -15,7 +15,12 @@ result is keyed by a hardware fingerprint. See [README](README.md) and [docs/](d
 1. **Reproducibility is paramount.** Pin releases by version *and* digest. No nightlies as the
    authority (a digest snapshot of a nightly is acceptable if pinned). The pinned image lives in
    the runbook (see below).
-2. **Benchmarking = tok/s @ 1, 4, 8, 16, 32 concurrency via GuideLLM**, `--profile concurrent`.
+2. **Benchmarking = tok/s via GuideLLM**, `--profile concurrent`, **per-level isolation** (one
+   call per level). Concurrency columns are fixed at 1/4/8/16/32, but the **routine matrix is lean
+   — `LEVELS_SET=1,16`** (c1 = cheap crash/latency sentinel; **c16 = the tuning objective**, since
+   the throughput knobs only move batched numbers, not c1). Run the **full `1,4,8,16,32`** sweep
+   periodically for characterization. (Empirically on GB10: chat still scales at c32 (+47% vs c16);
+   coder saturates by c16.)
 3. **Every logbook entry records the full stack**: driver, firmware, CUDA, image digest, vLLM
    version, GuideLLM version, model revision, runbook.
 4. **Helper scripts are `bash`** (system) **or `python` via `uv`/`uvx`**. No global pip, no other
@@ -125,6 +130,21 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
 - `adapter.sh info/peakmem` are called standalone (no runbook sourced), so they read the image
   from the running container, not `$VLLM_IMAGE`. The image has `python3`, not `python`.
 - `vllm serve --help` is paginated in v0.22.0 → use `--help=all` or `--help=<flag>`.
+
+**GB10 HANG under sustained high concurrency (2026-06-13) — important**
+- The full 180s/stage baseline **deadlocked at the c32 stage**: vLLM went 444→**0.0 tok/s with 32
+  reqs stuck (Waiting:0)**, GPU wedged at **96% util / 15 W** (~constant), no logs for ~29 min.
+  The 30s validation slipped through c32; sustained load wedged it. **`adapter down` freed the GPU
+  instantly — no reboot.** So the hang is container-scoped and recoverable.
+- Monitoring added to `bench.sh`: a **stall-watchdog** (trips after `STALL_SECS`=90 of vLLM
+  "generation throughput: 0.0 … Running: N") + a **hard `timeout`** backstop → on hang it kills
+  guidellm, writes a `status=crash` row, and `adapter down`s for clean recovery. A hang is now a
+  fast logged data point, not a 40-min stall.
+- **RESOLVED by per-level isolation:** running each concurrency level as its own GuideLLM call
+  (not one multi-rate `sweep`) both preserves completed levels on a hang AND **made c32 stop
+  hanging** — so the deadlock was a single-call c16→c32 stage-transition artifact, not c32 load.
+  Full 180s c32 then ran clean (chat c32=687.7). The watchdog/crash-recovery remains as a safety
+  net for any future wedge.
 
 **First green run — Qwen3-8B-NVFP4 Marlin baseline (2026-06-13)**
 - Validation (30s/stage) output tok/s: c1≈42, c4≈145, c8≈250, c16≈358, c32≈426 — c1 matches

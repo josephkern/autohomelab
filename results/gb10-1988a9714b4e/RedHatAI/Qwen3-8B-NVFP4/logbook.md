@@ -54,4 +54,25 @@ Calibration: NVIDIA-official Llama-3.1-8B NVFP4 decode ~38.7 tok/s @ b=1; expect
   required level) needs a config that survives it (lower max-num-seqs, alt backend) — and the
   harness needs a watchdog so a hang is a logged `crash`, not a 40-min stall. See next steps.
 
+### 20260613 — baseline established (per-level isolation)
+
+After adding per-level isolation (each concurrency level = its own GuideLLM call), the full 180s
+baseline ran clean for both shapes — **and c32 no longer hangs.** Confirms the earlier deadlock was
+a single-call `sweep` stage-transition artifact (c16→c32), not c32 load itself.
+
+Baseline @ max_s=180, load 140s, Marlin W4A16 (`config_hash 139701ef`):
+
+| shape | c1 | c4 | c8 | c16 | c32 |
+|---|---|---|---|---|---|
+| chat (512/256)  | 41.1 | 154.6 | 281 | 466.8 | **687.7** |
+| coder (4096/1024) | 36.1 | 101.1 | 142.9 | 164.1 | 161.7 |
+
+Findings:
+- **chat keeps scaling** through c32 (+47% over c16) — bandwidth not yet saturated for light reqs.
+- **coder saturates at c16** (c32 flat/slightly down) — heavy 4096/1024 reqs hit the 273 GB/s wall
+  by c16. So c32's value is *workload-dependent*.
+- Per-stream (c1) ≈ 36–41 tok/s, matching NVIDIA's Llama-3.1-8B-NVFP4 ≈38.7 calibration.
+
+This is the **keep** baseline for the tuning loop. Tuning objective = **c16**; c1 = cheap sentinel.
+
 <!-- YYYYMMDD: what changed, tok/s effect, keep/discard, anomalies. Run drop_caches before each. -->
