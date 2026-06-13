@@ -102,6 +102,12 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
   version + **diff** the flag/backend surface vs 0.22.0, then re-baseline native-FP4 on 0.23.0 and
   **re-verify the research-loop candidate queue against 0.23.0** (advice/kernels may differ). ~25GB
   pull — confirm first (see [[check-docker-before-pulling]], [[pin-vllm-releases-not-nightlies]]).
+  Concrete 0.23.0 candidates to test (from release notes, VERIFY against actual notes + capabilities-diff):
+  (1) `--linear-backend flashinfer_b12x` — FP4 GEMM for SM120/121 was excluded from auto on 0.22.0;
+  0.23.0 syncs FlashInfer b12x → may beat native-FP4. (2) **re-test `--kv-cache-dtype fp8_e4m3`** —
+  crashed at c16 on 0.22.0; 0.23.0 has per-tensor FP8 CUTLASS on SM12.1 + padding-bypass (+20%) +
+  KV-deadlock fixes → may now work. (3) MoE-permute (+9–14%) + ARM64 image → relevant for the MoE
+  models (Qwen3-Coder, Nemotron).
 - [x] **Capability snapshot** — done: `backends/vllm/capabilities/0.22.0.txt` (+ caught
   cu130-nightly = 0.19.2-dev). The research loop now supersedes hand-picking from choice-lists.
 - [ ] **Passwordless sudo (narrow)** — decide whether to allow `sysctl -w vm.drop_caches=3`
