@@ -128,4 +128,22 @@ the ±3% noise band (runs overlap). **Verdict: DISCARD** (don't lock in noise), 
 **Diagnostic (conclusive):** FLASHINFER + bf16 KV ran clean → exp#2's crash was the **fp8 KV
 dtype**, not the attention backend.
 
+### 20260613 — campaign close: native-FP4 characterized + promoted to FINAL
+
+Full-sweep characterization of the native-FP4 best (chat, 180s, seed 42):
+
+| level | c1 | c4 | c8 | c16 | c32 |
+|---|---|---|---|---|---|
+| native-FP4 | 38.8 | 149.3 | 277.1 | 486.7 | **745.7** |
+| Marlin baseline | 41.1 | — | — | 466.8 | 687.7 |
+
+native-FP4 wins across the curve and **more at high concurrency**: c16 +5.4% (median 491.8, n=4),
+**c32 +8.4% (745.7 vs 687.7)** — and stable (no c32 hang under per-level isolation). Promoted to
+`VLLM-22-RedHatAI_Qwen3-8B_NVFP4_final.sh` (canonical serve config). `_tuned.sh` artifacts kept.
+
+**Campaign verdict (Qwen3-8B-NVFP4 / GB10 / vLLM v0.22.0):** the GEMM backend (native NVFP4 W4A4 vs
+Marlin W4A16) was the single real lever; everything else was noise (async-sched, FLASHINFER) or
+crash (fp8 KV). Single-flag c16 space exhausted on v0.22.0; next signal would need a newer pinned
+release or the research-loop candidate queue.
+
 <!-- YYYYMMDD: what changed, tok/s effect, keep/discard, anomalies. Run drop_caches before each. -->
