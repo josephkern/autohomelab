@@ -36,6 +36,14 @@ etc. The same flow therefore yields a sane baseline on any NVIDIA box, and GB10 
 profile #1. Results never collide across machines because the path and every `results.tsv` row
 carry the node fingerprint.
 
+## Image pinned in the runbook
+
+The pinned backend image (`VLLM_IMAGE`, by digest) lives **in each runbook**, not as one global
+pin — image version is a per-model compatibility/tuning dimension (a newer image exposes
+different kernels/backends; an NVFP4 MoE may need a backend only a specific image provides). So a
+runbook is the complete reproducible unit: image + model + flags. `backends/vllm/image.lock` is a
+validated-image registry + the default `gen_baseline.py` bakes into new baselines.
+
 ## The seam in practice
 
 Because GuideLLM and litellm only need an OpenAI endpoint:

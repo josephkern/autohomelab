@@ -34,27 +34,34 @@ See [docs/architecture.md](docs/architecture.md) and [docs/reproducibility.md](d
 ```
 program.md            autoresearch-style research agenda (tok/s replaces val_bpb)
 scripts/              probe.sh, serve.sh, bench.sh, gen_baseline.py, aggregate.py, tune.py
-backends/             pluggable serving adapters (vllm/ first); adapter.md = the contract
-runbooks/<org>/<model>/   model-centric config recipes — the .sh each result row references
-results/<node_fp>/<model>/  hardware-keyed results: results.tsv (data) + logbook.md (narrative) + data/ (raw, gitignored)
+backends/             pluggable serving adapters (vllm/ first); adapter.md = the contract; image.lock = registry
+runbooks/<org>/<model>/   model-centric recipes — the .sh (pinned image + model + flags) each row references
+results/<node_fp>/<org>/<model>/  hardware-keyed: results.tsv (data) + logbook.md (narrative) + data/ (raw, gitignored)
+results/<node_fp>/node_profile.json, node_notes.md   probed facts + per-box hardware narrative
 launchers/            symlinks to runbook .sh files
-docs/                 architecture & reproducibility notes
+docs/                 architecture, reproducibility, hardware/<platform>.md notes
 ```
 
 ## Quickstart (NVIDIA node)
 
 ```bash
-cp .env.example .env            # set HF_TOKEN etc.
-scripts/probe.sh                # → results/<node_fp>/node_profile.json
-scripts/gen_baseline.py Qwen/Qwen3-8B   # → runbooks/Qwen/Qwen3-8B/baseline.sh
-scripts/serve.sh runbooks/Qwen/Qwen3-8B/baseline.sh   # launch vLLM (pinned image)
-scripts/bench.sh Qwen/Qwen3-8B  # GuideLLM sweep → results.tsv row + raw bundle
-scripts/aggregate.py            # cross-node comparison table
+cp .env.example .env                                   # set HF_TOKEN etc.
+scripts/probe.sh                                       # → results/<node_fp>/node_profile.json
+uv run scripts/gen_baseline.py RedHatAI/Qwen3-8B-NVFP4 # → runbooks/RedHatAI/Qwen3-8B-NVFP4/baseline.sh
+RB=runbooks/RedHatAI/Qwen3-8B-NVFP4/baseline.sh
+scripts/serve.sh "$RB"                                 # launch vLLM (image pinned IN the runbook)
+scripts/bench.sh "$RB" chat                            # GuideLLM sweep → results.tsv row + raw bundle
+uv run scripts/aggregate.py                            # cross-node comparison table
+scripts/serve.sh down                                  # tear the server down
 ```
+
+Each runbook `.sh` is the complete reproducible unit: pinned image digest + model + flags. Tune
+by copying `baseline.sh` to `<YYYYMMDD>_<change>_tuned.sh` and changing one thing.
 
 ## Reproducibility rules
 
-1. Pin releases by version **and** image digest — no nightlies. (`backends/vllm/image.lock`)
+1. Pin releases by version **and** image digest — no nightlies. The image is pinned **in each
+   runbook**; `backends/vllm/image.lock` is the validated-image registry + default.
 2. Every logbook entry records the full driver / firmware / software stack used.
 3. Helper scripts are `bash` (system) or `python` via `uv`/`uvx` only.
 4. `.env` and raw `data/` are never committed.

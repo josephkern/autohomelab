@@ -13,8 +13,12 @@ Scope today: **NVIDIA only**. vLLM is the first and reference implementation
 ```
 backends/<name>/
     adapter.sh      # the implementation (see interface below)
-    image.lock      # pinned image: full ref + sha256 digest + the versions it contains
+    image.lock      # validated-image REGISTRY + default (runbooks pin their own image from it)
 ```
+
+**The authoritative image pin lives in each runbook** (`VLLM_IMAGE`, by digest), because image
+version is a per-model tuning dimension. `image.lock` only supplies a default for runbooks that
+don't set one, plus a catalog of validated digests.
 
 ## Interface
 
@@ -22,7 +26,7 @@ backends/<name>/
 
 | Verb | Args | Behavior |
 |---|---|---|
-| `up` | `<runbook.sh> <node_profile.json>` | Launch the server (pinned image, GPUs attached). Source the runbook for config. Block until `/v1/models` is healthy or fail non-zero. Print the base URL on stdout. |
+| `up` | `<runbook.sh> [node_profile.json]` | Launch the server with GPUs attached, using the runbook's pinned `VLLM_IMAGE` (or the registry default). Honor `VLLM_ENTRYPOINT_SERVE` (prepend `vllm serve` only when false). Source the runbook for `MODEL`/flags. Block until `/v1/models` is healthy or fail non-zero. Print the base URL on stdout. |
 | `health` | — | Exit 0 iff `/v1/models` responds. |
 | `down` | — | Stop and remove the server cleanly. |
 | `info` | — | Print `backend` string for results.tsv: `<name>@<ver>(img:sha256:<short>)`. |

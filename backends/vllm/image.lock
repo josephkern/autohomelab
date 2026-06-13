@@ -1,0 +1,30 @@
+# vLLM image REGISTRY — the curated menu of validated images runbooks pin FROM.
+#
+# Reproducibility model (project rule #1): the AUTHORITATIVE pin lives in each
+# runbook's `VLLM_IMAGE` (by digest), exactly like the hand-written serve scripts.
+# Image VERSION is a per-model compatibility/tuning dimension — different models
+# and experiments legitimately need different images (e.g. NVFP4 main-MoE needs
+# marlin on sm_121, but an unquantized MTP MoE needs a nested triton backend only
+# present in a newer image). This file is the catalog + the default for new
+# baselines; it does NOT force one global image.
+#
+# Sourced by adapter.sh (for the default) and read by gen_baseline.py.
+
+# Default image for freshly generated baselines (stable release, pinned by digest).
+AHL_VLLM_DEFAULT_IMAGE="vllm/vllm-openai@sha256:0fec7ec5f3e6bc168e54899935fb0557da908a4832a1dbc88e2debcf2f889416"  # v0.22.0
+AHL_VLLM_DEFAULT_ENTRYPOINT_SERVE=true   # image ENTRYPOINT is already `vllm serve` -> pass MODEL positionally
+
+# ── Validated catalog (ref | entrypoint_serve | notes) ────────────────────────
+# v0.22.0   vllm/vllm-openai@sha256:0fec7ec5f3e6bc168e54899935fb0557da908a4832a1dbc88e2debcf2f889416  serve=yes
+#           stable; NVFP4 compressed-tensors + --moe-backend flashinfer_cutlass; cu130/torch2.11.
+# nightly   vllm/vllm-openai@sha256:3dbe092ec5b2cef63b6104d33fa75d6ce53a7870962529ada69f78bbbc38e776  serve=yes
+#           cu130-nightly snapshot; supports nested speculative_config moe_backend (Nemotron MTP).
+# v0.17.1   vllm/vllm-openai:v0.17.1-cu130                                                            serve=yes
+#           Nemotron-3-Super card's DGX-Spark image (single global --moe-backend only).
+# ngc-26.04 nvcr.io/nvidia/vllm:26.04-py3                                                            serve=NO
+#           NVIDIA NGC image; entrypoint is a shell -> runbook needs `vllm serve` (set
+#           VLLM_ENTRYPOINT_SERVE=false in the runbook so the adapter prepends it).
+#
+# To add an entry: pin by digest where possible
+#   docker manifest inspect <repo>:<tag>   # -> per-arch sha256
+# and record what it supports. sm_120 kernels are forward-compatible to the GB10's sm_121.

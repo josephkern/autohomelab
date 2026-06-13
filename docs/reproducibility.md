@@ -7,7 +7,7 @@ stack that produced it is pinned and recorded.
 
 | Thing | How | Where |
 |---|---|---|
-| Backend container | full image ref **+ `sha256:` digest** (no `latest`, no nightly) | `backends/<name>/image.lock` |
+| Backend container | full image ref **+ `sha256:` digest** (no `latest`) | runbook `.sh` (`VLLM_IMAGE`); registry/default in `backends/<name>/image.lock` |
 | Python tooling (GuideLLM, helpers) | `uv.lock` (exact versions) | repo root |
 | Python version | `.python-version` | repo root |
 | Model weights | HF repo id **+ revision commit hash** | runbook `.sh` + logbook |
