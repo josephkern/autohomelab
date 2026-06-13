@@ -111,11 +111,29 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
 - NVFP4 = compressed-tensors (auto-detected; usually no explicit `--quantization`). Dense models
   (e.g. Qwen3-8B) don't use `--moe-backend`; MoE NVFP4 models do (`flashinfer_cutlass`/`marlin`).
 
-**GuideLLM**
+**GuideLLM** (pinned **0.6.0**)
 - Use `--profile concurrent --rate 1,4,8,16,32`, **not** `sweep` (sweep ramps in-flight toward
   512, never drains for non-trivial outputs → every request cancelled → tok/s = 0).
 - Keep `--max-seconds ~180` so each stage completes enough requests for stable stats.
 - 5 `benchmarks[]` map 1:1 to the rate list; tok/s = `output_tokens_per_second.successful.mean`.
+- **0.6.0 gotcha:** synthetic `--data "prompt_tokens=…,output_tokens=…"` still parses (key=val,
+  needs >1 `=`), but you MUST pass **`--processor <full HF repo>`** — synthetic-text generation
+  needs a real tokenizer and the short `--served-model-name` is not resolvable. bench.sh passes
+  `--model "$SERVED_NAME" --processor "$MODEL"`.
+
+**Adapter gotcha**
+- `adapter.sh info/peakmem` are called standalone (no runbook sourced), so they read the image
+  from the running container, not `$VLLM_IMAGE`. The image has `python3`, not `python`.
+- `vllm serve --help` is paginated in v0.22.0 → use `--help=all` or `--help=<flag>`.
+
+**First green run — Qwen3-8B-NVFP4 Marlin baseline (2026-06-13)**
+- Validation (30s/stage) output tok/s: c1≈42, c4≈145, c8≈250, c16≈358, c32≈426 — c1 matches
+  NVIDIA's Llama-3.1-8B-NVFP4 ≈38.7 calibration. Path confirmed in logs: `MarlinNvFp4LinearKernel`,
+  `quantization=compressed-tensors` (auto), `FLASH_ATTN` (FA2), KV dtype auto→bf16, util 0.5 →
+  51.2 GiB KV / 372k tokens. `peak_gb` proxy ≈67 GB system-used while serving.
+- Surprising: with auto KV (bf16) vLLM picked **FLASH_ATTN**, not FlashInfer — so `--kv-cache-dtype
+  fp8_e4m3` (which FA can't do on sm_121) will *switch* the attention backend. Treat KV-dtype and
+  attention-backend as a coupled tuning pair.
 
 **Workflow**
 - probe → `gen_baseline.py <model>` → edit runbook → `serve.sh <runbook>` → `bench.sh <runbook>`

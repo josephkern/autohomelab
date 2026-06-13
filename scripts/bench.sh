@@ -56,8 +56,11 @@ DATA="prompt_tokens=${PROMPT},prompt_tokens_stdev=$((PROMPT/4)),prompt_tokens_mi
 DATA+="output_tokens=${OUTPUT},output_tokens_stdev=$((OUTPUT/4)),output_tokens_min=$((OUTPUT/4)),output_tokens_max=$((OUTPUT*2))"
 
 echo "== guidellm $SHAPE (p$PROMPT/o$OUTPUT) @ $CONCURRENCY -> $TARGET ==" >&2
+# --processor = the real HF repo (served-model-name is short, not a resolvable tokenizer for
+# GuideLLM's synthetic-text generation); --model = the id the server serves.
 ( cd "$BUNDLE" && uv run --project "$REPO_ROOT" guidellm benchmark run \
-    --target "$TARGET" --profile concurrent --rate "$CONCURRENCY" \
+    --target "$TARGET" --model "$SERVED_NAME" --processor "$MODEL" \
+    --profile concurrent --rate "$CONCURRENCY" \
     --data "$DATA" --max-seconds "$MAX_SECONDS" \
     --output-path "$BUNDLE/benchmarks.json" )
 

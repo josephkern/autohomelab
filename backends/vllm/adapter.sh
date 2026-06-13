@@ -61,9 +61,13 @@ cmd_health() { curl -fsS "http://${AHL_HOST}:${AHL_PORT}/v1/models" >/dev/null; 
 cmd_down()   { docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; }
 
 cmd_info() {  # backend string for results.tsv: vllm@<ver>(img:sha256:<short>)
-  local ver="unknown" digest="$VLLM_IMAGE"
+  # Read the image from the RUNNING container (info is called standalone, so VLLM_IMAGE — only set
+  # during `up` from the runbook — isn't in scope here). Fall back to the registry default.
+  local ver="unknown" digest
+  digest="$(docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null || true)"
+  [ -z "$digest" ] && digest="${VLLM_IMAGE:-$AHL_VLLM_DEFAULT_IMAGE}"
   [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ] &&
-    ver="$(docker exec "$CONTAINER" python -c 'import vllm;print(vllm.__version__)' 2>/dev/null || echo unknown)"
+    ver="$(docker exec "$CONTAINER" python3 -c 'import vllm;print(vllm.__version__)' 2>/dev/null || echo unknown)"
   local short; short="$(grep -m1 -oE 'sha256:[0-9a-f]{12}' <<<"$digest" || true)"
   [ -z "$short" ] && short="$digest"
   echo "vllm@${ver}(img:${short})"
