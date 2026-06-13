@@ -29,18 +29,47 @@ container runs vLLM* and *what the baseline config should be*. autohomelab makes
 
 See [docs/architecture.md](docs/architecture.md) and [docs/reproducibility.md](docs/reproducibility.md).
 
-## Layout
+## Repository tree
 
 ```
-program.md            autoresearch-style research agenda (tok/s replaces val_bpb)
-scripts/              probe.sh, serve.sh, bench.sh, gen_baseline.py, aggregate.py, tune.py
-backends/             pluggable serving adapters (vllm/ first); adapter.md = the contract; image.lock = registry
-runbooks/<org>/<model>/   model-centric recipes — the .sh (pinned image + model + flags) each row references
-results/<node_fp>/<org>/<model>/  hardware-keyed: results.tsv (data) + logbook.md (narrative) + data/ (raw, gitignored)
-results/<node_fp>/node_profile.json, node_notes.md   probed facts + per-box hardware narrative
-launchers/            symlinks to runbook .sh files
-docs/                 architecture, reproducibility, hardware/<platform>.md notes
+autohomelab/
+├── README.md                     this file
+├── AGENTS.md                     operating guide + living lab notes  (CLAUDE.md → symlink)
+├── program.md                    autoresearch tuning agenda (tok/s replaces val_bpb)
+├── pyproject.toml · uv.lock · .python-version   pinned uv tooling env (guidellm, hf)
+├── .env.example                  copy → .env (gitignored): HF_TOKEN, AHL_HOST/PORT
+├── .github/ISSUE_TEMPLATE/       new-node-profile.md, new-model-run.md
+│
+├── scripts/                      harness — bash (system) or python via `uv run`
+│   ├── probe.sh                  hardware → results/<node_fp>/node_profile.json + fingerprint
+│   ├── serve.sh                  launch backend from a runbook; records load_s (time-to-healthy)
+│   ├── bench.sh                  GuideLLM per-level sweep → results.tsv row (+ watchdog + sidecar)
+│   ├── run_experiment.sh         one experiment: serve once → N benches → median c16
+│   ├── new_variant.sh            copy current best → <date>_<slug>_tuned.sh (one change)
+│   ├── tune_status.py            leaderboard: median c16 per config, best ★
+│   ├── gen_baseline.py           derive a baseline runbook from the node profile
+│   ├── kv_calc.py                KV/memory footprint vs the unified pool (quant-aware)
+│   ├── capabilities.sh           snapshot a vLLM image's flag/backend surface (don't trust memory)
+│   ├── metrics_sampler.sh        GPU power/temp/util/clock timeseries sidecar
+│   └── aggregate.py              concat all results.tsv → cross-node comparison
+│
+├── backends/                     pluggable serving adapters (OpenAI-endpoint contract)
+│   ├── adapter.md                the adapter contract
+│   └── vllm/  adapter.sh (Docker, image by digest) · image.lock (validated-image registry)
+│
+├── runbooks/<org>/<model>/       model-centric configs — pinned image + model + flags
+│   └── RedHatAI/Qwen3-8B-NVFP4/  baseline.sh · <date>_<change>_tuned.sh …
+│
+├── results/<node_fp>/            HARDWARE-KEYED
+│   └── gb10-…/  node_profile.json · node_notes.md
+│       └── <org>/<model>/  results.tsv (data) · logbook.md (narrative) · data/ (raw, gitignored)
+│
+├── docs/   architecture.md · reproducibility.md · hardware/gb10-dgx-spark.md · charter.md
+├── launchers/                    symlinks → runbook .sh (convenience)
+└── source/                       gitignored scratch (e.g. source/vllm clone for grepping kernels)
 ```
+
+Gitignored: `.env`, `results/**/data/`, `source/*`, `.venv/`, `.ahl_serve_state`.
 
 ## Quickstart (NVIDIA node)
 

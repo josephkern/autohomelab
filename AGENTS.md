@@ -90,6 +90,18 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
 - Inventory local docker images/containers before pulling (host already has the vLLM images).
 - During an autonomous tuning run, follow program.md — don't pause to ask.
 
+## Pending follow-ups
+
+- [ ] **Capability snapshot** — run `scripts/capabilities.sh` for the pinned v0.22.0 image (needs
+  GPU free) → commit `backends/vllm/capabilities/0.22.0.txt`. Then expand the experiment queue
+  from the actual `--linear-backend`/`--kv-cache-dtype`/`--attention-backend`/`--moe-backend`
+  choice-lists instead of the research's hand-picked subset.
+- [ ] **Passwordless sudo (narrow)** — decide whether to allow `sysctl -w vm.drop_caches=3`
+  (unified-memory cache hygiene before a run) and `nvidia-smi --gpu-reset` (recover a wedged GPU
+  if `adapter down` ever isn't enough). Currently `drop_caches` is **skipped** (sudo unavailable
+  non-interactively) and recorded as such in the protocol. User's call: add a sudoers rule for
+  just these two, or keep manual.
+
 ---
 
 ## Lab notes & observations (living — keep updated)
