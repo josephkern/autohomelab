@@ -1,0 +1,19 @@
+# Secrets
+.env
+
+# Raw benchmark output — heavy, kept out of git (summaries live in results.tsv)
+results/**/data/
+
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+.python-version.local
+
+# Model weights / scratch clones
+source/*
+!source/.gitkeep
+
+# OS / editor
+.DS_Store
+*.swp
