@@ -41,7 +41,7 @@ def main() -> None:
             continue
         if not r.get("shape", "").startswith(args.shape):
             continue
-        g = groups[(r["config_hash"], r["shape"])]
+        g = groups[(r["config_hash"], r["shape"], r.get("max_s", "na"))]
         g["script"] = r["script"]
         if r.get("status") == "crash":
             g["crash"] += 1
@@ -57,15 +57,15 @@ def main() -> None:
         return
 
     table = []
-    for (cfg, shape), g in groups.items():
-        table.append((med(g["c16"]) or -1, cfg, shape, med(g["c1"]), med(g["c16"]),
+    for (cfg, shape, max_s), g in groups.items():
+        table.append((med(g["c16"]) or -1, cfg, shape, max_s, med(g["c1"]), med(g["c16"]),
                       med(g["c32"]), g["n"], g["crash"], g["script"]))
     table.sort(reverse=True)
 
-    print(f"{'':2}{'config':9} {'shape':16} {'c1':>7} {'c16*':>7} {'c32':>7} {'n':>3} {'crash':>5}  script")
-    for i, (_, cfg, shape, c1, c16, c32, n, crash, script) in enumerate(table):
+    print(f"{'':2}{'config':9} {'shape':16} {'max_s':>5} {'c1':>7} {'c16*':>7} {'c32':>7} {'n':>3} {'crash':>5}  script")
+    for i, (_, cfg, shape, max_s, c1, c16, c32, n, crash, script) in enumerate(table):
         star = "★" if i == 0 and c16 is not None else " "
-        print(f"{star} {cfg:9} {shape:16} {str(c1):>7} {str(c16):>7} {str(c32):>7} {n:>3} {crash:>5}  {script}")
+        print(f"{star} {cfg:9} {shape:16} {str(max_s):>5} {str(c1):>7} {str(c16):>7} {str(c32):>7} {n:>3} {crash:>5}  {script}")
     print("\n★ = current best by median c16 (the tuning objective).")
 
 

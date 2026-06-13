@@ -1,0 +1,4 @@
+image:  vllm/vllm-openai@sha256:0fec7ec5f3e6bc168e54899935fb0557da908a4832a1dbc88e2debcf2f889416
+model:  RedHatAI/Qwen3-8B-NVFP4 @e391349c110709b87bfc2ad2fde3f50dc5839fd8
+waiting for health (up to ~20 min for first weight load)...
+ready in 150s -> http://127.0.0.1:8000

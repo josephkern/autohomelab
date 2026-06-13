@@ -36,6 +36,7 @@ TARGET="${TARGET:-http://${AHL_HOST:-127.0.0.1}:${AHL_PORT:-8000}}"
 CONTAINER=ahl-vllm
 STALL_SECS="${STALL_SECS:-90}"
 LEVEL_TIMEOUT="${LEVEL_TIMEOUT:-$(( MAX_SECONDS * 2 + 120 ))}"
+SEED="${AHL_SEED:-42}"                      # fixed -> same synthetic prompts across configs (paired)
 
 # ── Identity (computed once; same for every shape in this serve session) ───────
 MODEL=""; SERVED_NAME=""; VLLM_FLAGS=()
@@ -50,7 +51,7 @@ SCRIPT_REL="$(realpath --relative-to="$REPO_ROOT" "$RUNBOOK")"
 BACKEND="$("$ADAPTER" info)"
 OUT_DIR="$REPO_ROOT/results/$NODE_FP/$ORG/$NAME"
 TSV="$OUT_DIR/results.tsv"
-HEADER=$'run_id\tcommit\tnode_fp\tmodel\tshape\tbackend\tconfig_hash\tscript\tload_s\ttps_c1\ttps_c4\ttps_c8\ttps_c16\ttps_c32\tpeak_gb\tstatus\tnotes\tdata'
+HEADER=$'run_id\tcommit\tnode_fp\tmodel\tshape\tbackend\tconfig_hash\tscript\tload_s\tmax_s\tseed\ttps_c1\ttps_c4\ttps_c8\ttps_c16\ttps_c32\tpeak_gb\tstatus\tnotes\tdata'
 
 # Load tax recorded by serve.sh (same for all shapes this session).
 LOAD_S="na"
@@ -65,8 +66,8 @@ fi
 
 emit_row() {  # emit_row <run_id> <shape_tag> <data_rel> <status> <notes> <peak> <t1> <t4> <t8> <t16> <t32>
   [ -f "$TSV" ] || echo "$HEADER" > "$TSV"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$1" "$COMMIT" "$NODE_FP" "$MODEL" "$2" "$BACKEND" "$CONFIG_HASH" "$SCRIPT_REL" "$LOAD_S" \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$1" "$COMMIT" "$NODE_FP" "$MODEL" "$2" "$BACKEND" "$CONFIG_HASH" "$SCRIPT_REL" "$LOAD_S" "$MAX_SECONDS" "$SEED" \
     "${7:-na}" "${8:-na}" "${9:-na}" "${10:-na}" "${11:-na}" "$6" "$4" "$5" "$3" >> "$TSV"
 }
 
@@ -87,7 +88,7 @@ run_level() {
   watchdog "$hit" & local wd=$!
   set +e
   ( cd "$bundle" && timeout "$LEVEL_TIMEOUT" uv run --project "$REPO_ROOT" guidellm benchmark run \
-      --target "$TARGET" --model "$SERVED_NAME" --processor "$MODEL" \
+      --target "$TARGET" --model "$SERVED_NAME" --processor "$MODEL" --random-seed "$SEED" \
       --profile concurrent --rate "$level" \
       --data "$data" --max-seconds "$MAX_SECONDS" --output-path "$json" ) >"$bundle/level_c$level.log" 2>&1
   local rc=$?
@@ -113,7 +114,9 @@ run_shape() {
   data="prompt_tokens=${prompt},prompt_tokens_stdev=$((prompt/4)),prompt_tokens_min=$((prompt/2)),prompt_tokens_max=$((prompt*2)),"
   data+="output_tokens=${output},output_tokens_stdev=$((output/4)),output_tokens_min=$((output/4)),output_tokens_max=$((output*2))"
 
-  echo "== $shape (p$prompt/o$output) per-level sweep @ c${LEVELS[*]} (max_s=$MAX_SECONDS, stall=$STALL_SECS) ==" >&2
+  echo "== $shape (p$prompt/o$output) per-level sweep @ c${LEVELS[*]} (max_s=$MAX_SECONDS, seed=$SEED, stall=$STALL_SECS) ==" >&2
+  # Sidecar: sample GPU power/temp/util for the whole shape sweep (thermal is a tok/s confounder).
+  local sp=""; "$SCRIPT_DIR/metrics_sampler.sh" "$bundle/gpu_metrics.csv" 5 >/dev/null 2>&1 & sp=$!
   local -a tps=(na na na na na); local level idx crashed=0 crash_level=""
   for level in "${LEVELS[@]}"; do
     idx="$(col_index "$level")"; [ "$idx" -lt 0 ] && { echo "  skip invalid level $level" >&2; continue; }
@@ -126,10 +129,12 @@ run_shape() {
     fi
   done
 
-  local peak status notes
+  kill "$sp" 2>/dev/null || true; wait "$sp" 2>/dev/null || true
+  local peak status notes thermal
   peak="$("$ADAPTER" peakmem 2>/dev/null || echo na)"
-  if [ "$crashed" = 1 ]; then status="crash"; notes="${NOTES:+$NOTES; }hang@c$crash_level; max_s=$MAX_SECONDS"
-  else status="${STATUS:-measured}"; notes="${NOTES:+$NOTES; }max_s=$MAX_SECONDS"; fi
+  thermal="$("$SCRIPT_DIR/metrics_sampler.sh" --summary "$bundle/gpu_metrics.csv" 2>/dev/null || echo thermal=na)"
+  if [ "$crashed" = 1 ]; then status="crash"; notes="${NOTES:+$NOTES; }hang@c$crash_level; $thermal"
+  else status="${STATUS:-measured}"; notes="${NOTES:+$NOTES; }$thermal"; fi
   emit_row "$run_id" "$shape_tag" "$data_rel" "$status" "$notes" "$peak" \
     "${tps[0]}" "${tps[1]}" "${tps[2]}" "${tps[3]}" "${tps[4]}"
   echo "  $shape -> c1=${tps[0]} c4=${tps[1]} c8=${tps[2]} c16=${tps[3]} c32=${tps[4]}  [$status]" >&2

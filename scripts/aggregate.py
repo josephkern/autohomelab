@@ -17,8 +17,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESULTS = REPO_ROOT / "results"
 COLS = ["run_id", "commit", "node_fp", "model", "shape", "backend", "config_hash", "script",
-        "load_s", "tps_c1", "tps_c4", "tps_c8", "tps_c16", "tps_c32", "peak_gb", "status",
-        "notes", "data"]
+        "load_s", "max_s", "seed", "tps_c1", "tps_c4", "tps_c8", "tps_c16", "tps_c32", "peak_gb",
+        "status", "notes", "data"]
 
 
 def main() -> None:

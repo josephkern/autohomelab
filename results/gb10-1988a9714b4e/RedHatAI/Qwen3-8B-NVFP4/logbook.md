@@ -75,4 +75,23 @@ Findings:
 
 This is the **keep** baseline for the tuning loop. Tuning objective = **c16**; c1 = cheap sentinel.
 
+### 20260613 — exp #1: native FP4 (KEEP, new best)
+
+Delta vs baseline: removed `--linear-backend marlin` → vLLM auto-selects native NVFP4 W4A4
+(FlashInferCutlass/Cutlass 12.0f). N=3, chat, c1/c16.
+
+| config | c1 | c16 (median, n=3) | stable? |
+|---|---|---|---|
+| baseline (Marlin W4A16) `139701ef` | 41.1 | 466.8 (n=1) | yes |
+| **native FP4 W4A4 `cddbebf8`** | 39.5 | **496.8** | **yes (3× clean)** |
+
+**Verdict: KEEP** (+6.4% c16, >3% threshold; c1 sentinel fine; no sm_121 crash across 3 runs).
+Surprising vs research: native FP4 was *expected* to be fragile on sm_121, but ran clean and beats
+Marlin here — likely because per-level isolation avoids the multi-rate state that triggered earlier
+hangs. Native FP4 is the **new base** for subsequent experiments.
+
+Harness hardening this session (reproducibility controls): pinned GuideLLM `--random-seed=42`
+(paired prompts across configs), added `max_s`+`seed` columns, and a GPU power/temp sidecar
+(`gpu_metrics.csv` per bundle; `thermal=<maxT>C/<avgW>W` in notes).
+
 <!-- YYYYMMDD: what changed, tok/s effect, keep/discard, anomalies. Run drop_caches before each. -->
