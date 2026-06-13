@@ -33,25 +33,34 @@ Tunable dimensions:
 **All else equal, simpler is better.** A change must earn its complexity with a real tok/s gain.
 The model, request distribution, and the GuideLLM sweep are the controlled variables.
 
+## Objective & metric
+
+Maximize **median c16 tok/s** (the bulk operating point that responds to the throughput knobs).
+**c1 is a sentinel only** — it catches crashes/GEMM-path regressions and gives the latency number,
+but is insensitive to batching knobs, so never optimize on it. Routine matrix `LEVELS_SET=1,16`;
+run the full `1,4,8,16,32` periodically to confirm c16 stays representative.
+
 ## The experiment loop
 
-1. Read `program.md` and the current best runbook.
-2. Decide **one** change. Copy the current best to `<YYYYMMDD>_<change>_tuned.sh` and edit it.
-   Document the **delta** in the file header (e.g. "Deltas vs baseline: `--max-num-seqs 4 → 32`,
-   `+ --max-num-batched-tokens 8192`") — this is the autoresearch journal, inline.
-3. `git commit` the new runbook (one change per commit, so the result is attributable).
-4. `scripts/serve.sh <that .sh>` → health → (on unified nodes: `sync && echo 3 | sudo tee
-   /proc/sys/vm/drop_caches` to stop fs-cache starving CUDA) → `scripts/bench.sh <that .sh>` ×N;
-   take median.
-5. Append the `results.tsv` row(s) and a narrative line to `logbook.md`.
-6. Keep (advance the best pointer) if median tok/s improved beyond noise; else discard. Either
-   way **continue — do not pause to ask whether to continue.**
+1. `uv run scripts/tune_status.py --model <m>` → see the current best (★) and leaderboard.
+2. Decide **one** change (image or a serving flag). `scripts/new_variant.sh <best.sh> <slug>` →
+   a dated `<YYYYMMDD>_<slug>_tuned.sh`; edit its ONE delta and fill the header
+   (Deltas / Hypothesis). One change per variant so the result is attributable.
+3. `git commit` the variant (one change per commit).
+4. `N=3 scripts/run_experiment.sh <that .sh>` — serves once, benches N times (amortized load),
+   tears down, prints `MEDIAN c16=… c1=… status=ok|crash`. The watchdog turns a hang into a fast
+   `crash` row + auto-teardown. (On unified nodes, `drop_caches` first if sudo is available.)
+5. Add a narrative line to `logbook.md`: the delta, median c16 vs best, and the call.
+6. **Keep** if median c16 beats the current best beyond noise (rule of thumb: >~3%, and c1 didn't
+   regress / didn't crash) → that variant is the new base for the next change. Else **discard**
+   (leave it in the tree as a recorded negative). Either way **continue — do not pause to ask.**
 
 ## Output & logging
 
-Each run writes a raw GuideLLM bundle to `results/<node_fp>/<org>/<model>/data/<run_id>/` and a
-`results.tsv` row (see AGENTS.md for the schema). `status` ∈ `keep`/`discard`/`crash`. Then one
-narrative line in `logbook.md`: what changed, the effect, and the call.
+`run_experiment.sh` writes N `results.tsv` rows tagged `notes: exp=<id>` (raw status `measured`,
+or `crash` on a hang), each with per-level JSON bundles under `data/<run_id>/`. The **leaderboard
+(`tune_status.py`) decides best by median c16** — keep/discard is a narrative call recorded in
+`logbook.md`, not a per-row status. Schema in AGENTS.md.
 
 ## Reproducibility (non-negotiable)
 
