@@ -30,6 +30,13 @@ echo ">> experiment $EXP_ID: $RUNBOOK  (N=$N, shape=$EXP_SHAPE, levels=$LEVELS_S
 "$SCRIPT_DIR/serve.sh" "$RUNBOOK" >/dev/null 2>"$REPO_ROOT/.ahl_exp_serve.log" || {
   echo "MEDIAN c16=na c1=na n=0 status=serve_fail"; exit 1; }
 
+# Gate 1 (functional): cheap smoke before spending benchmark time on a broken config.
+if [ "${SKIP_SMOKE:-0}" != 1 ]; then
+  "$SCRIPT_DIR/smoke.sh" "$RUNBOOK" || {
+    "$SCRIPT_DIR/serve.sh" down >/dev/null 2>&1 || true
+    echo "MEDIAN c16=na c1=na n=0 status=smoke_fail"; exit 1; }
+fi
+
 status=ok ok=0
 for n in $(seq 1 "$N"); do
   echo ">> bench $n/$N" >&2

@@ -74,11 +74,12 @@ is a **loss**, not a keep.
 
 ## Finalizing a campaign
 
-When a model's tuning is done, **fully validate the winner before promoting**: full `scripts/eval.sh`
-(quality within tolerance) + `scripts/smoke.sh` (functional) + full-sweep throughput. Only then
-`scripts/promote.sh <best_tuned.sh> "<result>"` → `<...>_final.sh` (the canonical, validated config
-to serve). Keep all `*_tuned.sh` artifacts. Record the validation report (serves ✓ / smoke ✓ /
-accuracy {scores} / throughput curve) in `logbook.md`.
+When a model's tuning is done, **fully validate the winner before promoting**:
+`scripts/validate.sh <best_tuned.sh>` (serve → smoke → FULL lm-eval → `VALIDATION-<cfg>.md` report)
++ a full-sweep throughput run. Promote only if smoke PASSES and accuracy is within ~1% of the model
+card's reference. Then `scripts/promote.sh <best_tuned.sh> "<result>"` → `<...>_final.sh` (the
+canonical, validated config). Keep all `*_tuned.sh` artifacts. (During tuning, `run_experiment.sh`
+already runs the cheap functional smoke after serve — `SKIP_SMOKE=1` to bypass.)
 
 ## Output & logging
 

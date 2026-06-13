@@ -60,6 +60,49 @@ def resolve_revision(model: str) -> str:
     return info.sha
 
 
+def fetch_gen_sampling(model: str) -> str | None:
+    """Model's recommended sampling as an --override-generation-config JSON, or None."""
+    try:
+        from huggingface_hub import hf_hub_download
+        gc = json.loads(Path(hf_hub_download(model, "generation_config.json")).read_text())
+    except Exception:
+        return None
+    keep = {k: gc[k] for k in ("temperature", "top_p", "top_k") if k in gc and gc.get("do_sample", True)}
+    return json.dumps(keep, separators=(",", ":")) if keep else None
+
+
+def parser_hints(name: str) -> tuple[str, str]:
+    """Best-effort (tool_call_parser, reasoning_parser) guesses from the model name — to CONFIRM
+    against the model card (smoke.sh validates whatever is actually enabled)."""
+    n = name.lower()
+    tool = ("qwen3_coder" if "coder" in n else "glm47" if "glm" in n
+            else "llama3_json" if "llama" in n else "hermes")
+    reason = ("nemotron_v3" if "nemotron" in n else "deepseek_r1" if ("deepseek" in n or "-r1" in n)
+              else "qwen3" if "qwen" in n else "deepseek_r1")
+    return tool, reason
+
+
+def write_model_card(out_dir: Path, model: str, org: str, name: str, revision: str, sampling: str | None) -> None:
+    card = out_dir / f"{org}_{name}_Model_Card.md"
+    if card.exists():
+        return
+    card.write_text(f"""# {model} — model card (autohomelab)
+
+- HF id: {model}
+- Revision (pinned): {revision}
+- Type: <general | reasoning | coder>   # drives eval suite: general→gsm8k+mmlu, coder→humaneval+mbpp
+- Quantization: <e.g. NVFP4 (compressed-tensors W4A4)>
+- Native context: <max_position_embeddings>
+- Reasoning parser: <qwen3 | deepseek_r1 | nemotron_v3 | none>
+- Tool-call parser: <hermes | qwen3_coder | llama3_json | glm47 | none>
+- Recommended sampling: {sampling or '<from generation_config.json>'}
+- Quality reference: <recovery % / published eval scores from the HF card's Evaluation section>
+
+## Notes
+<intended use, known caveats, anything that affects the serve config>
+""")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("model", help="HF model id, e.g. Qwen/Qwen3-8B")
@@ -80,6 +123,10 @@ def main() -> None:
     image, entrypoint_serve = default_image()
     org, name = (args.model.split("/", 1) if "/" in args.model else ("_", args.model))
     served = name.lower()
+    sampling = fetch_gen_sampling(args.model)
+    tool_hint, reason_hint = parser_hints(name)
+    override_line = (f"  --override-generation-config '{sampling}'   # model-recommended sampling (generation_config.json)"
+                     if sampling else "  # --override-generation-config '{{\"temperature\":...}}'   # no generation_config.json")
 
     out_dir = REPO_ROOT / "runbooks" / org / name
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -90,9 +137,9 @@ def main() -> None:
 # AUTO-GENERATED baseline by scripts/gen_baseline.py — derived from the node profile.
 # node_fp:   {node_fp}
 # gpu:       {gpu['name']} x{tp} ({gpu['memory_kind']} memory)
-# This is the complete reproducible unit: pinned image + model + serving flags.
-# Tune by COPYING to <YYYYMMDD>_<change>_tuned.sh and documenting the delta in its header;
-# keep this baseline unchanged.
+# Complete reproducible unit: pinned image + model + serving flags (performance + functional).
+# Tune by COPYING to <YYYYMMDD>_<change>_tuned.sh (one perf change); keep this baseline unchanged.
+# Confirm the FUNCTIONAL flags below against {org}_{name}_Model_Card.md; scripts/smoke.sh validates.
 
 MODEL="{args.model}"
 MODEL_REVISION="{revision}"   # pinned for reproducibility
@@ -104,14 +151,20 @@ VLLM_IMAGE="{image}"
 VLLM_ENTRYPOINT_SERVE={entrypoint_serve}   # image ENTRYPOINT already runs `vllm serve`
 
 VLLM_FLAGS=(
+  # --- performance (tuned by the loop) ---
   --tensor-parallel-size {tp}
   --gpu-memory-utilization {mem_util}
   --max-model-len {args.max_model_len}
+  # --- functional (serving features; CONFIRM against the model card; smoke.sh validates) ---
+{override_line}
+  # --enable-auto-tool-choice --tool-call-parser {tool_hint}   # uncomment if the model does tools
+  # --reasoning-parser {reason_hint}                            # uncomment if the model reasons
 )
 # Optional env passed into the container, e.g. VLLM_ENV=( "VLLM_ATTENTION_BACKEND=TRITON_ATTN" )
 VLLM_ENV=()
 """)
     out.chmod(0o755)
+    write_model_card(out_dir, args.model, org, name, revision, sampling)
     print(out.relative_to(REPO_ROOT))
 
 
