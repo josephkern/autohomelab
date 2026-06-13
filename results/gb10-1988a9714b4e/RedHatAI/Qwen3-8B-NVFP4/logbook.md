@@ -109,4 +109,14 @@ at c16/8192), `--enable-prefix-caching` (synthetic prompts have no shared prefix
 a c32 objective, not c16. Revised queue: async-scheduling → attention-backend FLASHINFER (isolate
 the backend from kv-dtype) → image bump (cu130-nightly; may also fix the fp8-KV crash).
 
+### 20260613 — exp #3: async-scheduling (DISCARD, no effect)
+
+Delta vs native-FP4 base: `+ --async-scheduling`. Median c16=497.2 (runs 473.1/497.2/504.3) vs
+base 496.8 (473.4/496.8/501.0) → **+0.09%**, indistinguishable. **Verdict: DISCARD** (simpler-is-
+better tiebreak; base keeps native-FP4). c1 38.7 (≈ base, within noise).
+
+**Noise floor:** both configs' c16 runs span ~473–504 ≈ **±3%** at N=3. So the keep threshold (>3%)
+sits right at the noise floor — small gains need more N or a bigger effect to confirm. native-FP4's
++6.4% over baseline cleared it (real); async-scheduling's 0.09% did not.
+
 <!-- YYYYMMDD: what changed, tok/s effect, keep/discard, anomalies. Run drop_caches before each. -->
