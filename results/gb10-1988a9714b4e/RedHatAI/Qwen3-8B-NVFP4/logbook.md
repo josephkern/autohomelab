@@ -40,4 +40,18 @@ Calibration: NVIDIA-official Llama-3.1-8B NVFP4 decode ~38.7 tok/s @ b=1; expect
 
 ## Sessions
 
+### 20260613 — baseline bring-up + first hang
+
+- Harness validated end-to-end (30s/stage): Marlin path confirmed (`MarlinNvFp4LinearKernel`,
+  compressed-tensors auto, FLASH_ATTN, KV auto→bf16, util 0.5 → 51.2 GiB / 372k tok). Validation
+  tok/s c1≈42 / c4≈145 / c8≈250 / c16≈358 / c32≈426 — c1 matches NVIDIA's ≈38.7 calibration.
+- **CRASH (status=crash):** the full N=3 / 180s-per-stage run **deadlocked at the c32 stage** of
+  pass 1. Engine went from 444 tok/s @ 32 reqs to **0.0 tok/s with 32 reqs stuck (Waiting:0)**,
+  GPU wedged at 96% util / 15 W for ~29 min, no further logs. GuideLLM writes JSON only at the
+  end, so c1–c16 (which ran fine) were lost with the pass. **Recovery:** `adapter down` removed
+  the container and the GPU returned to idle immediately — no reboot needed.
+- Implication: sustained 32-concurrency NVFP4/Marlin decode is unstable on this image; c32 (a
+  required level) needs a config that survives it (lower max-num-seqs, alt backend) — and the
+  harness needs a watchdog so a hang is a logged `crash`, not a 40-min stall. See next steps.
+
 <!-- YYYYMMDD: what changed, tok/s effect, keep/discard, anomalies. Run drop_caches before each. -->
