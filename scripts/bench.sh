@@ -138,7 +138,11 @@ run_shape() {
   emit_row "$run_id" "$shape_tag" "$data_rel" "$status" "$notes" "$peak" \
     "${tps[0]}" "${tps[1]}" "${tps[2]}" "${tps[3]}" "${tps[4]}"
   echo "  $shape -> c1=${tps[0]} c4=${tps[1]} c8=${tps[2]} c16=${tps[3]} c32=${tps[4]}  [$status]" >&2
-  [ "$crashed" = 1 ] && { "$ADAPTER" down || true; return 3; }
+  if [ "$crashed" = 1 ]; then
+    docker logs "$CONTAINER" >"$bundle/vllm_crash.log" 2>&1 || true   # preserve engine error before teardown
+    echo "  saved engine logs -> $(realpath --relative-to="$REPO_ROOT" "$bundle")/vllm_crash.log" >&2
+    "$ADAPTER" down || true; return 3
+  fi
   return 0
 }
 

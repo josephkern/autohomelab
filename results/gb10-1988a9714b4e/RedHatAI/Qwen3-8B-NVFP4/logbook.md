@@ -94,4 +94,19 @@ Harness hardening this session (reproducibility controls): pinned GuideLLM `--ra
 (paired prompts across configs), added `max_s`+`seed` columns, and a GPU power/temp sidecar
 (`gpu_metrics.csv` per bundle; `thermal=<maxT>C/<avgW>W` in notes).
 
+### 20260613 — exp #2: kv-cache fp8_e4m3 (DISCARD, crash)
+
+Delta vs native-FP4 base: `+ --kv-cache-dtype fp8_e4m3`. c1 ran (39.0) then **c16 deadlocked**
+(watchdog hang@c16; thermal 71C/26W → not thermal, a genuine engine wedge). Same hang family as
+the old c32 sweep. fp8 KV forces a non-FlashAttention backend on sm_121, and that combo + native
+FP4 GEMM wedges under concurrency on v0.22.0. **Verdict: DISCARD.** Best stays native-FP4 (c16=496.8).
+Harness fix from this: bench.sh now dumps `docker logs` → `vllm_crash.log` in the bundle before
+teardown (the engine error was previously lost).
+
+**Queue note (objective = c16):** skipping knobs that don't bind at 16 concurrency on this box —
+`--max-num-seqs` (vLLM default ≥16 already > 16), `--gpu-memory-utilization` raise (KV only ~5% used
+at c16/8192), `--enable-prefix-caching` (synthetic prompts have no shared prefix). These matter for
+a c32 objective, not c16. Revised queue: async-scheduling → attention-backend FLASHINFER (isolate
+the backend from kv-dtype) → image bump (cu130-nightly; may also fix the fp8-KV crash).
+
 <!-- YYYYMMDD: what changed, tok/s effect, keep/discard, anomalies. Run drop_caches before each. -->
