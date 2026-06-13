@@ -23,7 +23,7 @@ for q in NVFP4 MXFP4 FP8 FP4 INT8 INT4 AWQ GPTQ W8A8 W4A16; do
   case "$LEAF" in *-"$q") QUANT="$q"; BASE="${LEAF%-$q}"; break ;; esac
 done
 # vLLM minor version from the runbook's image comment (e.g. "v0.22.0" -> 22), override with VLLM_TAG
-VV="$(grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' "$SRC" | head -1 | sed 's/^v//')"
+VV="$(grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' "$SRC" | head -1 | sed 's/^v//' || true)"
 VMINOR="${VLLM_TAG:-$(printf '%s' "$VV" | cut -d. -f2)}"; : "${VMINOR:=XX}"
 NAME="VLLM-${VMINOR}-${ORG}_${BASE}"; [ -n "$QUANT" ] && NAME="${NAME}_${QUANT}"
 OUT="$(dirname "$SRC")/${NAME}_final.sh"

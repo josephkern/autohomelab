@@ -146,4 +146,28 @@ Marlin W4A16) was the single real lever; everything else was noise (async-sched,
 crash (fp8 KV). Single-flag c16 space exhausted on v0.22.0; next signal would need a newer pinned
 release or the research-loop candidate queue.
 
+### 20260613 — vLLM 0.23.0 transition: re-baselined + first FULLY-VALIDATED final
+
+Transitioned to vLLM **0.23.0** (pinned digest 6d8429e, default). Re-baselined the 8B (native NVFP4
+W4A4 auto + functional flags: `--reasoning-parser qwen3`, sampling temp0.6/top_p0.95/top_k20).
+**All three gates pass** → promoted `VLLM-23-RedHatAI_Qwen3-8B_NVFP4_final.sh`.
+
+| metric | 0.22.0 native-FP4 | 0.23.0 baseline |
+|---|---|---|
+| smoke (functional) | n/a | **PASS 3/3** |
+| gsm8k / mmlu (LIMIT=100) | 87.0 / 73.49 | **91.0 / 73.61** (within noise) |
+| chat c16 / c32 tok/s | 486.7 / 745.7 | **497.0 / 770.8** (+2.1% / +3.4%) |
+
+0.23.0 is modestly faster (c32 real +3.4%, c16 noise) and quality-preserved. Accuracy uses
+`/v1/completions` (unaffected by chat parser).
+
+**smoke.sh bug found & fixed:** initial smoke FAILED 0/3 on 0.23.0 — not a serve problem. With
+`--reasoning-parser qwen3`, a reasoning model truncated at small `max_tokens` returns empty content.
+Fixed smoke to be reasoning-aware: generous `max_tokens` (1024), accept content OR reasoning_content,
+and the reasoning check now asserts **no `<think>` leak into content** (the real regression to catch).
+Re-smoke → 3/3. Also fixed promote.sh (pipefail on version-grep miss; pass `VLLM_TAG`).
+
+Next (held queue, now on 0.23.0): does `auto` pick b12x? re-test `--kv-cache-dtype fp8_e4m3`
+(0.23.0 FP8/KV fixes — crashed on 0.22.0); `--max-num-batched-tokens 16384`.
+
 <!-- YYYYMMDD: what changed, tok/s effect, keep/discard, anomalies. Run drop_caches before each. -->

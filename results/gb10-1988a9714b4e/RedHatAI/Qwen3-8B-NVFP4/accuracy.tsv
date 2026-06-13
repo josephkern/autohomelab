@@ -1,2 +1,3 @@
 run_id	commit	node_fp	model	config_hash	script	suite	tasks	limit	scores	data
 20260613-174116-eval	c1f69bf	gb10-1988a9714b4e	RedHatAI/Qwen3-8B-NVFP4	4cc6873b	runbooks/RedHatAI/Qwen3-8B-NVFP4/VLLM-22-RedHatAI_Qwen3-8B_NVFP4_final.sh	general	gsm8k,mmlu	100	gsm8k=87.0;mmlu=73.49	results/gb10-1988a9714b4e/RedHatAI/Qwen3-8B-NVFP4/data/20260613-174116-eval
+20260613-180001-eval	429df50	gb10-1988a9714b4e	RedHatAI/Qwen3-8B-NVFP4	979bdb65	runbooks/RedHatAI/Qwen3-8B-NVFP4/baseline.sh	general	gsm8k,mmlu	100	gsm8k=91.0;mmlu=73.61	results/gb10-1988a9714b4e/RedHatAI/Qwen3-8B-NVFP4/data/20260613-180001-eval
