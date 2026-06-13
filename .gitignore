@@ -17,3 +17,4 @@ source/*
 # OS / editor
 .DS_Store
 *.swp
+.ahl_serve_state
