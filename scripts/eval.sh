@@ -48,21 +48,22 @@ uv run --project "$REPO_ROOT" lm_eval --model local-completions \
 
 # lm_eval writes results_*.json under the output dir; extract the headline metric per task.
 RESJSON="$(find "$BUNDLE" -name 'results_*.json' | head -1)"
-SCORES="$(python3 - "$RESJSON" <<'PY'
-import sys, json, glob
-f = sys.argv[1]
+SCORES="$(python3 - "$RESJSON" "$TASKS" <<'PY'
+import sys, json
+f, tasks = sys.argv[1], set(sys.argv[2].split(","))
 try: d = json.load(open(f))
 except Exception: print("na"); sys.exit()
 out = []
+# Record only the requested top-level tasks/groups (gsm8k, mmlu, ...) — not the 57 mmlu_* subtasks
+# (full per-subtask detail stays in the raw lm-eval json in the bundle).
 for task, m in (d.get("results") or {}).items():
-    # prefer accuracy-like metrics
+    if task not in tasks: continue
     for k in ("exact_match,strict-match","exact_match,flexible-extract","acc,none","pass@1,none","acc","pass@1"):
         if k in m: out.append(f"{task}={round(m[k]*100,2)}"); break
     else:
         nums = {k:v for k,v in m.items() if isinstance(v,(int,float)) and "stderr" not in k}
-        if nums:
-            k = next(iter(nums)); out.append(f"{task}={round(nums[k]*100,2)}")
-print(";".join(out) or "na")
+        if nums: out.append(f"{task}={round(next(iter(nums.values()))*100,2)}")
+print(";".join(sorted(out)) or "na")
 PY
 )"
 DATA_REL="$(realpath --relative-to="$REPO_ROOT" "$BUNDLE")"
