@@ -66,6 +66,12 @@ run the full `1,4,8,16,32` periodically to confirm c16 stays representative.
    regress / didn't crash) → that variant is the new base for the next change. Else **discard**
    (leave it in the tree as a recorded negative). Either way **continue — do not pause to ask.**
 
+## Finalizing a campaign
+
+When a model's tuning is done, promote the winner: `scripts/promote.sh <best_tuned.sh> "<result>"`
+→ `<...>_final.sh` (the canonical config to serve). Keep all `*_tuned.sh` artifacts. Record the
+final curve in `logbook.md`.
+
 ## Output & logging
 
 `run_experiment.sh` writes N `results.tsv` rows tagged `notes: exp=<id>` (raw status `measured`,
