@@ -33,6 +33,17 @@ Tunable dimensions:
 **All else equal, simpler is better.** A change must earn its complexity with a real tok/s gain.
 The model, request distribution, and the GuideLLM sweep are the controlled variables.
 
+## Knowing the option space (don't rely on memory)
+
+vLLM moves fast — enumerate features from the image, never from recall:
+- `scripts/capabilities.sh [image]` snapshots `vllm serve --help=all` + the choice-lists for
+  `--linear-backend`/`--moe-backend`/`--attention-backend`/`--kv-cache-dtype`/… + `vllm.envs`
+  names → `backends/vllm/capabilities/<ver>.txt`. Candidate backends come from THESE lists.
+- New features need a newer image (a tuning dimension): pin a newer digest in the registry,
+  re-run `capabilities.sh`, and **diff** the snapshots — new flags/choices become experiments.
+- Watch `source/vllm` (gitignored clone) commits/releases for sm_121/NVFP4 work; vet non-obvious
+  additions with a research agent before adopting.
+
 ## Objective & metric
 
 Maximize **median c16 tok/s** (the bulk operating point that responds to the throughput knobs).
