@@ -46,10 +46,16 @@ vLLM moves fast — enumerate features from the image, never from recall:
 
 ## Objective & metric
 
-Maximize **median c16 tok/s** (the bulk operating point that responds to the throughput knobs).
-**c1 is a sentinel only** — it catches crashes/GEMM-path regressions and gives the latency number,
-but is insensitive to batching knobs, so never optimize on it. Routine matrix `LEVELS_SET=1,16`;
-run the full `1,4,8,16,32` periodically to confirm c16 stays representative.
+Goal: a **validated, optimized serve config** — maximize **median c16 tok/s** *subject to* two
+gates (see docs/validation.md): **functional** (`scripts/smoke.sh` passes) and **quality**
+(`scripts/eval.sh` within ~1% of the reference). A throughput win that fails smoke or drops accuracy
+is a **loss**, not a keep.
+
+- **Throughput:** median c16 (bulk objective); **c1 is a sentinel only** (insensitive to batching
+  knobs — never optimize on it). Routine matrix `LEVELS_SET=1,16`; full `1,4,8,16,32` periodically.
+- **Quality is OUTER-loop:** tune on tok/s; quality-gate only the throughput winner + any
+  quality-risky flag (kv-cache-dtype, quantization, GEMM backend). `LIMIT`-sampled in-loop, full run
+  for the final report. Most perf flags can't change outputs → no eval needed.
 
 ## The experiment loop
 
@@ -68,9 +74,11 @@ run the full `1,4,8,16,32` periodically to confirm c16 stays representative.
 
 ## Finalizing a campaign
 
-When a model's tuning is done, promote the winner: `scripts/promote.sh <best_tuned.sh> "<result>"`
-→ `<...>_final.sh` (the canonical config to serve). Keep all `*_tuned.sh` artifacts. Record the
-final curve in `logbook.md`.
+When a model's tuning is done, **fully validate the winner before promoting**: full `scripts/eval.sh`
+(quality within tolerance) + `scripts/smoke.sh` (functional) + full-sweep throughput. Only then
+`scripts/promote.sh <best_tuned.sh> "<result>"` → `<...>_final.sh` (the canonical, validated config
+to serve). Keep all `*_tuned.sh` artifacts. Record the validation report (serves ✓ / smoke ✓ /
+accuracy {scores} / throughput curve) in `logbook.md`.
 
 ## Output & logging
 

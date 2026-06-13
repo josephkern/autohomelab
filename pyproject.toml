@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "guidellm",          # benchmark driver — exact version pinned in uv.lock
     "huggingface-hub",   # model downloads (also used via `uvx hf`)
+    "lm-eval[api]>=0.4.12",
 ]
 
 # Exact versions are pinned in uv.lock (project rule: reproducibility first).
