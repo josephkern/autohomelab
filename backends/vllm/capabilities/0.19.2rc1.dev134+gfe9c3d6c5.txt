@@ -1,0 +1,5 @@
+# vLLM capability snapshot
+image:   vllm/vllm-openai@sha256:3dbe092ec5b2cef63b6104d33fa75d6ce53a7870962529ada69f78bbbc38e776
+version: 0.19.2rc1.dev134+gfe9c3d6c5
+
+## Key multi-choice knobs (the loop's option space) ###############################
