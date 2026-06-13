@@ -119,4 +119,13 @@ better tiebreak; base keeps native-FP4). c1 38.7 (≈ base, within noise).
 sits right at the noise floor — small gains need more N or a bigger effect to confirm. native-FP4's
 +6.4% over baseline cleared it (real); async-scheduling's 0.09% did not.
 
+### 20260613 — exp #4: attention-backend FLASHINFER (borderline, DISCARD)
+
+Delta vs native-FP4 base: `+ --attention-backend FLASHINFER` (was auto→FLASH_ATTN, bf16 KV).
+Median c16=506.6 (479.4/506.6/507.5) vs base 496.8 → **+2.0%**, below the 3% threshold and within
+the ±3% noise band (runs overlap). **Verdict: DISCARD** (don't lock in noise), but flagged to
+**revisit** with the image bump — it's the top median and 2/3 runs beat the base's best.
+**Diagnostic (conclusive):** FLASHINFER + bf16 KV ran clean → exp#2's crash was the **fp8 KV
+dtype**, not the attention backend.
+
 <!-- YYYYMMDD: what changed, tok/s effect, keep/discard, anomalies. Run drop_caches before each. -->
