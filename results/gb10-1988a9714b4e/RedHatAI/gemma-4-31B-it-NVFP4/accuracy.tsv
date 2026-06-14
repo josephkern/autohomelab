@@ -1,0 +1,3 @@
+run_id	commit	node_fp	model	config_hash	script	suite	tasks	limit	scores	data
+20260614-202120-eval	940f9d0	gb10-1988a9714b4e	RedHatAI/gemma-4-31B-it-NVFP4	63cf94ed	runbooks/RedHatAI/gemma-4-31B-it-NVFP4/baseline.sh	general	gsm8k,mmlu	100	gsm8k=73.0;mmlu=41.19	results/gb10-1988a9714b4e/RedHatAI/gemma-4-31B-it-NVFP4/data/20260614-202120-eval
+20260614-220824-eval	ea1924f	gb10-1988a9714b4e	RedHatAI/gemma-4-31B-it-NVFP4	63cf94ed	runbooks/RedHatAI/gemma-4-31B-it-NVFP4/baseline.sh	resistant	mmlu_pro	100	mmlu_pro=48.36	results/gb10-1988a9714b4e/RedHatAI/gemma-4-31B-it-NVFP4/data/20260614-220824-eval

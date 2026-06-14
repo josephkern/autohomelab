@@ -61,10 +61,13 @@ out = []
 # (full per-subtask detail stays in the raw lm-eval json in the bundle).
 for task, m in (d.get("results") or {}).items():
     if task not in tasks: continue
-    for k in ("exact_match,strict-match","exact_match,flexible-extract","acc,none","pass@1,none","acc","pass@1"):
+    for k in ("exact_match,strict-match","exact_match,flexible-extract","exact_match,custom-extract",
+              "acc,none","acc_norm,none","pass@1,none","acc","pass@1"):
         if k in m: out.append(f"{task}={round(m[k]*100,2)}"); break
     else:
-        nums = {k:v for k,v in m.items() if isinstance(v,(int,float)) and "stderr" not in k}
+        # fallback: first real accuracy metric — skip bookkeeping fields (sample_len, alias, etc.)
+        SKIP = {"sample_len", "samples"}
+        nums = {k:v for k,v in m.items() if isinstance(v,(int,float)) and "stderr" not in k and k not in SKIP}
         if nums: out.append(f"{task}={round(next(iter(nums.values()))*100,2)}")
 print(";".join(sorted(out)) or "na")
 PY
