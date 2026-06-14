@@ -29,12 +29,18 @@ Parameters (set once up front):
    tool-call parser, sampling). `uv run scripts/kv_calc.py $MODEL` to sanity-check footprint vs the
    (unified) pool.
 
-## 1. Baseline validation — the three gates
-1. `scripts/serve.sh <baseline.sh>` → `scripts/smoke.sh <baseline.sh>`  (Gate 1: functional).
-2. `scripts/eval.sh <baseline.sh>` (Gate 2: quality) — record the reference scores; compare to the
-   model card's recovery numbers.
-3. `LEVELS_SET=1,4,8,16,32 scripts/bench.sh <baseline.sh> chat` (Gate 3: throughput, full curve);
-   then `scripts/serve.sh down`.
+## 1. Baseline validation — the STANDARD SUITE (all three gates, one serve)
+Run the standard test suite — it serves once and runs every gate against the live endpoint, then
+tears down (see AGENTS.md → "Standard test suite"):
+
+```
+scripts/suite.sh <baseline.sh>
+```
+
+This runs **Gate 1** smoke (functional 4-check), **Gate 2** eval `general` (gsm8k+mmlu reference) +
+`resistant` (mmlu_pro, gpqa_diamond, tier 2), and **Gate 3** full `1,4,8,16,32` throughput sweep in
+**both** `chat(512/256)` and `coder(4096/1024)` shapes. It appends results.tsv + accuracy.tsv rows
+and writes `SUITE-<cfg>.md`. Record the reference scores; compare to the model card's recovery.
 
 This validated baseline is the first **keep** / current best.
 
@@ -54,10 +60,13 @@ leave overnight (invariants in AGENTS.md → "Unattended"); it records keep/disc
 auto-promote**.
 
 ## 3. Finalize
-1. On the winner: `scripts/validate.sh <winner>` (serve → smoke → FULL eval → `VALIDATION-*.md`) +
-   a full-sweep throughput run. Promote **only if** smoke PASS and accuracy within ~1% of reference.
+1. On the winner, run the standard suite at FULL eval (serve → smoke → full general+resistant eval
+   → both-shape full sweep → `SUITE-<cfg>.md`): `FULL=1 scripts/suite.sh <winner>`. Promote **only
+   if** smoke PASS and accuracy within ~1% of reference. (If the winner is serving-identical to the
+   already-suited baseline, the baseline's suite stands — note the equivalence instead of re-running.)
 2. `scripts/promote.sh <winner> "<result>"` → `VLLM-<minor>-<org>_<base>_<quant>_final.sh`
-   (the canonical serve config; `*_tuned.sh` artifacts kept).
+   (the canonical serve config; `*_tuned.sh` artifacts kept). **Pass `VLLM_TAG=<minor>`** if the
+   runbook text contains an off-version string (e.g. a migration comment) — see AGENTS.md follow-up.
 3. Record the validation report + a session entry in
    `results/<node_fp>/<org>/<model>/logbook.md` (with the environment block, AGENTS rule #3).
 

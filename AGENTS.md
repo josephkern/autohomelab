@@ -87,6 +87,26 @@ tps_c1  tps_c4  tps_c8  tps_c16  tps_c32  peak_gb  status  notes  data
 - `peak_gb` may be `na` on unified-memory nodes (nvidia-smi can't report it).
 - `scripts/aggregate.py` concatenates all `results.tsv` for cross-node comparison.
 
+## Standard test suite
+
+The canonical battery a model must pass, run by **`scripts/suite.sh <runbook>`** (one serve session,
+load amortized; tears down at the end; writes `SUITE-<cfg>.md` + results.tsv/accuracy.tsv rows). Run
+it at **baseline** (program.md §1) and at **finalize** (`FULL=1 scripts/suite.sh <winner>`, §3). The
+tuning **loop stays lean** (chat c1/c16, N=3 via `run_experiment.sh`) — never run the full suite
+per-candidate.
+
+- **Gate 1 — works** (`smoke.sh`): functional 4-check (chat / JSON / tool-call / reasoning routing).
+- **Gate 2 — good** (`eval.sh`): `general` (gsm8k, mmlu — the in-loop quality reference) **and**
+  `resistant` (mmlu_pro, gpqa_diamond — harder/less-memorized, tier 2). `LIMIT=100` for the in-loop
+  reference; `FULL=1` (no cap) at finalize. Tier-3 time-gated (`eval_live.sh` / LiveBench) and a
+  tier-4 private held-out set remain opt-in (not in the standard suite yet — see follow-ups).
+- **Gate 3 — fast** (`bench.sh`): full `1,4,8,16,32` GuideLLM sweep in **both** throughput shapes —
+  `chat(512/256)` (the tuning objective, median c16) **and** `coder(4096/1024)` (long-context
+  characterization). Per-level isolation + watchdog (crash-safe); suite re-serves if a wedge tore
+  the container down.
+
+Suite knobs: `FULL`, `LIMIT`, `LEVELS_SET`, `SHAPES`, `MAX_SECONDS` (defaults in the script header).
+
 ## Hardware notes
 
 - `docs/hardware/<platform>.md` — the **platform-family** reference, shared across nodes of that
@@ -126,9 +146,9 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
   models (Qwen3-Coder, Nemotron).
 - [x] **Capability snapshot** — done: `backends/vllm/capabilities/0.22.0.txt` (+ caught
   cu130-nightly = 0.19.2-dev). The research loop now supersedes hand-picking from choice-lists.
-- [ ] **Add the `resistant` eval suite to `eval.sh`** — GPQA + MMLU-Pro task names (harder/cleaner,
-  less-memorized than MMLU; tier 2 in docs/validation.md). Deferred only because eval.sh was running
-  the finalization; apply once free. (Tier 3 time-gated gold is `scripts/eval_live.sh` / LiveBench.)
+- [x] **Add the `resistant` eval suite to `eval.sh`** — done: `resistant` = `mmlu_pro,gpqa_diamond`
+  (tier 2). Now part of the **standard test suite** (`scripts/suite.sh`, run at baseline + finalize).
+  (Tier 3 time-gated gold is `scripts/eval_live.sh` / LiveBench — still opt-in, not in the suite yet.)
 - [ ] **Build a small PRIVATE held-out eval** (tier 4) — authored by us, never published; the only
   fully-uncontaminated signal for promotion decisions.
 - [ ] **eval.sh should pin greedy (temperature 0) for eval** — the runbook's serving
