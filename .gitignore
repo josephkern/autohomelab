@@ -21,3 +21,6 @@ source/*
 .ahl_exp_serve.log
 .ahl_*.log
 *~
+
+# agent run logs
+.ahl_logs/
