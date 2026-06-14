@@ -20,3 +20,4 @@ source/*
 .ahl_serve_state
 .ahl_exp_serve.log
 .ahl_*.log
+*~
