@@ -29,8 +29,8 @@ VLLM_FLAGS=(
   --enable-auto-tool-choice
   --tool-call-parser gemma4        # HF card: function calling via the gemma4 parser
   --reasoning-parser gemma4        # HF card: thinking/reasoning mode via the gemma4 parser
-  --limit-mm-per-prompt image=0    # TEXT-ONLY benchmark: Gemma4ForConditionalGeneration is multimodal;
-                                   # the card's tip — skip the vision encoder's memory allocation
+  --limit-mm-per-prompt '{"image":0}'   # TEXT-ONLY benchmark: Gemma4ForConditionalGeneration is
+                                   # multimodal; card's tip (JSON form on 0.23.0) — skip vision encoder mem
 )
 # Optional env passed into the container, e.g. VLLM_ENV=( "VLLM_ATTENTION_BACKEND=TRITON_ATTN" )
 VLLM_ENV=()
