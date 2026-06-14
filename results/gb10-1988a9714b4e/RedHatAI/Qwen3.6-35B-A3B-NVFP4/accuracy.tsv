@@ -1,3 +1,4 @@
 run_id	commit	node_fp	model	config_hash	script	suite	tasks	limit	scores	data
 20260614-091052-eval	8f05f57	gb10-1988a9714b4e	RedHatAI/Qwen3.6-35B-A3B-NVFP4	06993b59	runbooks/RedHatAI/Qwen3.6-35B-A3B-NVFP4/baseline.sh	general	gsm8k,mmlu	100	gsm8k=42.0;mmlu=78.19	results/gb10-1988a9714b4e/RedHatAI/Qwen3.6-35B-A3B-NVFP4/data/20260614-091052-eval
 20260614-103722-eval	5c828cf	gb10-1988a9714b4e	RedHatAI/Qwen3.6-35B-A3B-NVFP4	702e9772	runbooks/RedHatAI/Qwen3.6-35B-A3B-NVFP4/20260614_moe-auto_tuned.sh	general	mmlu	100	mmlu=78.44	results/gb10-1988a9714b4e/RedHatAI/Qwen3.6-35B-A3B-NVFP4/data/20260614-103722-eval
+20260614-124729-eval	baf15e7	gb10-1988a9714b4e	RedHatAI/Qwen3.6-35B-A3B-NVFP4	2f4bbd67	runbooks/RedHatAI/Qwen3.6-35B-A3B-NVFP4/VLLM-23-RedHatAI_Qwen3.6-35B-A3B_NVFP4_final.sh	general	mmlu	100	mmlu=77.6	results/gb10-1988a9714b4e/RedHatAI/Qwen3.6-35B-A3B-NVFP4/data/20260614-124729-eval

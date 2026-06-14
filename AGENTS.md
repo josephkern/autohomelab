@@ -107,6 +107,11 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
 
 ## Pending follow-ups
 
+- [ ] **`promote.sh` version-derivation bug** — it sets the `VLLM-<minor>` name by grepping the
+  *first* `vX.Y.Z` in the runbook text, which catches migration-comment lines (e.g. a baseline header
+  saying `image v0.22.0 -> v0.23.0` yields `VLLM-22-…` on a 0.23.0 config). Workaround: pass
+  `VLLM_TAG=<minor>` (used `VLLM_TAG=23` for the 35B promote). Fix: derive from the pinned
+  `VLLM_IMAGE` digest via the `image.lock` catalog, or grep only the `VLLM_IMAGE=` line's comment.
 - [ ] **NEXT LAB RUN → vLLM 0.23.0.** Released ~2026-06-12 (≈17h before 2026-06-13), a proper
   *release* (not a nightly) → the legitimate image bump. At transition: pull `vllm/vllm-openai`
   0.23.0, **pin by `sha256:` digest** in `image.lock`, `scripts/capabilities.sh` to verify the
