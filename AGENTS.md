@@ -97,9 +97,13 @@ per-candidate.
 
 - **Gate 1 — works** (`smoke.sh`): functional 4-check (chat / JSON / tool-call / reasoning routing).
 - **Gate 2 — good** (`eval.sh`): `general` (gsm8k, mmlu — the in-loop quality reference) **and**
-  `resistant` (mmlu_pro, gpqa_diamond — harder/less-memorized, tier 2). `LIMIT=100` for the in-loop
-  reference; `FULL=1` (no cap) at finalize. Tier-3 time-gated (`eval_live.sh` / LiveBench) and a
-  tier-4 private held-out set remain opt-in (not in the standard suite yet — see follow-ups).
+  `resistant` (default **`mmlu_pro`**, harder/less-memorized, tier 2). `gpqa_diamond_zeroshot` is a
+  **gated** HF dataset (`Idavidrein/gpqa`) — request access, then opt in with
+  `TASKS=mmlu_pro,gpqa_diamond_zeroshot`. `LIMIT=100` for the in-loop reference; `FULL=1` (no cap) at
+  finalize. Tier-3 time-gated (`eval_live.sh` / LiveBench) and a tier-4 private held-out set remain
+  opt-in (not in the standard suite yet — see follow-ups). **Caveat:** standard `mmlu` is
+  *loglikelihood*-scored and can be unreliable for some archs (Gemma-4 scored ~41 — BOS/prefix-LM/
+  logit-softcapping); cross-check with the *generative* gsm8k + mmlu_pro before trusting it as a gate.
 - **Gate 3 — fast** (`bench.sh`): full `1,4,8,16,32` GuideLLM sweep in **both** throughput shapes —
   `chat(512/256)` (the tuning objective, median c16) **and** `coder(4096/1024)` (long-context
   characterization). Per-level isolation + watchdog (crash-safe); suite re-serves if a wedge tore
@@ -146,9 +150,17 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
   models (Qwen3-Coder, Nemotron).
 - [x] **Capability snapshot** — done: `backends/vllm/capabilities/0.22.0.txt` (+ caught
   cu130-nightly = 0.19.2-dev). The research loop now supersedes hand-picking from choice-lists.
-- [x] **Add the `resistant` eval suite to `eval.sh`** — done: `resistant` = `mmlu_pro,gpqa_diamond`
-  (tier 2). Now part of the **standard test suite** (`scripts/suite.sh`, run at baseline + finalize).
+- [x] **Add the `resistant` eval suite to `eval.sh`** — done: `resistant` defaults to **`mmlu_pro`**
+  (tier 2, open). Now part of the **standard test suite** (`scripts/suite.sh`, baseline + finalize).
   (Tier 3 time-gated gold is `scripts/eval_live.sh` / LiveBench — still opt-in, not in the suite yet.)
+- [ ] **Request HF access to `Idavidrein/gpqa`** (gated) to fold `gpqa_diamond_zeroshot` back into the
+  `resistant` suite (`TASKS=mmlu_pro,gpqa_diamond_zeroshot`). Dropped from the default because the
+  gating error aborts the whole lm-eval call. Graduate-level, very contamination-resistant — worth it.
+- [ ] **Standard `mmlu` loglikelihood unreliable on some archs** — Gemma-4-31B scored mmlu=41 (vs
+  gsm8k=73 healthy, smoke OK), pointing at a loglikelihood-path issue (Gemma BOS sensitivity /
+  prefix-LM bidirectional attention / `final_logit_softcapping` on NVFP4). Decide per-model whether
+  the quality gate uses mmlu (loglikelihood) or pivots to gsm8k + mmlu_pro (generative). Tie-in with
+  the greedy-eval follow-up below.
 - [ ] **Build a small PRIVATE held-out eval** (tier 4) — authored by us, never published; the only
   fully-uncontaminated signal for promotion decisions.
 - [ ] **eval.sh should pin greedy (temperature 0) for eval** — the runbook's serving

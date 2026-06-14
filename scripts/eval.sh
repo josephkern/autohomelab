@@ -29,7 +29,9 @@ fi
 case "$SUITE" in
   general)   TASKS="${TASKS:-gsm8k,mmlu}"; CODE_ARGS=() ;;
   coder)     TASKS="${TASKS:-humaneval,mbpp}"; export HF_ALLOW_CODE_EVAL=1; CODE_ARGS=(--confirm_run_unsafe_code) ;;
-  resistant) TASKS="${TASKS:-gpqa_diamond_zeroshot,mmlu_pro}"; CODE_ARGS=() ;;  # harder/cleaner, less-memorized (tier 2)
+  resistant) TASKS="${TASKS:-mmlu_pro}"; CODE_ARGS=() ;;  # tier 2 harder/cleaner. mmlu_pro is OPEN;
+             # gpqa_diamond_zeroshot is a GATED HF dataset — request access, then opt in with
+             # TASKS=mmlu_pro,gpqa_diamond_zeroshot (one gated task otherwise aborts the whole call).
   *) echo "unknown suite $SUITE (general|coder|resistant)" >&2; exit 2 ;;
 esac
 
