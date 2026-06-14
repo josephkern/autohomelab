@@ -54,11 +54,17 @@ def main() -> None:
     args = ap.parse_args()
 
     cfg, weight_bytes = fetch(args.model)
-    layers = cfg["num_hidden_layers"]
-    n_heads = cfg["num_attention_heads"]
-    kv_heads = cfg.get("num_key_value_heads", n_heads)
-    head_dim = cfg.get("head_dim") or cfg["hidden_size"] // n_heads
-    native_ctx = cfg.get("max_position_embeddings", 0)
+    arch = cfg.get("text_config", cfg)   # MoE/VL configs nest the LM arch under text_config
+    layers = arch["num_hidden_layers"]
+    n_heads = arch["num_attention_heads"]
+    kv_heads = arch.get("num_key_value_heads", n_heads)
+    head_dim = arch.get("head_dim") or arch["hidden_size"] // n_heads
+    native_ctx = arch.get("max_position_embeddings", 0)
+    # NOTE: hybrid-attention models (linear/mamba layers, e.g. layer_types present) don't keep a
+    # full KV cache on every layer — this estimate treats all layers as full-attention, so it's an
+    # UPPER BOUND for such models.
+    if "layer_types" in arch:
+        print("(hybrid attention detected — KV is an over-estimate)")
     context = args.context or native_ctx
     kv_b = DTYPE_BYTES[args.kv_dtype]
     pool = args.pool_gb or pool_from_node_profile() or 128.0
