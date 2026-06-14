@@ -121,6 +121,11 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
   models (Qwen3-Coder, Nemotron).
 - [x] **Capability snapshot** — done: `backends/vllm/capabilities/0.22.0.txt` (+ caught
   cu130-nightly = 0.19.2-dev). The research loop now supersedes hand-picking from choice-lists.
+- [ ] **Add the `resistant` eval suite to `eval.sh`** — GPQA + MMLU-Pro task names (harder/cleaner,
+  less-memorized than MMLU; tier 2 in docs/validation.md). Deferred only because eval.sh was running
+  the finalization; apply once free. (Tier 3 time-gated gold is `scripts/eval_live.sh` / LiveBench.)
+- [ ] **Build a small PRIVATE held-out eval** (tier 4) — authored by us, never published; the only
+  fully-uncontaminated signal for promotion decisions.
 - [ ] **Passwordless sudo (narrow)** — decide whether to allow `sysctl -w vm.drop_caches=3`
   (unified-memory cache hygiene before a run) and `nvidia-smi --gpu-reset` (recover a wedged GPU
   if `adapter down` ever isn't enough). Currently `drop_caches` is **skipped** (sudo unavailable
