@@ -1,8 +1,16 @@
 # AGENTS.md — operating guide for autohomelab
 
-The contract for any agent (or human) working in this repo. `CLAUDE.md` symlinks here. For the
-autonomous tuning agenda, see [program.md](program.md). The **Lab notes** at the bottom are a
-living log — keep them updated as you learn things.
+The contract for any agent (or human) working in this repo. `CLAUDE.md` symlinks here.
+
+**Separation of concerns:**
+- **This file (AGENTS.md / CLAUDE.md) is the REFERENCE** — rules, architecture, results schema &
+  naming, the gate *definitions*, conventions, hardware/lab notes, pending follow-ups. Ambient
+  knowledge: *how things work, why, and what we've learned*.
+- **[program.md](program.md) is the executable PLAYBOOK** — the step-by-step procedure to run a
+  campaign for a model. To do work: *"read program.md, then execute for `<HFName/HFModel>`."*
+
+Definitions live here; procedure lives there (it references this file rather than restating it).
+The **Lab notes** at the bottom are a living log — keep them updated as you learn things.
 
 ## What this project is
 
