@@ -72,6 +72,25 @@ is a **loss**, not a keep.
    regress / didn't crash) → that variant is the new base for the next change. Else **discard**
    (leave it in the tree as a recorded negative). Either way **continue — do not pause to ask.**
 
+## Unattended operation (this loop is meant to run overnight)
+
+This loop is **designed to run unattended** — give it a queue and let it work while you sleep, the
+way karpathy/autoresearch does. Pattern (see `research/run-queue-<ver>.sh` for a worked example):
+
+- **Driver = an ablation/greedy queue script.** Each candidate = the current best + ONE change,
+  measured (`run_experiment.sh`, N=3, c1 sentinel + c16 objective) vs the best; keep if >~3% and
+  gates pass, else discard. Commit each variant. Write an `OVERNIGHT-<ver>.md` report at the end.
+- **Why it's safe to leave alone:** every run is **smoke-gated** (broken configs fail fast before
+  benchmarking); the **stall-watchdog** kills a hung stage and **auto-tears-down** for recovery;
+  **per-level isolation** preserves completed levels on a crash; **quality-risky** knobs
+  (kv-cache-dtype, quantization, GEMM backend) get an eval; results are durable in
+  `results.tsv` / `accuracy.tsv` so a context reset mid-run is recoverable from disk.
+- **Do NOT auto-promote.** The loop records keep/discard and recommends; **promotion stays a
+  reviewed step** (full validation, then `promote.sh`). Replacing a `_final` is a human/agent call.
+- **Drive it via background jobs + completion notifications** — launch the driver as a tracked
+  background job; you're re-invoked when it finishes and prepare the morning report from the durable
+  artifacts. Set N / LEVELS_SET / MAX_SECONDS and the keep threshold up front.
+
 ## Finalizing a campaign
 
 When a model's tuning is done, **fully validate the winner before promoting**:
