@@ -1,0 +1,2 @@
+run_id	commit	node_fp	model	shape	backend	config_hash	script	load_s	max_s	seed	tps_c1	tps_c4	tps_c8	tps_c16	tps_c32	peak_gb	status	notes	data
+20260614-085507-chat	23da479	gb10-1988a9714b4e	RedHatAI/Qwen3.6-35B-A3B-NVFP4	chat(512/256)	vllm@0.23.0(img:sha256:6d8429e38e37)	06993b59	runbooks/RedHatAI/Qwen3.6-35B-A3B-NVFP4/baseline.sh	336	180	42	56.4	155.61	237.14	340.58	470.69	71.3	measured	0.23.0 35B baseline; thermal=71C/36W	results/gb10-1988a9714b4e/RedHatAI/Qwen3.6-35B-A3B-NVFP4/data/20260614-085507-chat

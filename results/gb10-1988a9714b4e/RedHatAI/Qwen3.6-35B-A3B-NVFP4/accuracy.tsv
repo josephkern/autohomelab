@@ -1,0 +1,2 @@
+run_id	commit	node_fp	model	config_hash	script	suite	tasks	limit	scores	data
+20260614-091052-eval	8f05f57	gb10-1988a9714b4e	RedHatAI/Qwen3.6-35B-A3B-NVFP4	06993b59	runbooks/RedHatAI/Qwen3.6-35B-A3B-NVFP4/baseline.sh	general	gsm8k,mmlu	100	gsm8k=42.0;mmlu=78.19	results/gb10-1988a9714b4e/RedHatAI/Qwen3.6-35B-A3B-NVFP4/data/20260614-091052-eval

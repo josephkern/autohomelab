@@ -126,6 +126,11 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
   the finalization; apply once free. (Tier 3 time-gated gold is `scripts/eval_live.sh` / LiveBench.)
 - [ ] **Build a small PRIVATE held-out eval** (tier 4) — authored by us, never published; the only
   fully-uncontaminated signal for promotion decisions.
+- [ ] **eval.sh should pin greedy (temperature 0) for eval** — the runbook's serving
+  `--override-generation-config` (chat sampling, e.g. temp 1.0 + presence_penalty 1.5) is applied by
+  the server to lm-eval requests too, depressing generative tasks (saw gsm8k=42 on the 35B). Pin
+  eval sampling or strip the override so accuracy isn't config-coupled. Until fixed: trust mmlu
+  (loglikelihood, unaffected) + relative recovery at matched settings.
 - [ ] **Passwordless sudo (narrow)** — decide whether to allow `sysctl -w vm.drop_caches=3`
   (unified-memory cache hygiene before a run) and `nvidia-smi --gpu-reset` (recover a wedged GPU
   if `adapter down` ever isn't enough). Currently `drop_caches` is **skipped** (sudo unavailable
