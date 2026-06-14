@@ -170,4 +170,29 @@ Re-smoke → 3/3. Also fixed promote.sh (pipefail on version-grep miss; pass `VL
 Next (held queue, now on 0.23.0): does `auto` pick b12x? re-test `--kv-cache-dtype fp8_e4m3`
 (0.23.0 FP8/KV fixes — crashed on 0.22.0); `--max-num-batched-tokens 16384`.
 
+### 20260614 — fp8-KV finalized & promoted (the campaign winner)
+
+Overnight 0.23.0 queue → **fp8 KV (`--kv-cache-dtype fp8_e4m3`) is the winner**, the very knob that
+*crashed* at c16 on 0.22.0 (0.23.0's KV/FP8-sm121 fixes un-broke it). Finalized & promoted to
+`VLLM-23-RedHatAI_Qwen3-8B_NVFP4_final.sh`. All three gates:
+
+| gate | result |
+|---|---|
+| functional (smoke) | PASS 3/3 |
+| quality (matched LIMIT=100) | mmlu 73.25 (−0.36, **99.5% recovery**) / gsm8k 92.0 — PASS |
+| throughput | c1=41.9 c4=164.3 c8=309.3 **c16=563.2 (+11%)** **c32=950.6 (+23%)** vs 0.23.0-native |
+
+Full-eval absolute (for record): gsm8k=87.64 / mmlu=70.99 (no matched full reference yet → not a
+recovery number).
+
+**Methodology catch:** my first recovery check compared fp8-KV *full* mmlu (70.99) to a *LIMIT=100*
+reference (73.49) and spuriously "FAILED" — full vs sampled are different question sets. Fixed:
+recovery requires **matched eval settings** (now enforced in `recovery.py` docstring + validation.md).
+The valid matched-L100 comparison passes cleanly.
+
+**Cumulative (Qwen3-8B-NVFP4, GB10):** Marlin 0.22.0 c16 467 → native-FP4 0.22.0 487 → 0.23.0 507 →
+**0.23.0 + fp8 KV 563 (c32 950.6)** = +21% c16 / well over the start at c32, quality intact.
+
+Follow-up: a matched *full* native baseline eval would make the full-recovery rigorous (optional).
+
 <!-- YYYYMMDD: what changed, tok/s effect, keep/discard, anomalies. Run drop_caches before each. -->

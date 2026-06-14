@@ -27,9 +27,10 @@ if [ "$SUITE" = auto ]; then
   case "$NAME" in *[Cc]oder*|*[Cc]ode*) SUITE=coder ;; *) SUITE=general ;; esac
 fi
 case "$SUITE" in
-  general) TASKS="${TASKS:-gsm8k,mmlu}"; CODE_ARGS=() ;;
-  coder)   TASKS="${TASKS:-humaneval,mbpp}"; export HF_ALLOW_CODE_EVAL=1; CODE_ARGS=(--confirm_run_unsafe_code) ;;
-  *) echo "unknown suite $SUITE" >&2; exit 2 ;;
+  general)   TASKS="${TASKS:-gsm8k,mmlu}"; CODE_ARGS=() ;;
+  coder)     TASKS="${TASKS:-humaneval,mbpp}"; export HF_ALLOW_CODE_EVAL=1; CODE_ARGS=(--confirm_run_unsafe_code) ;;
+  resistant) TASKS="${TASKS:-gpqa_diamond_zeroshot,mmlu_pro}"; CODE_ARGS=() ;;  # harder/cleaner, less-memorized (tier 2)
+  *) echo "unknown suite $SUITE (general|coder|resistant)" >&2; exit 2 ;;
 esac
 
 RUN_ID="$(date -u +%Y%m%d-%H%M%S)-eval"

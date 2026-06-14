@@ -7,6 +7,10 @@ cancels in the delta). Reads accuracy.tsv scores ('task=score;...').
 
 Prints per-task delta + recovery %, and exits non-zero if any shared task drops more than --tol
 absolute points (default 1.0). Use for the promotion gate.
+
+CRITICAL: variant and reference MUST use the SAME eval settings (same --limit / task set). Full vs
+LIMIT-sampled mmlu are different question sets and are NOT comparable — comparing them produces a
+spurious delta. Compare LIMIT=100 to LIMIT=100, or full to full.
 """
 from __future__ import annotations
 import argparse, csv, sys

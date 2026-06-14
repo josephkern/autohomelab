@@ -26,6 +26,10 @@ serving/quant config degrade the model vs. the SAME model's reference?* We compa
 (`scripts/recovery.py`), never absolute scores as a claim. **Bar:** within **~1% absolute / ≥99%
 recovery**, no single-task cliff. Tunable.
 
+> **Matched settings required:** recovery is valid only when variant and reference use the **same**
+> eval settings (same `LIMIT` / task set). Full-vs-sampled mmlu are different question sets — that
+> comparison yields a *spurious* regression. Compare LIMIT=100↔LIMIT=100 or full↔full.
+
 ### Why relative framing matters: benchmark contamination
 Static benchmarks (MMLU, GSM8K, HumanEval, MBPP) are widely scraped and almost certainly in most
 pretraining corpora; some models are trained *directly* on eval sets (Qwen-Coder-Next documents
