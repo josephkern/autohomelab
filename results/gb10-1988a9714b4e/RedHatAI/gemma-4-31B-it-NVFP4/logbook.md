@@ -48,10 +48,41 @@ fp8-KV / higher util / lower max-model-len are the levers.
 (baseline: gsm8k=73.0, mmlu_pro=48.36). **Do NOT gate on standard mmlu** (loglikelihood, unreliable
 here). Numeric-risky knobs must stay within ~1-2% of these.
 
-## Next — tune loop
-Dense NVFP4, bandwidth-bound, KV-capacity-limited at high concurrency. Candidate queue (one change
-each vs baseline, objective = median c16 chat = 109): **kv-cache-dtype fp8_e4m3** (the 8B win —
-doubles KV → bigger batches; quality-risky→eval), **gpu-mem-util 0.5→0.8** (more KV pool; card
-suggested 0.90), **max-num-batched-tokens 16384** (+chunked prefill), **linear-backend marlin** and
-**flashinfer_b12x** vs auto/cutlass (GEMM path; quality-risky→eval). Then validate + promote
-`VLLM-23-RedHatAI_gemma-4-31B-it_NVFP4_final.sh`.
+## 20260615 — tune loop (5-candidate ablation) + finalize → CAMPAIGN COMPLETE
+`research/run-queue-gemma-0.23.0.sh`, each candidate = baseline + ONE change, N=3, c1/c16, smoke-gated.
+Re-measured baseline median **c16=104.3** (N=3; ±noise of the 109 sweep). Keep rule c16 > +3%;
+numeric-risky knobs gated on gsm8k recovery (matched LIMIT=100) only if they win on throughput.
+
+| candidate | c16 | c1 | verdict |
+|---|---|---|---|
+| baseline (kv auto/bf16, auto cutlass FP4) | 104.3 | 10.5 | reference |
+| **kvfp8** (+ --kv-cache-dtype fp8_e4m3) | **129.2** | 10.6 | **+23.8% c16 but QUALITY FAIL** (see below) |
+| memutil-08 (util 0.5→0.8) | 105.2 | 10.5 | discard +0.9% (noise; KV not the binding limit for chat) |
+| batched-16k (+max-num-batched-tokens) | 103.0 | 10.5 | discard −1.2% (noise) |
+| linear-marlin | 84.6 | 10.5 | discard **−18.9%** — native cutlass ≫ marlin (matches 8B) |
+| linear-b12x | — | — | **serve_fail** (as on the 8B; b12x FP4 GEMM won't init on sm_121) |
+
+**kvfp8 quality (the deciding check).** fp8-KV gave a big +23.8% c16 (KV-capacity was the constraint),
+but quality regressed — confirmed with the low-variance mmlu_pro (1400 samples), not just noisy gsm8k:
+| metric | baseline | kvfp8 | Δ |
+|---|---|---|---|
+| mmlu_pro (LIMIT=100, 1400 samp) | 48.36 | 46.29 | **−4.3%** |
+| gsm8k (LIMIT=100; two runs) | 73.0 | 68.0 / 71.0 | ~−4 to −5% |
+Both generative metrics moved down together → a real ~4% regression (Gemma's sliding-window attention
++ logit-softcapping + thinking-mode CoT make the KV cache precision-sensitive), well beyond the
+~1-2% "good" tolerance. (The two gsm8k runs, 68 vs 71, show ~±3pt LIMIT=100/temp1 noise — why
+mmlu_pro was the arbiter.)
+
+**Decision (user call): baseline stands.** kvfp8's −4.3% mmlu_pro fails the "good" gate, so the
+baseline is the only config clearing all three gates. `20260614_kvfp8_tuned.sh` is **kept as an
+optional "speed mode"** (+23.8% c16 for ~4% quality) — documented, not the canonical serve config.
+
+**Promoted** baseline → `VLLM-23-RedHatAI_gemma-4-31B-it_NVFP4_final.sh` (winner by default).
+Gates on the promoted config (serving-identical to the suited baseline): **Gate 1** smoke 4/4;
+**Gate 2** gsm8k=73.0 / mmlu_pro=48.36 (mmlu=41 loglikelihood artifact, excluded); **Gate 3**
+chat c1=10.45…c16=109…c32=136.65, coder collapses past c8. Campaign done for (gb10, gemma-4-31B,
+vLLM 0.23.0).
+
+**Tuning takeaways:** dense bandwidth-bound model — chat throughput is KV/batch-limited, so fp8-KV is
+the only real lever but it trades quality here; native cutlass FP4 is the right GEMM (marlin −19%,
+b12x fails); util/batched-tokens are saturated.
