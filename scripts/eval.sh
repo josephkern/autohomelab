@@ -106,8 +106,10 @@ PY
 )"
 DATA_REL="$(realpath --relative-to="$REPO_ROOT" "$BUNDLE")"
 TSV="$OUT_DIR/accuracy.tsv"
-HDR=$'run_id\tcommit\tnode_fp\tmodel\tconfig_hash\tscript\tsuite\ttasks\tlimit\tscores\tdata'
+# `think` is appended LAST so positional readers (run-queue awk $5/$10) stay valid. It disambiguates
+# rows that otherwise look contradictory (e.g. 35B gsm8k=42 think-on vs =90 think-off).
+HDR=$'run_id\tcommit\tnode_fp\tmodel\tconfig_hash\tscript\tsuite\ttasks\tlimit\tscores\tdata\tthink'
 [ -f "$TSV" ] || echo "$HDR" > "$TSV"
-printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-  "$RUN_ID" "$COMMIT" "$NODE_FP" "$MODEL" "$CONFIG_HASH" "$SCRIPT_REL" "$SUITE" "$TASKS" "${LIMIT:-full}" "$SCORES" "$DATA_REL" >> "$TSV"
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  "$RUN_ID" "$COMMIT" "$NODE_FP" "$MODEL" "$CONFIG_HASH" "$SCRIPT_REL" "$SUITE" "$TASKS" "${LIMIT:-full}" "$SCORES" "$DATA_REL" "$THINK" >> "$TSV"
 echo >&2; echo "scores: $SCORES" >&2; echo "row -> $(realpath --relative-to="$REPO_ROOT" "$TSV")" >&2

@@ -98,18 +98,18 @@ tps={}
 for r in rows(os.path.join(out_dir,'results.tsv')):
     if r.get('config_hash')==cfg:
         tps[r.get('shape','?')]=r
-# latest accuracy row per suite for this cfg
+# latest accuracy row per (suite, tasks, think) for this cfg — keep think-on/off rows distinct
 acc={}
 for r in rows(os.path.join(out_dir,'accuracy.tsv')):
     if r.get('config_hash')==cfg:
-        acc[r.get('suite','?')]=r
+        acc[(r.get('suite','?'), r.get('tasks',''), r.get('think','on'))]=r
 L=[]
 L.append(f"# Standard suite — {rb}")
 L.append(f"- date: {date}    config_hash: {cfg}    eval cap: {lim}")
 L.append(f"- **Gate 1 functional (smoke): {smoke}**")
 L.append(f"- **Gate 2 quality:** general={gen}, resistant={res}")
-for suite,r in sorted(acc.items()):
-    L.append(f"    - {suite} [{r.get('tasks','')}] limit={r.get('limit','')}: `{r.get('scores','')}`")
+for key,r in sorted(acc.items()):
+    L.append(f"    - {r.get('suite','?')} [{r.get('tasks','')}] limit={r.get('limit','')} think={r.get('think','on')}: `{r.get('scores','')}`")
 L.append(f"- **Gate 3 throughput ({bench}):** full sweep, tok/s")
 if tps:
     L.append("")
