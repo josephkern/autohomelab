@@ -40,3 +40,10 @@ VLLM_FLAGS=(
 )
 # Optional env passed into the container, e.g. VLLM_ENV=( "VLLM_ATTENTION_BACKEND=TRITON_ATTN" )
 VLLM_ENV=()
+
+# Eval overlay — thinking-OFF generative eval (suite.sh / AHL_THINK_OFF=1). NemotronH emits ZERO
+# tokens from the pre-closed `<think></think>` that enable_thinking=false produces (gsm8k think-off
+# = 0.0); its reduced-reasoning knob is `low_effort`, which keeps the working `<think>\n` format and
+# puts the answer in `content` (verified: "17x4" -> content "68"). Consumed by adapter.sh ONLY on the
+# AHL_THINK_OFF eval serve — inert for the deployed/throughput serve and think-on loglikelihood mmlu.
+AHL_THINK_OFF_KWARGS='{"low_effort": true}'

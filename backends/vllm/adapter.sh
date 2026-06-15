@@ -34,10 +34,17 @@ cmd_up() {
   local kv; for kv in "${VLLM_ENV[@]}"; do env_args+=(-e "$kv"); done
   local rev_args=(); [ -n "$MODEL_REVISION" ] && rev_args=(--revision "$MODEL_REVISION")
 
-  # Thinking-OFF serve (eval): AHL_THINK_OFF=1 sets the chat template's enable_thinking=false
+  # Thinking-OFF serve (eval): AHL_THINK_OFF=1 sets the chat template's thinking-off kwargs
   # server-side, so reasoning models don't emit CoT (which truncates/derails generative eval — gsm8k
   # 40->90 on the 35B). Only effective on the chat endpoint; eval.sh THINK=off pairs with this.
-  [ "${AHL_THINK_OFF:-0}" = 1 ] && VLLM_FLAGS+=(--default-chat-template-kwargs '{"enable_thinking": false}')
+  # The kwargs are MODEL-SPECIFIC: most models accept {"enable_thinking": false}, but NemotronH
+  # generates ZERO tokens from the pre-closed `<think></think>` that produces — its reduced-reasoning
+  # knob is {"low_effort": true} instead. Override per-model via AHL_THINK_OFF_KWARGS (env or runbook).
+  if [ "${AHL_THINK_OFF:-0}" = 1 ]; then
+    local think_off_kwargs='{"enable_thinking": false}'
+    [ -n "${AHL_THINK_OFF_KWARGS:-}" ] && think_off_kwargs="$AHL_THINK_OFF_KWARGS"
+    VLLM_FLAGS+=(--default-chat-template-kwargs "$think_off_kwargs")
+  fi
 
   # `vllm/vllm-openai` ENTRYPOINT is already `vllm serve` -> pass MODEL positionally.
   # NGC/shell-entrypoint images need it prepended (runbook sets VLLM_ENTRYPOINT_SERVE=false).
