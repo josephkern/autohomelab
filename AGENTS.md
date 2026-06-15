@@ -104,6 +104,12 @@ per-candidate.
   opt-in (not in the standard suite yet — see follow-ups). **Caveat:** standard `mmlu` is
   *loglikelihood*-scored and can be unreliable for some archs (Gemma-4 scored ~41 — BOS/prefix-LM/
   logit-softcapping); cross-check with the *generative* gsm8k + mmlu_pro before trusting it as a gate.
+  **Thinking-OFF generative eval:** reasoning models (runbook has `--reasoning-parser`) emit `<think>`
+  CoT on the raw eval path that truncates/derails generative tasks (35B gsm8k **40→90** with thinking
+  off). suite.sh auto-detects them and runs gsm8k + mmlu_pro on a **second, thinking-OFF serve**
+  (`AHL_THINK_OFF=1` → `--default-chat-template-kwargs '{"enable_thinking": false}'`, evaluated via
+  the **chat** endpoint with `THINK=off` since `enable_thinking` only applies to `/v1/chat/completions`,
+  not `/v1/completions`); loglikelihood `mmlu` stays on the deployed thinking-ON serve (thinking-agnostic).
 - **Gate 3 — fast** (`bench.sh`): full `1,4,8,16,32` GuideLLM sweep in **both** throughput shapes —
   `chat(512/256)` (the tuning objective, median c16) **and** `coder(4096/1024)` (long-context
   characterization). Per-level isolation + watchdog (crash-safe); suite re-serves if a wedge tore
@@ -167,13 +173,14 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
   `temperature=0,top_p=1.0,presence_penalty=0,frequency_penalty=0` per-request so the serving
   `--override-generation-config` can't bleed in (request params win over server gen-config defaults;
   confirmed forwarded — recorded in the bundle's results json). `GREEDY=0` / `GEN_KWARGS=…` to override.
-- [ ] **Generative-eval depression on REASONING models is thinking-mode, NOT sampling** — verified:
-  with greedy pinned + penalties zeroed, the 35B gsm8k stayed ~40 (was 42), and `flexible-extract`
-  (0.29) < `strict-match` (0.40) — the inversion signature of verbose/thinking output where the
-  "last number" is wrong. lm-eval already defaulted gsm8k to greedy, so sampling was never the cause.
-  Fix options: serve/eval with **thinking OFF** (the HF card evaluated thinking-off), raise GEN_TOKS,
-  or add a thinking-stripping filter before answer extraction. Until then, for reasoning models trust
-  mmlu_pro/mmlu + strict-match, and read gsm8k as a floor.
+- [x] **Generative-eval depression on REASONING models = thinking-mode (FIXED, thinking-off mode)** —
+  root cause confirmed via sample logging: on the raw `/v1/completions` path the 35B emits `<think>`
+  CoT that never closes within budget → answer truncated (gsm8k=40, `flexible-extract` 0.29 <
+  `strict-match` 0.40 inversion). Fix wired in + verified end-to-end: `adapter.sh AHL_THINK_OFF=1`
+  (server `--default-chat-template-kwargs '{"enable_thinking": false}'`) + `eval.sh THINK=off` (chat
+  endpoint + `--apply_chat_template`) → **35B gsm8k 40→90**, no `<think>`, strict==flexible. suite.sh
+  auto-applies it to reasoning models. (`enable_thinking` only works on `/v1/chat/completions`, not the
+  raw completions path — lm-eval can't pass it via CLI gen_kwargs as a nested dict, so it's server-side.)
 - [ ] **Passwordless sudo (narrow)** — decide whether to allow `sysctl -w vm.drop_caches=3`
   (unified-memory cache hygiene before a run) and `nvidia-smi --gpu-reset` (recover a wedged GPU
   if `adapter down` ever isn't enough). Currently `drop_caches` is **skipped** (sudo unavailable

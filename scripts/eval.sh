@@ -4,7 +4,10 @@
 # Env: LIMIT (per-task sample cap; set for fast in-loop checks, unset for the full final run),
 #      GEN_TOKS (default 1024 — CoT on reasoning models overruns lm-eval's stock 256), CONC,
 #      GREEDY (default 1 — pin temperature 0 so the serving --override-generation-config doesn't
-#      bleed into eval; GREEDY=0 uses the server's sampling), GEN_KWARGS (full manual gen_kwargs).
+#      bleed into eval; GREEDY=0 uses the server's sampling), GEN_KWARGS (full manual gen_kwargs),
+#      THINK (default on; THINK=off evals GENERATIVE tasks via the chat endpoint with thinking
+#      disabled — serve the model AHL_THINK_OFF=1 to match. For reasoning models, thinking-on
+#      depresses generative scores: 35B gsm8k 40->90 with thinking off).
 # Server must be up (serve.sh). Records a row to accuracy.tsv + the raw lm-eval json in the bundle.
 #
 # NOTE: coder tasks EXECUTE generated code (HF_ALLOW_CODE_EVAL + --confirm_run_unsafe_code) — run
@@ -54,12 +57,28 @@ GK="max_gen_toks=${GEN_TOKS}"
 [ "$GREEDY" = 1 ] && GK="${GK},temperature=0,top_p=1.0,presence_penalty=0,frequency_penalty=0"
 [ -n "${GEN_KWARGS:-}" ] && GK="$GEN_KWARGS"
 
-echo "== lm-eval $SUITE [$TASKS] limit=${LIMIT:-full} sampling=$([ "$GREEDY" = 1 ] && echo greedy || echo server) -> $SERVED_NAME ==" >&2
-# local-completions hits /v1/completions (bypasses chat template/parsers — raw few-shot); the client
-# tokenizer (= the HF repo) is required for loglikelihood tasks like mmlu.
-uv run --project "$REPO_ROOT" lm_eval --model local-completions \
-  --model_args "base_url=${TARGET}/v1/completions,model=${SERVED_NAME},tokenizer=${MODEL},num_concurrent=${CONC},max_retries=3,tokenized_requests=False" \
-  --tasks "$TASKS" --gen_kwargs "$GK" ${LIMIT:+--limit "$LIMIT"} \
+# THINK mode (default on): reasoning models emit <think> CoT that truncates/derails GENERATIVE eval
+# (35B gsm8k 40->90 with thinking off). Thinking can only be turned off via the chat template, which
+# applies on /v1/chat/completions — NOT the raw /v1/completions path. So THINK=off switches to the
+# CHAT endpoint + --apply_chat_template; pair it with a server started AHL_THINK_OFF=1 (sets
+# --default-chat-template-kwargs enable_thinking=false). NOTE: the chat endpoint can't do
+# loglikelihood, so THINK=off is for GENERATIVE task lists (gsm8k, mmlu_pro, humaneval) — standard
+# `mmlu` is loglikelihood and must stay THINK=on (it's unaffected by thinking anyway).
+THINK="${THINK:-on}"
+if [ "$THINK" = off ]; then
+  case ",$TASKS," in *,mmlu,*) echo "WARN: THINK=off uses the chat endpoint (no loglikelihood) — 'mmlu' will fail; use mmlu_pro or THINK=on for mmlu." >&2 ;; esac
+  MODEL_TYPE=local-chat-completions; ENDPOINT="${TARGET}/v1/chat/completions"; CHAT_ARGS=(--apply_chat_template)
+else
+  MODEL_TYPE=local-completions;      ENDPOINT="${TARGET}/v1/completions";      CHAT_ARGS=()
+fi
+
+echo "== lm-eval $SUITE [$TASKS] limit=${LIMIT:-full} sampling=$([ "$GREEDY" = 1 ] && echo greedy || echo server) think=$THINK -> $SERVED_NAME ==" >&2
+# THINK=on  -> local-completions /v1/completions (raw few-shot; loglikelihood-capable).
+# THINK=off -> local-chat-completions /v1/chat/completions + chat template (thinking-off; generative).
+# The client tokenizer (= the HF repo) is required for loglikelihood tasks like mmlu.
+uv run --project "$REPO_ROOT" lm_eval --model "$MODEL_TYPE" \
+  --model_args "base_url=${ENDPOINT},model=${SERVED_NAME},tokenizer=${MODEL},num_concurrent=${CONC},max_retries=3,tokenized_requests=False" \
+  --tasks "$TASKS" --gen_kwargs "$GK" ${LIMIT:+--limit "$LIMIT"} "${CHAT_ARGS[@]}" \
   --output_path "$BUNDLE" "${CODE_ARGS[@]}"
 
 # lm_eval writes results_*.json under the output dir; extract the headline metric per task.
