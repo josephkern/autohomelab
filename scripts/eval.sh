@@ -2,7 +2,9 @@
 # eval.sh <runbook.sh> [suite] — Gate 2 (quality): lm-evaluation-harness against the live endpoint.
 #   suite ∈ general (gsm8k,mmlu) | coder (humaneval,mbpp) | auto (infer from model name)
 # Env: LIMIT (per-task sample cap; set for fast in-loop checks, unset for the full final run),
-#      GEN_TOKS (default 1024 — CoT on reasoning models overruns lm-eval's stock 256), CONC.
+#      GEN_TOKS (default 1024 — CoT on reasoning models overruns lm-eval's stock 256), CONC,
+#      GREEDY (default 1 — pin temperature 0 so the serving --override-generation-config doesn't
+#      bleed into eval; GREEDY=0 uses the server's sampling), GEN_KWARGS (full manual gen_kwargs).
 # Server must be up (serve.sh). Records a row to accuracy.tsv + the raw lm-eval json in the bundle.
 #
 # NOTE: coder tasks EXECUTE generated code (HF_ALLOW_CODE_EVAL + --confirm_run_unsafe_code) — run
@@ -41,12 +43,23 @@ COMMIT="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo nogit)"
 CONFIG_HASH="$(sha256sum "$RUNBOOK" | cut -c1-8)"
 SCRIPT_REL="$(realpath --relative-to="$REPO_ROOT" "$RUNBOOK")"
 
-echo "== lm-eval $SUITE [$TASKS] limit=${LIMIT:-full} -> $SERVED_NAME ==" >&2
+# GREEDY eval (default on): the runbook's serving --override-generation-config (chat sampling, e.g.
+# temperature 1.0 + presence_penalty) is applied server-side to lm-eval's requests too, depressing
+# generative tasks (saw gsm8k 42 on the 35B, ~4% on gemma). eval.sh can't re-serve (runs against the
+# live server, e.g. inside suite.sh), so we PIN greedy per-request — explicit request params win over
+# the server's generation-config defaults — neutralizing temperature/top_p AND the logit penalties.
+# Escape hatches: GREEDY=0 (use the server's serving sampling), or GEN_KWARGS="..." (full manual).
+GREEDY="${GREEDY:-1}"
+GK="max_gen_toks=${GEN_TOKS}"
+[ "$GREEDY" = 1 ] && GK="${GK},temperature=0,top_p=1.0,presence_penalty=0,frequency_penalty=0"
+[ -n "${GEN_KWARGS:-}" ] && GK="$GEN_KWARGS"
+
+echo "== lm-eval $SUITE [$TASKS] limit=${LIMIT:-full} sampling=$([ "$GREEDY" = 1 ] && echo greedy || echo server) -> $SERVED_NAME ==" >&2
 # local-completions hits /v1/completions (bypasses chat template/parsers — raw few-shot); the client
 # tokenizer (= the HF repo) is required for loglikelihood tasks like mmlu.
 uv run --project "$REPO_ROOT" lm_eval --model local-completions \
   --model_args "base_url=${TARGET}/v1/completions,model=${SERVED_NAME},tokenizer=${MODEL},num_concurrent=${CONC},max_retries=3,tokenized_requests=False" \
-  --tasks "$TASKS" --gen_kwargs "max_gen_toks=${GEN_TOKS}" ${LIMIT:+--limit "$LIMIT"} \
+  --tasks "$TASKS" --gen_kwargs "$GK" ${LIMIT:+--limit "$LIMIT"} \
   --output_path "$BUNDLE" "${CODE_ARGS[@]}"
 
 # lm_eval writes results_*.json under the output dir; extract the headline metric per task.

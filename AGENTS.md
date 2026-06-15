@@ -163,11 +163,17 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
   the greedy-eval follow-up below.
 - [ ] **Build a small PRIVATE held-out eval** (tier 4) — authored by us, never published; the only
   fully-uncontaminated signal for promotion decisions.
-- [ ] **eval.sh should pin greedy (temperature 0) for eval** — the runbook's serving
-  `--override-generation-config` (chat sampling, e.g. temp 1.0 + presence_penalty 1.5) is applied by
-  the server to lm-eval requests too, depressing generative tasks (saw gsm8k=42 on the 35B). Pin
-  eval sampling or strip the override so accuracy isn't config-coupled. Until fixed: trust mmlu
-  (loglikelihood, unaffected) + relative recovery at matched settings.
+- [x] **eval.sh pins greedy for eval** — done: `GREEDY=1` (default) sends
+  `temperature=0,top_p=1.0,presence_penalty=0,frequency_penalty=0` per-request so the serving
+  `--override-generation-config` can't bleed in (request params win over server gen-config defaults;
+  confirmed forwarded — recorded in the bundle's results json). `GREEDY=0` / `GEN_KWARGS=…` to override.
+- [ ] **Generative-eval depression on REASONING models is thinking-mode, NOT sampling** — verified:
+  with greedy pinned + penalties zeroed, the 35B gsm8k stayed ~40 (was 42), and `flexible-extract`
+  (0.29) < `strict-match` (0.40) — the inversion signature of verbose/thinking output where the
+  "last number" is wrong. lm-eval already defaulted gsm8k to greedy, so sampling was never the cause.
+  Fix options: serve/eval with **thinking OFF** (the HF card evaluated thinking-off), raise GEN_TOKS,
+  or add a thinking-stripping filter before answer extraction. Until then, for reasoning models trust
+  mmlu_pro/mmlu + strict-match, and read gsm8k as a floor.
 - [ ] **Passwordless sudo (narrow)** — decide whether to allow `sysctl -w vm.drop_caches=3`
   (unified-memory cache hygiene before a run) and `nvidia-smi --gpu-reset` (recover a wedged GPU
   if `adapter down` ever isn't enough). Currently `drop_caches` is **skipped** (sudo unavailable
