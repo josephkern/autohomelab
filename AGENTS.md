@@ -110,6 +110,12 @@ per-candidate.
   (`AHL_THINK_OFF=1` → `--default-chat-template-kwargs '{"enable_thinking": false}'`, evaluated via
   the **chat** endpoint with `THINK=off` since `enable_thinking` only applies to `/v1/chat/completions`,
   not `/v1/completions`); loglikelihood `mmlu` stays on the deployed thinking-ON serve (thinking-agnostic).
+  The thinking-off kwargs are **per-model** via `AHL_THINK_OFF_KWARGS` (env or runbook var; default
+  `{"enable_thinking": false}`): **NemotronH** generates **zero tokens** from the pre-closed
+  `<think></think>` that `enable_thinking=false` renders (gsm8k think-off **0.0**), so its runbook sets
+  `AHL_THINK_OFF_KWARGS='{"low_effort": true}'` — NVIDIA's reduced-reasoning knob keeps the working
+  `<think>\n` format and lands the answer in `content` (gsm8k **0→62 strict / 95 flexible**). Probe a
+  new reasoning arch's think-off serve (`content` non-empty?) before trusting its generative scores.
 - **Gate 3 — fast** (`bench.sh`): full `1,4,8,16,32` GuideLLM sweep in **both** throughput shapes —
   `chat(512/256)` (the tuning objective, median c16) **and** `coder(4096/1024)` (long-context
   characterization). Per-level isolation + watchdog (crash-safe); suite re-serves if a wedge tore
