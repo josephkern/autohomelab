@@ -16,7 +16,8 @@ measure(){ N=3 scripts/run_experiment.sh "$1" 2>&1 | grep '^MEDIAN' | tail -1; }
 declare -A RESULT
 
 run(){ # slug | ref_value | ref_label
-  local slug="$1" ref="$2" lbl="$3" rb="$RBDIR/20260616_${slug}_tuned.sh"
+  local slug="$1" ref="$2" lbl="$3"
+  local rb="$RBDIR/20260616_${slug}_tuned.sh"
   [ -f "$rb" ] || { log "MISSING $rb"; RESULT[$slug]="na|na|missing|absent"; return; }
   log "--- $slug ($(sed -n 's/^# Deltas vs base: //p' "$rb")) ---"
   git add "$rb" 2>/dev/null && git commit -q -m "exp(nemotron/0.23.0): $slug" 2>/dev/null
