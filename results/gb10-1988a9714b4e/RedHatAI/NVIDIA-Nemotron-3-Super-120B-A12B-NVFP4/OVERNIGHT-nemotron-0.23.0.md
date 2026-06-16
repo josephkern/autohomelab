@@ -17,3 +17,10 @@ Recommendation: promote the best KEEP that passes quality via FULL=1 scripts/sui
 scripts/promote.sh VLLM_TAG=23 -> VLLM-23-RedHatAI_NVIDIA-Nemotron-3-Super-120B-A12B_NVFP4_final.sh;
 else baseline stands. (mtp/async/memutil/maxseqs are config-only -> no quality eval; maxseqs-4 is
 a per-stream characterization expected to lose the c16 objective.)
+
+## Follow-up runs (2026-06-16T08:04:14Z)
+
+| candidate | c16 | c1 | status | verdict |
+|---|---|---|---|---|
+| trust-remote-code | 76.85 | 17.65 | ok | discard (+1.7% vs base) |
+| mtp-cutlass | 90.99 | 22.44 | ok | discard (-1.9% vs mtp-best) |
