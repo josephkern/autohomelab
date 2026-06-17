@@ -100,7 +100,11 @@ per-candidate.
   `resistant` (default **`mmlu_pro`**, harder/less-memorized, tier 2). `gpqa_diamond_zeroshot` is a
   **gated** HF dataset (`Idavidrein/gpqa`) — request access, then opt in with
   `TASKS=mmlu_pro,gpqa_diamond_zeroshot`. `LIMIT=100` for the in-loop reference; `FULL=1` (no cap) at
-  finalize. Tier-3 time-gated (`eval_live.sh` / LiveBench) and a tier-4 private held-out set remain
+  finalize. For **competition-math / long-CoT** models (e.g. VibeThinker) use the **`math` suite**
+  (`aime24,aime25` — they PREFER `\boxed{}` extraction; minerva_math500/hendrycks_math500 do NOT and
+  score ~0 on `\boxed` output). Long-CoT eval needs: **temp 1.0** (`GEN_KWARGS do_sample=True`; greedy
+  loops on RL-reasoners), large **`GEN_TOKS`** (auto-32768) + **`EVAL_TIMEOUT`** (default 1800s; 32K-tok
+  gens blow lm-eval's 300s default), and the **chat endpoint** (`THINK=off` → apply_chat_template). Tier-3 time-gated (`eval_live.sh` / LiveBench) and a tier-4 private held-out set remain
   opt-in (not in the standard suite yet — see follow-ups). **Caveat:** standard `mmlu` is
   *loglikelihood*-scored and can be unreliable for some archs (Gemma-4 scored ~41 — BOS/prefix-LM/
   logit-softcapping); cross-check with the *generative* gsm8k + mmlu_pro before trusting it as a gate.
