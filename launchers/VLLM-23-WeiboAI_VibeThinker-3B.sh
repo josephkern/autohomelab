@@ -25,9 +25,12 @@ VLLM_FLAGS=(
   --gpu-memory-utilization
   0.5
   --max-model-len
-  40960
+  131072
   --override-generation-config
   \{\"temperature\":1.0\,\"top_p\":0.95\,\"top_k\":-1\}
+  --enable-auto-tool-choice
+  --tool-call-parser
+  hermes
 )
 
 REV_ARGS=(); [ -n "$MODEL_REVISION" ] && REV_ARGS=( --revision "$MODEL_REVISION" )
