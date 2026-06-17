@@ -71,9 +71,38 @@ Load: **677 s** (~11 min) to healthy. **= first KEEP / current best.**
 **Verdict:** baseline is GREEN on all three gates. Quality validated (NVFP4 lossless vs published).
 Objective = median c16 chat = **73.01 tok/s** (current best).
 
-## Next — tune loop (Fig-4 levers, 0.23.0 capability-valid)
-Candidate queue: FP4 `--moe-backend {flashinfer_b12x,flashinfer_cutlass,marlin}` / `--linear-backend`,
-`--async-scheduling`, MTP `--speculative-config` (model has native MTP), gpu-mem-util ceiling (0.85→?),
-and the blog's `--max-num-seqs 4` (per-stream/latency characterization). One change per variant, N=3,
-KEEP if median c16 > +3% AND smoke AND (numeric-risky) accuracy within ~1% of mmlu=85.82.
-</content>
+## 2026-06-16 — Tune loop (7 candidates + stack) → winner mtp-n1
+
+Re-measured baseline median c16 = 75.54 (this session, N=3). One change per variant, N=3 chat c1/c16.
+
+| candidate | c16 | verdict |
+|---|---|---|
+| **mtp-n1** (native MTP spec-decode) | **92.77** | ✅ KEEP +22.8% (c1 17→22.8, +33%) — WINNER |
+| moe-cutlass (explicit FP4 MoE) | 80.70 | ✅ +6.8%, mmlu 85.82 (quality clean) — but doesn't stack |
+| async-sched | 76.93 | +1.8% noise |
+| memutil-090 (0.85→0.90) | 73.54 | −2.6% (KV wasn't the c16 constraint) |
+| moe-b12x | serve_fail | b12x unsupported on 0.23.0 here (as on 8B/35B) |
+| moe-cutlass+mtp (stack) | 90.99 | −1.9% vs mtp — **winners don't stack** (cutlass gain vanishes under MTP) |
+| maxseqs-4 (blog cap) | 39.38 | −47.9% — confirms the blog's knob is per-stream latency, not aggregate |
+| trust-remote-code (df929bc) | 76.85 | inert (+1.7%) — vLLM uses built-in arch regardless; flag is config/tokenizer-only |
+
+Lessons: MTP is the dominant lever on this bandwidth-bound model (the 35B precedent held). cutlass beats
+auto solo (+6.8%) — vLLM auto does NOT pick cutlass for this LatentMoE — but the gain disappears once
+MTP is active. b12x serve_fails. `--max-num-seqs 4` halves aggregate throughput (per-stream UX only).
+
+## 2026-06-16/17 — FINALIZE + PROMOTE (winner mtp-n1)
+
+`FULL=1 suite.sh` on mtp-n1 (cfg 479fc3da):
+- **Gate 1 smoke: PASS.**
+- **Gate 2 quality** (greedy, MTP-lossless): gsm8k(think-off,low_effort,full)=**59.36**, mmlu_pro(think-off,full)=**74.16**
+  — consistent with baseline (61.9/76.4 @limit100). **mmlu loglikelihood (think-on) ERRORED**: MTP spec-decode
+  returns **NaN prompt_logprobs** → `/v1/completions` 400s. **MTP ⊥ loglikelihood** — fundamental; the quality
+  gate for any MTP config must use generative (gsm8k/mmlu_pro), not loglikelihood mmlu.
+- **Gate 3 throughput** (the win): chat c1=22.4 c4=52.5 c8=69.5 **c16=93.68 c32=120.52**; the finalize coder
+  sweep **hung at c1** (watchdog crash-recovered), but a **re-run was clean**: coder c1=24.5 c8=65.4 **c16=53.23
+  c32=22.23** — *better* than baseline coder (37/9.99). So the hang was the documented one-off GB10
+  stage-transition wedge, NOT an MTP limitation. MTP improves BOTH shapes.
+
+**PROMOTED** → `VLLM-23-RedHatAI_NVIDIA-Nemotron-3-Super-120B-A12B_NVFP4_final.sh` (`promote.sh VLLM_TAG=23`).
+Net vs baseline: **chat c16 +24% (75.5→93.7), coder c16 +43% (37→53)**, quality lossless. Caveat documented:
+no loglikelihood mmlu under spec-decode (use generative gate). `*_tuned.sh` experiments kept as the record.
