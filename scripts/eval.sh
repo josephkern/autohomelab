@@ -19,6 +19,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUNBOOK="${1:?usage: eval.sh <runbook.sh> [general|coder|auto]}"
 SUITE="${2:-auto}"
 TARGET="${TARGET:-http://${AHL_HOST:-127.0.0.1}:${AHL_PORT:-8000}}"
+GEN_TOKS_USER="${GEN_TOKS:-}"   # capture whether the caller set it (suites may pick a bigger default)
 GEN_TOKS="${GEN_TOKS:-1024}"; CONC="${CONC:-16}"
 
 MODEL=""; SERVED_NAME=""
@@ -37,7 +38,11 @@ case "$SUITE" in
   resistant) TASKS="${TASKS:-mmlu_pro}"; CODE_ARGS=() ;;  # tier 2 harder/cleaner. mmlu_pro is OPEN;
              # gpqa_diamond_zeroshot is a GATED HF dataset — request access, then opt in with
              # TASKS=mmlu_pro,gpqa_diamond_zeroshot (one gated task otherwise aborts the whole call).
-  *) echo "unknown suite $SUITE (general|coder|resistant)" >&2; exit 2 ;;
+  math)      TASKS="${TASKS:-minerva_math500,aime25}"; CODE_ARGS=()  # competition-math gate (long-CoT reasoning
+             # models, e.g. VibeThinker). minerva_math500 = stable 500-Q gate; aime25 = headline, 30 Q -> HIGH
+             # variance (indicator, not a threshold). gpqa_diamond_zeroshot opt-in (gated, as in resistant).
+             [ -z "$GEN_TOKS_USER" ] && GEN_TOKS=32768 ;;  # long CoT needs room or the answer truncates -> 0
+  *) echo "unknown suite $SUITE (general|coder|resistant|math)" >&2; exit 2 ;;
 esac
 
 RUN_ID="$(date -u +%Y%m%d-%H%M%S)-eval"
