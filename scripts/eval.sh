@@ -81,8 +81,11 @@ echo "== lm-eval $SUITE [$TASKS] limit=${LIMIT:-full} sampling=$([ "$GREEDY" = 1
 # THINK=on  -> local-completions /v1/completions (raw few-shot; loglikelihood-capable).
 # THINK=off -> local-chat-completions /v1/chat/completions + chat template (thinking-off; generative).
 # The client tokenizer (= the HF repo) is required for loglikelihood tasks like mmlu.
+# EVAL_TIMEOUT: per-request HTTP timeout (lm-eval default 300s). Long-CoT models (e.g. VibeThinker)
+# generate for many minutes per item (32K tokens @ ~tens of tok/s, slower under concurrency) and 300s
+# times out -> no results. Default 1800s; raise for very long budgets / high CONC.
 uv run --project "$REPO_ROOT" lm_eval --model "$MODEL_TYPE" \
-  --model_args "base_url=${ENDPOINT},model=${SERVED_NAME},tokenizer=${MODEL},num_concurrent=${CONC},max_retries=3,tokenized_requests=False" \
+  --model_args "base_url=${ENDPOINT},model=${SERVED_NAME},tokenizer=${MODEL},num_concurrent=${CONC},max_retries=3,timeout=${EVAL_TIMEOUT:-1800},tokenized_requests=False" \
   --tasks "$TASKS" --gen_kwargs "$GK" ${LIMIT:+--limit "$LIMIT"} "${CHAT_ARGS[@]}" \
   --output_path "$BUNDLE" "${CODE_ARGS[@]}"
 
