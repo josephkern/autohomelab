@@ -104,6 +104,10 @@ per-candidate.
   opt-in (not in the standard suite yet — see follow-ups). **Caveat:** standard `mmlu` is
   *loglikelihood*-scored and can be unreliable for some archs (Gemma-4 scored ~41 — BOS/prefix-LM/
   logit-softcapping); cross-check with the *generative* gsm8k + mmlu_pro before trusting it as a gate.
+  **Speculative decoding ⊥ loglikelihood:** a config with `--speculative-config` (MTP/draft) returns
+  **NaN prompt_logprobs**, so loglikelihood `mmlu` 400s (`Out of range float values are not JSON compliant`).
+  The quality gate for ANY spec-decode config must use **generative** tasks (gsm8k/mmlu_pro think-off), not
+  loglikelihood mmlu (Nemotron-3-Super MTP final). Spec-decode is greedy-lossless, so generative scores match.
   **Thinking-OFF generative eval:** reasoning models (runbook has `--reasoning-parser`) emit `<think>`
   CoT on the raw eval path that truncates/derails generative tasks (35B gsm8k **40→90** with thinking
   off). suite.sh auto-detects them and runs gsm8k + mmlu_pro on a **second, thinking-OFF serve**
