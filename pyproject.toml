@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "guidellm",          # benchmark driver — exact version pinned in uv.lock
     "huggingface-hub",   # model downloads (also used via `uvx hf`)
-    "lm-eval[api]>=0.4.12",
+    "lm-eval[api,math]>=0.4.12",   # [math]: sympy/math_verify/antlr4 for minerva_math500/aime answer verification
 ]
 
 # Exact versions are pinned in uv.lock (project rule: reproducibility first).
