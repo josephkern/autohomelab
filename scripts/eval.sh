@@ -38,9 +38,12 @@ case "$SUITE" in
   resistant) TASKS="${TASKS:-mmlu_pro}"; CODE_ARGS=() ;;  # tier 2 harder/cleaner. mmlu_pro is OPEN;
              # gpqa_diamond_zeroshot is a GATED HF dataset — request access, then opt in with
              # TASKS=mmlu_pro,gpqa_diamond_zeroshot (one gated task otherwise aborts the whole call).
-  math)      TASKS="${TASKS:-minerva_math500,aime25}"; CODE_ARGS=()  # competition-math gate (long-CoT reasoning
-             # models, e.g. VibeThinker). minerva_math500 = stable 500-Q gate; aime25 = headline, 30 Q -> HIGH
-             # variance (indicator, not a threshold). gpqa_diamond_zeroshot opt-in (gated, as in resistant).
+  math)      TASKS="${TASKS:-aime24,aime25}"; CODE_ARGS=()  # competition-math gate (long-CoT reasoning models,
+             # e.g. VibeThinker — the paper's headline metric). Uses the `aime` tasks because their
+             # process_results PREFERS \boxed{} extraction (last_boxed_only_string), matching DeepSeek-R1-style
+             # output. NOTE: minerva_math500 (Minerva "Final Answer:" regex) and hendrycks_math500 ($...$ only)
+             # do NOT extract \boxed -> score ~0 for a format mismatch, NOT a real failure. 60 AIME Q total ->
+             # still notable variance (temp-1.0 single-sample). gpqa_diamond_zeroshot opt-in (gated).
              [ -z "$GEN_TOKS_USER" ] && GEN_TOKS=32768 ;;  # long CoT needs room or the answer truncates -> 0
   *) echo "unknown suite $SUITE (general|coder|resistant|math)" >&2; exit 2 ;;
 esac
