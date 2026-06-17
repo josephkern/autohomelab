@@ -37,7 +37,27 @@ Onboarding this model surfaced 4 gaps, all fixed + committed:
    hendrycks_math500 (`$…$`) do NOT extract `\boxed{}` → score ~0 (format, not failure). The `aime` tasks
    PREFER `\boxed{}` (last_boxed_only_string) → correct. Hence the `math` suite = aime24,aime25.
 
-## Next
-Gate 3 throughput bench (chat+coder); then throughput-only tune loop (tiny dense model — limited leverage);
-then finalize/promote → VLLM-23 final. Single-stream decode observed ~65 tok/s during eval.
+### Gate 3 — fast (throughput, full sweep)
+| shape | c1 | c4 | c8 | c16 | c32 |
+|---|---|---|---|---|---|
+| chat(512/256) | 29.8 | 132.9 | 258.3 | **485.1** | **852.7** |
+| coder(4096/1024) | 28.6 | 109.0 | 193.9 | 304.4 | 400.3 |
+**Compute-bound** (not bandwidth-bound like the NVFP4 MoEs): chat scales to c32 (28× c1), no collapse.
+
+## 2026-06-17 — Tune loop + FINALIZE → baseline promoted
+
+Lean queue (throughput-only — BF16 weights unchanged, so no quality eval; the aime gate stands).
+Baseline re-measured median **c16 = 509.8** (N=3).
+| candidate | c16 | verdict |
+|---|---|---|
+| async-sched | 510.4 | discard (+0.1%, noise) |
+| batched-32k | 507.6 | discard (−0.4%, noise) |
+
+Neither lever bites on an already-GPU-bound 3B → **baseline stands** (cf. 35B/gemma: baseline promoted by
+default). **PROMOTED** → `VLLM-23-WeiboAI_VibeThinker-3B_final.sh` (`promote.sh VLLM_TAG=23`). All three
+gates validated on the baseline config (727fd7ca). `*_tuned.sh` experiments kept.
+
+**Campaign result:** a cached 3B BF16 Qwen2.5 serves frontier competition-math (aime24 90.0 / aime25 86.67,
+temp-1.0 Pass@1) at strong throughput (chat c16 485 / c32 853) on a single GB10 — no quant, stock vLLM 0.23.0.
+Caveat: aime24/25 predate the model → possible training contamination; the clean signal is the paper's AIME26.
 </content>
