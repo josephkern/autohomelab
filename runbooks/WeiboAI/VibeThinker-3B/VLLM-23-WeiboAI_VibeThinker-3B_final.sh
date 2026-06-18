@@ -14,10 +14,11 @@
 #   `<think>…</think>` then the answer, in `content`** (verified — closes the tag reliably; the card's
 #   "no <think>" is wrong). Rec sampling temp1.0/top_p0.95/top_k-1 (all tasks). Tiny (5.8 GB), loads fast.
 # NOTE — eval-vs-serve: the GATES were validated on the eval config (parser-less, max-model-len 40960, NO
-#   tools): smoke 2/2, aime24=90.0/aime25=86.67, chat c16=485/c32=853. This SERVE config adds, for interactive
-#   clients, full 128K context + Qwen tool-calling (hermes) — neither changes the BF16 weights' quality, and
-#   short-shape throughput is independent of max-model-len. Quality gate = `math` suite (aime24,aime25, boxed
-#   extraction) via the CHAT endpoint (THINK=off → apply_chat_template; GEN_TOKS 32768, EVAL_TIMEOUT 1800).
+#   tools/reasoning parser): smoke 2/2, aime24=90.0/aime25=86.67, chat c16=485/c32=853. This SERVE config adds,
+#   for interactive clients, full 128K context + Qwen tool-calling (hermes) + DeepSeek-R1 reasoning parsing
+#   (reasoning_content) — none change the BF16 weights' quality, and short-shape throughput is independent of
+#   max-model-len. Quality gate = `math` suite (aime24,aime25, boxed extraction) via the CHAT endpoint
+#   (THINK=off → apply_chat_template; GEN_TOKS 32768, EVAL_TIMEOUT 1800).
 
 MODEL="WeiboAI/VibeThinker-3B"
 MODEL_REVISION="0c7115fdd0957b3da0f2a0829ab1763969d30300"   # pinned to the CACHED revision (local weights; HF main moved to 51e5928)
@@ -36,9 +37,10 @@ VLLM_FLAGS=(
   # --- functional (serving features; CONFIRM against the model card; smoke.sh validates) ---
   --override-generation-config '{"temperature":1.0,"top_p":0.95,"top_k":-1}'   # card-recommended (all tasks)
   --enable-auto-tool-choice --tool-call-parser hermes   # Qwen2.5 tool format — for agent/OpenAI clients (e.g. pi)
-  # NO --reasoning-parser: the model emits DeepSeek-R1 <think></think> in `content`; clients parse it there
-  #   (in pi: compat.thinkingFormat=qwen-chat-template). A server-side parser (deepseek_r1) returns EMPTY content
-  #   when long reasoning doesn't close </think> within budget (verified) — so reasoning stays client-side.
+  --reasoning-parser deepseek_r1   # split the model's <think>…</think> into the reasoning_content field
+  #   (VERIFIED in pi with compat.thinkingFormat=deepseek → reasoning collapses, answer is clean `content`).
+  #   Caveat: `content` comes back EMPTY if reasoning exceeds the token budget without closing </think>
+  #   (rare; keep client max_tokens generous — pi uses 65536).
 )
 # Optional env passed into the container, e.g. VLLM_ENV=( "VLLM_ATTENTION_BACKEND=TRITON_ATTN" )
 VLLM_ENV=()

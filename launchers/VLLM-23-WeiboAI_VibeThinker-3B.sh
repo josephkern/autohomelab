@@ -31,6 +31,8 @@ VLLM_FLAGS=(
   --enable-auto-tool-choice
   --tool-call-parser
   hermes
+  --reasoning-parser
+  deepseek_r1
 )
 
 REV_ARGS=(); [ -n "$MODEL_REVISION" ] && REV_ARGS=( --revision "$MODEL_REVISION" )
