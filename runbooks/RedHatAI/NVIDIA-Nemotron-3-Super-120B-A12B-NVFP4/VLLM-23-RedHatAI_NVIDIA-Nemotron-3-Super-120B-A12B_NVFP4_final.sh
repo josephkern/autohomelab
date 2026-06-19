@@ -38,7 +38,7 @@ VLLM_FLAGS=(
   # --- performance (tuned by the loop) ---
   --tensor-parallel-size 1
   --gpu-memory-utilization 0.85   # 75 GB weights need this on the 121.6 GiB unified pool (see header)
-  --max-model-len 8192            # benchmark shapes; native is 256K — raise for long-context runs
+  --max-model-len 131072          # 128K context (raised from the 8192 benchmark shape; native is 256K)
   --speculative-config '{"method":"mtp","num_speculative_tokens":1}'   # DELTA: native MTP spec decode
   # --- functional (serving features; CONFIRM against the model card; smoke.sh validates) ---
   --override-generation-config '{"temperature":1.0,"top_p":0.95}'   # model-recommended sampling (generation_config.json)
