@@ -54,3 +54,17 @@ Runbook `baseline.sh`; gpu-mem-util 0.50 (weights 44 GB fit, KV room for bench s
 - N=3 (220.6, 218.89, 221.24) median **c16=220.6 (+0.2% vs 220.1)**, c1=37.23. Neutral, as hypothesized:
   chat-c16 KV (16×768 tok) already fits at 0.5, so extra headroom doesn't add concurrency. (Would
   help coder/high-concurrency, but the objective is chat c16.)
+
+### cand #4 — `20260620_moe-trtllm_tuned.sh` — **DISCARD** (serve_fail)
++ `--moe-backend flashinfer_trtllm` (baseline auto = FLASHINFER_CUTLASS).
+- **serve_fail at engine init:** `ValueError: NvFp4 MoE backend 'FLASHINFER_TRTLLM' does not support
+  the deployment configuration since kernel does not support current device cuda.` TRTLLM's NVFP4 MoE
+  kernel is not built for sm_121 (GB10) — same exclusion class as b12x serve_fails on prior models.
+  Auto's FLASHINFER_CUTLASS is already the correct/only fast NVFP4 MoE path on this device.
+
+## Tune-loop conclusion (2026-06-20): BASELINE WINS
+No candidate beat baseline (c16=220.1) by >3%: ngram −34.6%, mnbt-16384 +1.1% (noise), gpumem-0p8
++0.2% (neutral), moe-trtllm serve_fail. Bandwidth-bound MoE with auto-selected optimal kernels
+(GDN Triton/FLA + FLASHINFER_CUTLASS) — same pattern as the 35B/gemma/VibeThinker campaigns. **Promote
+the baseline as the winner** (serving-identical → baseline suite stands; run FULL eval at finalize).
+All `*_tuned.sh` kept as the project record.
