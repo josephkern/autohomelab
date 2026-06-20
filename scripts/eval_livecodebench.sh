@@ -23,10 +23,10 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUNBOOK="${1:?usage: eval_livecodebench.sh <runbook.sh> <model_cutoff_YYYY-MM-DD> [scenario]}"
-CUTOFF="${2:?need the model's training cutoff date YYYY-MM-DD (the post-cutoff contamination window start)}"
+CUTOFF="${2:?need the model training cutoff date YYYY-MM-DD = start of the post-cutoff contamination window}"
 [ -f "$RUNBOOK" ] || { echo "not found: $RUNBOOK" >&2; exit 1; }
 LCB_REPO="${LCB_REPO:-$REPO_ROOT/source/LiveCodeBench}"
-[ -d "$LCB_REPO" ] || { echo "LiveCodeBench repo not found at $LCB_REPO — see ONE-TIME SETUP in this script's header." >&2; exit 2; }
+[ -d "$LCB_REPO" ] || { echo "LiveCodeBench repo not found at $LCB_REPO — see ONE-TIME SETUP in the header above." >&2; exit 2; }
 
 MODEL=""; SERVED_NAME=""; LCB_MODEL=""
 # shellcheck disable=SC1090
