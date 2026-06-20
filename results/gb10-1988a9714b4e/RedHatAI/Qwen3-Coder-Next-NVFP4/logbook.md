@@ -48,3 +48,9 @@ Runbook `baseline.sh`; gpu-mem-util 0.50 (weights 44 GB fit, KV room for bench s
 - N=3 (222.58, 218.08, 222.9) median **c16=222.58 (+1.1% vs 220.1)**, c1=37.0 (flat). Below the +3%
   keep floor → discard. Expected: the knob co-schedules prefill, but this model's c16 is
   decode-bandwidth-bound, not prefill-limited, so batched throughput barely moves.
+
+### cand #3 — `20260620_gpumem-0p8_tuned.sh` — **DISCARD** (+0.2% c16, neutral)
++ `--gpu-memory-utilization 0.5 -> 0.8`. Smoke 3/3; box stayed stable (no OOM/crash on the unified pool).
+- N=3 (220.6, 218.89, 221.24) median **c16=220.6 (+0.2% vs 220.1)**, c1=37.23. Neutral, as hypothesized:
+  chat-c16 KV (16×768 tok) already fits at 0.5, so extra headroom doesn't add concurrency. (Would
+  help coder/high-concurrency, but the objective is chat c16.)
