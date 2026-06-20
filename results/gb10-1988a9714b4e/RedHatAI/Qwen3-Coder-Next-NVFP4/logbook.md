@@ -42,3 +42,9 @@ Runbook `baseline.sh`; gpu-mem-util 0.50 (weights 44 GB fit, KV room for bench s
 - Verdict: discard as a default serve config on our objective. Would still help REAL repetitive coding
   traffic, but our synthetic bench can't reward it and the scheduler cap actively hurts here.
   (spec-decode ⊥ loglikelihood; greedy-lossless so quality unaffected — no separate eval needed.)
+
+### cand #2 — `20260620_mnbt-16384_tuned.sh` — **DISCARD** (+1.1% c16, within noise)
++ `--max-num-batched-tokens 16384` (default ~8192). Smoke 3/3.
+- N=3 (222.58, 218.08, 222.9) median **c16=222.58 (+1.1% vs 220.1)**, c1=37.0 (flat). Below the +3%
+  keep floor → discard. Expected: the knob co-schedules prefill, but this model's c16 is
+  decode-bandwidth-bound, not prefill-limited, so batched throughput barely moves.
