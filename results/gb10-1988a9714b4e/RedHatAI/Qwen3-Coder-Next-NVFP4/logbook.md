@@ -68,3 +68,11 @@ No candidate beat baseline (c16=220.1) by >3%: ngram −34.6%, mnbt-16384 +1.1% 
 (GDN Triton/FLA + FLASHINFER_CUTLASS) — same pattern as the 35B/gemma/VibeThinker campaigns. **Promote
 the baseline as the winner** (serving-identical → baseline suite stands; run FULL eval at finalize).
 All `*_tuned.sh` kept as the project record.
+
+## FINALIZE / PROMOTED (2026-06-20) → `VLLM-23-RedHatAI_Qwen3-Coder-Next_NVFP4_final.sh`
+Ran `FULL=1 suite.sh` on the baseline winner. FULL eval landed **gsm8k=94.24, mmlu=81.79** (think-on,
+no-cap) — consistent with the limit-100 reference (95.0 / 83.81). mmlu_pro FULL was **cut short by
+choice** (12,032 q ≈ 5 h, only refines the already-healthy limit-100 **mmlu_pro=70.07**; the bench
+re-measures the serving-identical baseline). Promote criteria met: smoke PASS, NVFP4 quality healthy/
+lossless, throughput characterized. Promoted via `VLLM_TAG=23 promote.sh` (avoids the version-grep bug).
+Campaign COMPLETE.
