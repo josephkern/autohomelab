@@ -47,14 +47,17 @@ ensure_up(){ "$ADAPTER" health >/dev/null 2>&1 && return 0
   log "endpoint not healthy — (re)serving"
   "$SCRIPT_DIR/serve.sh" "$RUNBOOK" >/dev/null 2>"$REPO_ROOT/.ahl_suite_serve.log"; }
 
-log "=== STANDARD SUITE: $(realpath --relative-to="$REPO_ROOT" "$RUNBOOK") (cfg $CFG; eval ${LIMIT:+limit=$LIMIT}${LIMIT:-FULL}) ==="
+LIMLBL="${LIMIT:+limit=$LIMIT}"; LIMLBL="${LIMLBL:-FULL}"
+log "=== STANDARD SUITE: $(realpath --relative-to="$REPO_ROOT" "$RUNBOOK") (cfg $CFG; eval $LIMLBL) ==="
 ensure_up || { echo "serve failed; see .ahl_suite_serve.log" >&2; exit 1; }
 
 # Reasoning models emit <think> CoT that truncates/derails GENERATIVE eval (35B gsm8k 40->90 with
 # thinking off). Such models get their generative quality measured on a SECOND, thinking-OFF serve
 # (chat endpoint, enable_thinking=false); the loglikelihood reference (mmlu) is thinking-agnostic and
 # stays on this deployed (thinking-ON) serve. Non-reasoning models run everything on the one serve.
-REASONING=0; grep -q -- '--reasoning-parser' "$RUNBOOK" && REASONING=1
+# Match only an ACTIVE flag, not a comment mentioning it (grep w/o anchor caught a baseline.sh
+# comment "no --reasoning-parser ..." and misfired the reasoning branch on a non-reasoning model).
+REASONING=0; grep -qE '^[[:space:]]*--reasoning-parser' "$RUNBOOK" && REASONING=1
 
 # Gate 1 — functional (deployed thinking-ON serve)
 smoke=PASS; "$SCRIPT_DIR/smoke.sh" "$RUNBOOK" || smoke=FAIL; log "Gate 1 smoke: $smoke"
