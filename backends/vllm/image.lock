@@ -20,6 +20,15 @@ AHL_VLLM_DEFAULT_ENTRYPOINT_SERVE=true   # image ENTRYPOINT is already `vllm ser
 # v0.23.0   vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f  serve=yes  [DEFAULT]
 #           stable release (2026-06-12); FlashInfer b12x MoE+FP4 GEMM for SM120/121, per-tensor FP8
 #           CUTLASS on SM12.1, KV-load deadlock fixes. arm64 manifest digest: df5f8edb3866…
+# 0.23.0-qwen3nextmtp-fix  vllm-openai:0.23.0-qwen3nextmtp-fix  (local id sha256:628a16cc5a4a)  serve=yes
+#           PATCHED 0.23.0 (base @sha256:6d8429e3) — unblocks qwen3_next MTP spec-decode on NVFP4/ModelOpt
+#           checkpoints on GB10/sm_121 (vLLM issue #35031 + @alkari's DGX-Spark report). TWO image patches:
+#           (#1) qwen3_next_mtp.py packed_modules_mapping gate_up_proj ["up_proj","down_proj"]→["gate_proj","up_proj"];
+#           (#3) third_party/pynvml.py _nvmlCheckReturn tolerate NVML_ERROR_UNINITIALIZED (unified-mem 2nd-shutdown).
+#           Build recipe: backends/vllm/images/qwen3next-mtp-fix/Dockerfile. The 3rd patch is CHECKPOINT-side
+#           (scripts/patch_qwen3next_mtp_ignore.py adds "mtp.*" to quant-ignore so mtp.fc stays bf16). Identical
+#           to stock 0.23.0 except the MTP loader + NVML check; needed ONLY for --speculative-config qwen3_next_mtp.
+#           VERIFIED: nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4 serves + generates with MTP drafter. Local-only.
 # v0.22.0   vllm/vllm-openai@sha256:0fec7ec5f3e6bc168e54899935fb0557da908a4832a1dbc88e2debcf2f889416  serve=yes
 #           stable; NVFP4 compressed-tensors + --moe-backend flashinfer_cutlass; cu130/torch2.11.
 #           First 8B campaign winner ran on this (native-FP4 W4A4).
