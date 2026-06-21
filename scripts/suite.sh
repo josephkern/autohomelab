@@ -58,6 +58,10 @@ ensure_up || { echo "serve failed; see .ahl_suite_serve.log" >&2; exit 1; }
 # Match only an ACTIVE flag, not a comment mentioning it (grep w/o anchor caught a baseline.sh
 # comment "no --reasoning-parser ..." and misfired the reasoning branch on a non-reasoning model).
 REASONING=0; grep -qE '^[[:space:]]*--reasoning-parser' "$RUNBOOK" && REASONING=1
+# Spec-decode (MTP/ngram/EAGLE) returns NaN prompt_logprobs → loglikelihood `mmlu` 400s ("Out of range
+# float values are not JSON compliant"). Spec-decode is greedy-LOSSLESS, so the GENERATIVE tasks
+# (gsm8k, mmlu_pro) suffice and match the non-spec scores. Skip loglikelihood mmlu when spec-decode is on.
+SPEC=0; grep -qE '^[[:space:]]*--speculative-config' "$RUNBOOK" && SPEC=1
 
 # Gate 1 — functional (deployed thinking-ON serve)
 smoke=PASS; "$SCRIPT_DIR/smoke.sh" "$RUNBOOK" || smoke=FAIL; log "Gate 1 smoke: $smoke"
@@ -67,6 +71,10 @@ gen=ok; res=ok
 if [ "$REASONING" = 1 ]; then
   ensure_up && TASKS=mmlu "$SCRIPT_DIR/eval.sh" "$RUNBOOK" general || gen=error
   log "Gate 2 mmlu (loglikelihood, think-on): $gen   [generative gsm8k/mmlu_pro -> think-off pass below]"
+elif [ "$SPEC" = 1 ]; then
+  # spec-decode: generative-only (gsm8k for general, skip loglikelihood mmlu) + mmlu_pro (generative).
+  ensure_up && TASKS=gsm8k "$SCRIPT_DIR/eval.sh" "$RUNBOOK" general   || gen=error; log "Gate 2 general [gsm8k only, spec-decode skips loglikelihood mmlu]: $gen"
+  ensure_up &&              "$SCRIPT_DIR/eval.sh" "$RUNBOOK" resistant || res=error; log "Gate 2 resistant: $res"
 else
   ensure_up && "$SCRIPT_DIR/eval.sh" "$RUNBOOK" general   || gen=error; log "Gate 2 general: $gen"
   ensure_up && "$SCRIPT_DIR/eval.sh" "$RUNBOOK" resistant || res=error; log "Gate 2 resistant: $res"
