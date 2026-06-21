@@ -1,0 +1,3 @@
+run_id	commit	node_fp	model	config_hash	script	suite	tasks	limit	scores	data	think
+20260621-063248-eval	b24dc42	gb10-1988a9714b4e	nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4	5dab2e11	runbooks/nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4/baseline.sh	general	gsm8k,mmlu	100	gsm8k=96.0;mmlu=84.88	results/gb10-1988a9714b4e/nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4/data/20260621-063248-eval	on
+20260621-065230-eval	b24dc42	gb10-1988a9714b4e	nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4	5dab2e11	runbooks/nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4/baseline.sh	resistant	mmlu_pro	100	mmlu_pro=71.93	results/gb10-1988a9714b4e/nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4/data/20260621-065230-eval	on
