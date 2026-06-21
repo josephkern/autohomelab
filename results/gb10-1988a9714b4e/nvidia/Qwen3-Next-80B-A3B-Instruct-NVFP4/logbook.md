@@ -30,4 +30,14 @@ gpu-mem-util 0.50 (48 GB weights fit); max-model-len 8192. Patched image (non-MT
 - The MTP lever lands: native single-token draft, greedy-lossless (target verifies → quality == baseline,
   no eval needed). Biggest lift at c1 (single-stream, bandwidth-bound) as expected; still clears +3% at c16
   despite spec-decode's max_num_scheduled_tokens=2048 cap. Required the 3-patch unblock (see env block).
-  **Current best.** (Next: mtp-n2 num_spec=2 — expect lower per the "n>1 reuses 1 MTP layer" warning.)
+  **Current best.**
+
+### cand — `20260620_mtp-n2_tuned.sh` (num_spec=2) — **DISCARD** (vs mtp-n1: c16 +1.1% noise, c1 −6.8%)
++ `--speculative-config '{...,"num_speculative_tokens":2}'`. Smoke 3/3.
+- N=3 (269.45, 271.8, 269.36) median **c16=269.45**, c1=47.20. vs baseline: c16 +13.6%, c1 +21.1% (still a
+  KEEP over baseline) — but vs the mtp-n1 incumbent, c16 +1.1% (within noise) and **c1 −6.8%**. n>1 reuses
+  the single MTP layer → lower acceptance, exactly per vLLM's warning. **mtp-n1 (num_spec=1) wins.**
+
+## WINNER: `20260621_mtp-n1_tuned.sh` (num_spec=1) — MTP +12.4% c16 / +29.9% c1 vs baseline.
+Open follow-up candidate (not yet run): MTP + `--max-num-batched-tokens` raised above the spec-decode
+2048 cap (vLLM hints this could recover batched throughput) — might lift MTP c16 further.
