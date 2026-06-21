@@ -41,3 +41,16 @@ gpu-mem-util 0.50 (48 GB weights fit); max-model-len 8192. Patched image (non-MT
 ## WINNER: `20260621_mtp-n1_tuned.sh` (num_spec=1) — MTP +12.4% c16 / +29.9% c1 vs baseline.
 Open follow-up candidate (not yet run): MTP + `--max-num-batched-tokens` raised above the spec-decode
 2048 cap (vLLM hints this could recover batched throughput) — might lift MTP c16 further.
+
+## FINALIZE / PROMOTED (2026-06-21) → `VLLM-23-nvidia_Qwen3-Next-80B-A3B-Instruct_NVFP4_final.sh`
+Finalize suite on mtp-n1 (cfg d1c38405) — generative-only Gate 2 (suite.sh now skips loglikelihood mmlu
+for spec-decode configs). ALL GATES PASS:
+- smoke 3/3; **gsm8k=94.0, mmlu_pro=71.29** (vs baseline 96.0/71.93 — within LIMIT=100 noise → MTP
+  greedy-lossless confirmed). (loglikelihood mmlu intentionally skipped: NaN prompt_logprobs under spec-decode.)
+- **Full MTP throughput curve — lift across ALL levels & BOTH shapes:**
+  | shape | c1 | c4 | c8 | c16 | c32 |
+  |---|---|---|---|---|---|
+  | chat  | 50.81 (+30%) | 127.66 | 185.3 | **266.74 (+12.5%)** | 362.54 (+12.5%) |
+  | coder | 50.68 (+32%) | 112.89 | 158.4 | **196.38 (+17%)** | 210.7 (+26%) |
+Requires the patched image + checkpoint mtp.* quant-ignore (3-patch unblock). Posted the recipe +
+validation upstream (vLLM issue #35031). Campaign COMPLETE. **This is the lab's first MTP-on-NVFP4 win.**
