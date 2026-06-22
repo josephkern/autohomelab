@@ -28,6 +28,10 @@ AHL_VLLM_DEFAULT_ENTRYPOINT_SERVE=true   # image ENTRYPOINT is already `vllm ser
 #           Build recipe: backends/vllm/images/qwen3next-mtp-fix/Dockerfile. The 3rd patch is CHECKPOINT-side
 #           (scripts/patch_qwen3next_mtp_ignore.py adds "mtp.*" to quant-ignore so mtp.fc stays bf16). Identical
 #           to stock 0.23.0 except the MTP loader + NVML check; needed ONLY for --speculative-config qwen3_next_mtp.
+#           UPSTREAM FIX: vLLM PR #46316 (open 2026-06-22, our writeup → @WindChimeRan) = patch #1 + an IN-CODE
+#           mtp.fc-unquantized fix (supersedes the checkpoint-side patch). When it merges + ships in a release:
+#           rebuild from that release with ONLY patch #3 (pynvml, DGX-Spark-specific, not upstreamed) and drop
+#           patch_qwen3next_mtp_ignore.py. Both Instruct AND Thinking NVFP4 share the defect → same path.
 #           VERIFIED: nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4 serves + generates with MTP drafter. Local-only.
 # v0.22.0   vllm/vllm-openai@sha256:0fec7ec5f3e6bc168e54899935fb0557da908a4832a1dbc88e2debcf2f889416  serve=yes
 #           stable; NVFP4 compressed-tensors + --moe-backend flashinfer_cutlass; cu130/torch2.11.
