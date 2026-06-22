@@ -41,7 +41,9 @@ gen_one() {
   : "${MODEL:?$rb must set MODEL}"; : "${SERVED_NAME:=$MODEL}"
 
   # Resolve the image's vLLM version from the image.lock catalog (for the header note).
-  local ver; ver="$(grep -F "$VLLM_IMAGE" "$IMAGE_LOCK" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+  # Optional `v` prefix: stock lines read `v0.23.0`, patched-image lines read `0.23.0-<suffix>`.
+  # `|| true` so an unmatched grep can't trip set -e/pipefail (the fallback below handles empty).
+  local ver; ver="$(grep -F "$VLLM_IMAGE" "$IMAGE_LOCK" | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
   [ -n "$ver" ] || ver="(see backends/vllm/image.lock)"
 
   # Pull --max-model-len out into its own exported MAX_MODEL_LEN var (bin-script convention);
@@ -96,9 +98,18 @@ gen_one() {
     echo '#   PORT=8001 NAME=foo ./'"$(basename "$out")"'   # override the published port / container name'
     echo '#'
     echo
-    echo "# Upstream vLLM ${ver} pinned by digest for reproducibility — the release tag is already immutable;"
-    echo '# the digest makes it byte-exact. Blackwell kernels are built sm_120 (forward-compatible to the'
-    echo "# GB10's sm_121); FlashInfer JITs the FP4/MoE paths for the device at runtime."
+    if [[ "$VLLM_IMAGE" == *"@sha256:"* ]]; then
+      # Portable upstream image, pinned by content digest.
+      echo "# Upstream vLLM ${ver} pinned by digest for reproducibility — the release tag is already immutable;"
+      echo '# the digest makes it byte-exact. Blackwell kernels are built sm_120 (forward-compatible to the'
+      echo "# GB10's sm_121); FlashInfer JITs the FP4/MoE paths for the device at runtime."
+    else
+      # Locally-built image (e.g. a patched vLLM) referenced by tag — NOT portable until built.
+      echo "# NOTE: this config uses a LOCALLY-BUILT vLLM ${ver} image (\`${VLLM_IMAGE}\`), not a portable"
+      echo '# upstream digest — it must be built on the host before this launcher will run. See its'
+      echo '# Dockerfile under backends/vllm/images/ and the matching entry in backends/vllm/image.lock.'
+      echo "# Blackwell kernels are sm_120 (forward-compatible to the GB10's sm_121); FlashInfer JITs FP4/MoE."
+    fi
     printf 'export VLLM_IMAGE="%s"  # %s\n' "$VLLM_IMAGE" "$ver"
     printf 'export MODEL="%s"\n' "$MODEL"
     [ -n "$MODEL_REVISION" ] && printf 'export MODEL_REVISION="%s"   # pinned for reproducibility\n' "$MODEL_REVISION"
