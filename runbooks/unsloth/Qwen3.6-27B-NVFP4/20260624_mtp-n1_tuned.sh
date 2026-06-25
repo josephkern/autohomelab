@@ -30,7 +30,7 @@ VLLM_FLAGS=(
   --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":1}'   # DELTA: native MTP, single draft token
   # --- functional (serving features; CONFIRM against the model card; smoke.sh validates) ---
   --override-generation-config '{"temperature":1.0,"top_p":0.95,"top_k":20}'   # model-recommended sampling (generation_config.json)
-  --enable-auto-tool-choice --tool-call-parser hermes   # hermes JSON-in-XML tool format (chat_template has tool support)
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder   # qwen3_coder XML <function=...> format (chat_template L53; hermes FAILED smoke)
   --reasoning-parser qwen3   # HYBRID reasoning: <think> CoT + enable_thinking TOGGLE → standard suite think-off path works
   --limit-mm-per-prompt '{"image":0}'   # MULTIMODAL (Qwen3_5ForConditionalGeneration) served TEXT-ONLY (matches our text suite; cf. gemma-4-31B)
   # MTP PRESENT (mtp_num_hidden_layers=1, preserved in this NVFP4 build) → tuned variant adds

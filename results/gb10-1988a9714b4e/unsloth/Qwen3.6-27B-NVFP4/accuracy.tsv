@@ -1,0 +1,4 @@
+run_id	commit	node_fp	model	config_hash	script	suite	tasks	limit	scores	data	think
+20260625-044516-eval	bf0c5d9	gb10-1988a9714b4e	unsloth/Qwen3.6-27B-NVFP4	c8b4b165	runbooks/unsloth/Qwen3.6-27B-NVFP4/baseline.sh	general	mmlu	100	mmlu=84.26	results/gb10-1988a9714b4e/unsloth/Qwen3.6-27B-NVFP4/data/20260625-044516-eval	on
+20260625-055516-eval	bf0c5d9	gb10-1988a9714b4e	unsloth/Qwen3.6-27B-NVFP4	c8b4b165	runbooks/unsloth/Qwen3.6-27B-NVFP4/baseline.sh	general	gsm8k	100	gsm8k=98.0	results/gb10-1988a9714b4e/unsloth/Qwen3.6-27B-NVFP4/data/20260625-055516-eval	off
+20260625-055958-eval	bf0c5d9	gb10-1988a9714b4e	unsloth/Qwen3.6-27B-NVFP4	c8b4b165	runbooks/unsloth/Qwen3.6-27B-NVFP4/baseline.sh	resistant	mmlu_pro	100	mmlu_pro=71.64	results/gb10-1988a9714b4e/unsloth/Qwen3.6-27B-NVFP4/data/20260625-055958-eval	off
