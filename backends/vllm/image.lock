@@ -17,6 +17,13 @@ AHL_VLLM_DEFAULT_IMAGE="vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e0
 AHL_VLLM_DEFAULT_ENTRYPOINT_SERVE=true   # image ENTRYPOINT is already `vllm serve` -> pass MODEL positionally
 
 # ── Validated catalog (ref | entrypoint_serve | notes) ────────────────────────
+# v0.24.0   vllm/vllm-openai@sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f  serve=yes
+#           stable release; verified vllm 0.24.0 (torch 2.11+cu130), size 21.3GB. Release highlights
+#           relevant to GB10/sm_121: NVFP4 on Blackwell (DGX Spark named), MoE path enabled on SM120
+#           (+GLM-5.1/DeepSeek-V4), Model-Runner-V2 quantized-by-default + Qwen/DeepSeek-V2 MoE
+#           spec-decode migration, DFlash spec decoding, spec-decode DoS hardening. Being validated
+#           on Qwen3.6-35B-A3B (35B 0.23→0.24 transition campaign); promote to [DEFAULT] once all
+#           three gates pass. capabilities snapshot: backends/vllm/capabilities/0.24.0.txt.
 # v0.23.0   vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f  serve=yes  [DEFAULT]
 #           stable release (2026-06-12); FlashInfer b12x MoE+FP4 GEMM for SM120/121, per-tensor FP8
 #           CUTLASS on SM12.1, KV-load deadlock fixes. arm64 manifest digest: df5f8edb3866…

@@ -1,10 +1,10 @@
 # vLLM capability snapshot
-image:   vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f
-version: 0.23.0
+image:   vllm/vllm-openai@sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f
+version: 0.24.0
 
 ## Key multi-choice knobs (the loop's option space) ###############################
---linear-backend {aiter,auto,conch,cutlass,deep_gemm,emulation,exllama,fbgemm,flashinfer_cudnn,flashinfer_cutlass,flashinfer_trtllm,machete,marlin,torch,triton}
---moe-backend {aiter,auto,cutlass,deep_gemm,deep_gemm_mega_moe,emulation,flashinfer_b12x,flashinfer_cutedsl,flashinfer_cutlass,flashinfer_trtllm,humming,marlin,triton,triton_unfused}
+--linear-backend {aiter,auto,conch,cutlass,deep_gemm,emulation,exllama,fbgemm,flashinfer_b12x,flashinfer_cudnn,flashinfer_cutedsl,flashinfer_cutlass,flashinfer_trtllm,machete,marlin,torch,triton}
+--moe-backend {aiter,auto,cutlass,deep_gemm,deep_gemm_mega_moe,emulation,flashinfer_b12x,flashinfer_cutedsl,flashinfer_cutlass,flashinfer_trtllm,flydsl,humming,marlin,triton,triton_unfused}
 --attention-backend : (no enumerated choices; see full help)
 --kv-cache-dtype {auto,bfloat16,float16,fp8,fp8_ds_mla,fp8_e4m3,fp8_e5m2,fp8_inc,fp8_per_token_head,int8_per_token_head,nvfp4,turboquant_3bit_nc,turboquant_4bit_nc,turboquant_k3v4_nc,turboquant_k8v4}
 --quantization : (no enumerated choices; see full help)
@@ -64,6 +64,9 @@ VLLM_DEEPEPLL_NVFP4_DISPATCH
 VLLM_DEEPEP_BUFFER_SIZE_MB
 VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE
 VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL
+VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE
+VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION
+VLLM_DEEPEP_V2_PREFER_OVERLAP
 VLLM_DEEP_GEMM_WARMUP
 VLLM_DISABLED_KERNELS
 VLLM_DISABLE_COMPILE_CACHE
@@ -93,10 +96,10 @@ VLLM_ENFORCE_STRICT_TOOL_CALLING
 VLLM_ENGINE_ITERATION_TIMEOUT_S
 VLLM_ENGINE_READY_TIMEOUT_S
 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+VLLM_FASTSAFETENSORS_QUEUE_SIZE
 VLLM_FLASHINFER_ALLREDUCE_BACKEND
 VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB
 VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR
-VLLM_FLASHINFER_MOE_BACKEND
 VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
 VLLM_FLOAT32_MATMUL_PRECISION
 VLLM_FORCE_AOT_LOAD
@@ -132,6 +135,8 @@ VLLM_MAIN_CUDA_VERSION
 VLLM_MARLIN_INPUT_DTYPE
 VLLM_MARLIN_USE_ATOMIC_ADD
 VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
+VLLM_MAX_AUDIO_DECODE_DURATION_S
+VLLM_MAX_AUDIO_PREPROCESS_WORKERS
 VLLM_MAX_N_SEQUENCES
 VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
 VLLM_MEDIA_CACHE
@@ -154,7 +159,7 @@ VLLM_MOONCAKE_STORE_TIER_LOG
 VLLM_MQ_MAX_CHUNK_BYTES_MB
 VLLM_MSGPACK_ZERO_COPY_THRESHOLD
 VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD
-VLLM_MXFP4_USE_MARLIN
+VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD
 VLLM_NCCL_INCLUDE_PATH
 VLLM_NCCL_SO_PATH
 VLLM_NIC_SELECTION_VARS
@@ -162,7 +167,6 @@ VLLM_NIXL_EP_MAX_NUM_RANKS
 VLLM_NIXL_SIDE_CHANNEL_HOST
 VLLM_NIXL_SIDE_CHANNEL_PORT
 VLLM_NO_USAGE_STATS
-VLLM_NVFP4_GEMM_BACKEND
 VLLM_NVTX_SCOPES_FOR_PROFILING
 VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME
 VLLM_PATTERN_MATCH_DEBUG
@@ -178,6 +182,7 @@ VLLM_RAY_DP_PLACEMENT_NODE_IPS
 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY
 VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY
 VLLM_RAY_PER_WORKER_GPUS
+VLLM_REGEX_COMPILATION_TIMEOUT_S
 VLLM_RINGBUFFER_WARNING_INTERVAL
 VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
 VLLM_ROCM_FP8_MFMA_PAGE_ATTN
@@ -226,6 +231,7 @@ VLLM_TPU_MOST_MODEL_LEN
 VLLM_TPU_USING_PATHWAYS
 VLLM_TRACE_FUNCTION
 VLLM_TRITON_ATTN_USE_TD
+VLLM_TRITON_FORCE_FIRST_CONFIG
 VLLM_TUNED_CONFIG_FOLDER
 VLLM_USAGE_SOURCE
 VLLM_USAGE_STATS_SERVER
@@ -237,21 +243,13 @@ VLLM_USE_DEEP_GEMM_E8M0
 VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES
 VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT
 VLLM_USE_FASTOKENS
-VLLM_USE_FBGEMM
-VLLM_USE_FLASHINFER_MOE_FP16
-VLLM_USE_FLASHINFER_MOE_FP4
-VLLM_USE_FLASHINFER_MOE_FP8
 VLLM_USE_FLASHINFER_MOE_INT4
-VLLM_USE_FLASHINFER_MOE_MXFP4_BF16
-VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS
 VLLM_USE_FLASHINFER_SAMPLER
 VLLM_USE_FUSED_MOE_GROUPED_TOPK
 VLLM_USE_LAYERNAME
 VLLM_USE_MEGA_AOT_ARTIFACT
 VLLM_USE_MODELSCOPE
 VLLM_USE_NCCL_SYMM_MEM
-VLLM_USE_NVFP4_CT_EMULATIONS
 VLLM_USE_OINK_OPS
 VLLM_USE_PRECOMPILED
 VLLM_USE_PRECOMPILED_RUST
@@ -272,6 +270,8 @@ VLLM_VIDEO_LOADER_BACKEND
 VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY
 VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
 VLLM_WORKER_MULTIPROC_METHOD
+VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS
+VLLM_WSL2_ENABLE_PIN_MEMORY
 VLLM_XGRAMMAR_CACHE_MB
 VLLM_XLA_CACHE_PATH
 VLLM_XLA_CHECK_RECOMPILATION
@@ -439,7 +439,7 @@ Frontend:
   --ssl-keyfile SSL_KEYFILE
                         The file path to the SSL key file. (default: None)
   --tokens-only, --no-tokens-only
-  --tool-call-parser {apertus,cohere_command3,cohere_command4,deepseek_v3,deepseek_v31,deepseek_v32,deepseek_v4,ernie45,functiongemma,gemma4,gigachat3,glm45,glm47,granite,granite-20b-fc,granite4,hermes,hunyuan_a13b,hy_v3,internlm,jamba,kimi_k2,lfm2,llama3_json,llama4_json,llama4_pythonic,longcat,mimo,minicpm5,minimax,minimax_m2,mistral,olmo3,openai,phi4_mini_json,poolside_v1,pythonic,qwen3_coder,qwen3_xml,seed_oss,step3,step3p5,xlam} or name registered in --tool-parser-plugin
+  --tool-call-parser {apertus,cohere_command3,cohere_command4,deepseek_v3,deepseek_v31,deepseek_v32,deepseek_v4,ernie45,functiongemma,gemma4,gigachat3,glm45,glm47,granite,granite-20b-fc,granite4,hermes,hunyuan_a13b,hy_v3,internlm,jamba,kimi_k2,lfm2,llama3_json,llama4_json,llama4_pythonic,longcat,mimo,minicpm5,minimax_m2,minimax_m3,mistral,olmo3,openai,phi4_mini_json,poolside_v1,pythonic,qwen3_coder,qwen3_xml,seed_oss,step3,step3p5,xlam} or name registered in --tool-parser-plugin
   --tool-parser-plugin TOOL_PARSER_PLUGIN
   --tool-server TOOL_SERVER
   --trust-request-chat-template, --no-trust-request-chat-template
@@ -623,7 +623,7 @@ ModelConfig:
   --pooler-config POOLER_CONFIG
                         Pooler config which controls the behaviour of output
                         pooling in pooling models.
-                        API docs: https://docs.vllm.ai/en/v0.23.0/api/vllm/con
+                        API docs: https://docs.vllm.ai/en/v0.24.0/api/vllm/con
                         fig/#vllm.config.PoolerConfig
                         Should either be a valid JSON string or JSON keys
                         passed individually. (default: None)
@@ -641,7 +641,7 @@ ModelConfig:
                         from the matching online shorthand when `quantization`
                         is one of the values in
                         `ONLINE_QUANT_SHORTHAND_NAMES`.
-                        API docs: https://docs.vllm.ai/en/v0.23.0/api/vllm/con
+                        API docs: https://docs.vllm.ai/en/v0.24.0/api/vllm/con
                         fig/#vllm.config.QuantizationConfigArgs
                         Should either be a valid JSON string or JSON keys
                         passed individually. (default: None)
@@ -700,8 +700,6 @@ ModelConfig:
                         `deepseek_v32`.
                         - "deepseek_v4" will always use the tokenizer from
                         `deepseek_v4`.
-                        - "qwen_vl" will always use the tokenizer from
-                        `qwen_vl`.
                         - Other custom values can be supported via plugins.
                         To swap the Rust BPE backend that powers HF fast
                         tokenizers for the
@@ -709,7 +707,7 @@ ModelConfig:
                         implementation, set `VLLM_USE_FASTOKENS=1` instead —
                         that override applies to any mode that loads an HF
                         fast tokenizer (`hf`, `deepseek_v32`, `deepseek_v4`,
-                        `qwen_vl`, …). (default: auto)
+                        …). (default: auto)
   --tokenizer-revision TOKENIZER_REVISION
                         The specific revision to use for the tokenizer on the
                         Hugging Face Hub. It can be a branch name, a tag name,
@@ -766,9 +764,6 @@ LoadConfig:
                         - "sharded_state" will load weights from pre-sharded
                         checkpoint files, supporting efficient loading of
                         tensor-parallel models.
-                        - "gguf" will load weights from GGUF format files
-                        (details specified in https://github.com/ggml-
-                        org/ggml/blob/master/docs/gguf.md).
                         - "mistral" will load weights from consolidated
                         safetensors files used by Mistral models.
                         - "modelexpress" will load weights using ModelExpress.
@@ -789,7 +784,7 @@ LoadConfig:
                         double quoted for json parsing. For more details, see
                         the original doc for `map_location` parameter in
                         [`torch.load`][] parameter. (default: cpu)
-  --safetensors-load-strategy SAFETENSORS_LOAD_STRATEGY
+  --safetensors-load-strategy {eager,lazy,prefetch,torchao,None}
                         Specifies the loading strategy for safetensors
                         weights.
                         - None (default): Uses memory-mapped (lazy) loading.
@@ -870,7 +865,7 @@ StructuredOutputsConfig:
 ParallelConfig:
   Configuration for the distributed execution.
 
-  --all2all-backend {allgather_reducescatter,deepep_high_throughput,deepep_low_latency,flashinfer_all2allv,flashinfer_nvlink_one_sided,flashinfer_nvlink_two_sided,mori_high_throughput,mori_low_latency,naive,nixl_ep,pplx}
+  --all2all-backend {allgather_reducescatter,deepep_high_throughput,deepep_low_latency,deepep_v2,flashinfer_all2allv,flashinfer_nvlink_one_sided,flashinfer_nvlink_two_sided,mori_high_throughput,mori_low_latency,naive,nixl_ep,pplx}
                         All2All backend for MoE expert parallel communication.
                         Available options:
                         - "allgather_reducescatter": All2all based on
@@ -985,6 +980,13 @@ ParallelConfig:
                         world size does not change by dcp, it simply reuse the
                         GPUs of TP group, and tp_size needs to be divisible by
                         dcp_size. (default: 1)
+  --device-ids DEVICE_IDS
+                        Comma-separated physical GPU device IDs or UUIDs to
+                        use (e.g. --device-ids "2,3,5,7"). Avoids setting
+                        CUDA_VISIBLE_DEVICES, preserving full GPU topology
+                        visibility for GPU-NIC affinity and DeepGEMM. Note:
+                        has no effect with Ray executors; use Ray placement
+                        groups for GPU selection instead. (default: None)
   --disable-custom-all-reduce, --no-disable-custom-all-reduce
                         Disable the custom all-reduce kernel and fall back to
                         NCCL. (default: False)
@@ -1037,7 +1039,7 @@ ParallelConfig:
                         for MoE layers. (default: False)
   --eplb-config EPLB_CONFIG
                         Expert parallelism configuration.
-                        API docs: https://docs.vllm.ai/en/v0.23.0/api/vllm/con
+                        API docs: https://docs.vllm.ai/en/v0.24.0/api/vllm/con
                         fig/#vllm.config.EPLBConfig
                         Should either be a valid JSON string or JSON keys
                         passed individually. (default:
@@ -1568,6 +1570,10 @@ ObservabilityConfig:
   --enable-mfu-metrics, --no-enable-mfu-metrics
                         Enable Model FLOPs Utilization (MFU) metrics.
                         (default: False)
+  --jit-monitor-verbose, --no-jit-monitor-verbose
+                        Log every Triton JIT compile with its dispatch key.
+                        This can emit many logs and add overhead, so it is
+                        intended for debugging. (default: False)
   --kv-cache-metrics, --no-kv-cache-metrics
                         Enable KV cache residency metrics (lifetime, idle
                         time, reuse gaps). Uses sampling to minimize overhead.
@@ -1653,6 +1659,11 @@ SchedulerConfig:
                         The default value here is mainly for convenience when
                         testing. In real usage, this should be set in
                         `EngineArgs.create_engine_config`. (default: None)
+  --prefill-schedule-interval PREFILL_SCHEDULE_INTERVAL
+                        For data-parallel deployments, only admit new prefill
+                        requests once every N engine steps, aligned across DP
+                        ranks, to better balance per-step forward-pass times.
+                        (default: 1)
   --scheduler-cls SCHEDULER_CLS
                         The scheduler class to use.
                         "vllm.v1.core.sched.scheduler.Scheduler" is the
@@ -1678,6 +1689,14 @@ SchedulerConfig:
                         larger value (e.g., 10) reduces host overhead and may
                         increase throughput by batching multiple tokens before
                         sending. (default: 1)
+  --watermark WATERMARK
+                        Fraction of total KV cache blocks to keep free (the
+                        watermark) when admitting waiting or preempted
+                        requests into the running queue. This headroom helps
+                        avoid frequent KV cache eviction and the resulting
+                        repeated preemption of requests when GPU memory is
+                        scarce. Must be in the range [0.0, 1.0); 0.0 (the
+                        default) disables the watermark. (default: 0.0)
 
 CompilationConfig:
   Configuration for compilation.
@@ -1759,13 +1778,13 @@ KernelConfig:
                         vLLM IR op priority for dispatching/lowering during
                         the forward pass. Platform defaults appended
                         automatically during VllmConfig.__post_init__.
-                        API docs: https://docs.vllm.ai/en/v0.23.0/api/vllm/con
+                        API docs: https://docs.vllm.ai/en/v0.24.0/api/vllm/con
                         fig/#vllm.config.IrOpPriorityConfig
                         Should either be a valid JSON string or JSON keys
                         passed individually. (default:
                         IrOpPriorityConfig(rms_norm=[],
                         fused_add_rms_norm=[]))
-  --linear-backend {aiter,auto,conch,cutlass,deep_gemm,emulation,exllama,fbgemm,flashinfer_cudnn,flashinfer_cutlass,flashinfer_trtllm,machete,marlin,torch,triton}
+  --linear-backend {aiter,auto,conch,cutlass,deep_gemm,emulation,exllama,fbgemm,flashinfer_b12x,flashinfer_cudnn,flashinfer_cutedsl,flashinfer_cutlass,flashinfer_trtllm,machete,marlin,torch,triton}
                         Backend for quantized linear layer GEMM kernels.
                         Available options:
                         - "auto": Automatically select the best backend based
@@ -1773,10 +1792,14 @@ KernelConfig:
                         - "cutlass": Use CUTLASS-based kernels
                         - "flashinfer_cutlass": Use FlashInfer with CUTLASS
                         kernels
+                        - "flashinfer_cutedsl": Use FlashInfer with CuTe-DSL
+                        kernels (NVFP4, MXFP8)
                         - "flashinfer_trtllm": Use FlashInfer with TensorRT-
                         LLM kernels
                         - "flashinfer_cudnn": Use FlashInfer with cuDNN
                         kernels
+                        - "flashinfer_b12x": Use FlashInfer b12x CuteDSL NVFP4
+                        GEMM (SM120+)
                         - "marlin": Use Marlin kernels
                         - "triton": Use Triton-based kernels
                         - "deep_gemm": Use DeepGEMM kernels
@@ -1788,7 +1811,7 @@ KernelConfig:
                         - "exllama": Use Exllama mixed-precision kernels
                         - "emulation": Use slow dequant-to-BF16 emulation (for
                         testing only) (default: auto)
-  --moe-backend {aiter,auto,cutlass,deep_gemm,deep_gemm_mega_moe,emulation,flashinfer_b12x,flashinfer_cutedsl,flashinfer_cutlass,flashinfer_trtllm,humming,marlin,triton,triton_unfused}
+  --moe-backend {aiter,auto,cutlass,deep_gemm,deep_gemm_mega_moe,emulation,flashinfer_b12x,flashinfer_cutedsl,flashinfer_cutlass,flashinfer_trtllm,flydsl,humming,marlin,triton,triton_unfused}
                         Backend for MoE expert computation kernels. Available
                         options:
                         - "auto": Automatically select the best backend based
@@ -1811,6 +1834,7 @@ KernelConfig:
                         - "humming": Use Humming Mixed Precision kernels
                         - "triton_unfused": Use Triton unfused MoE kernels
                         - "aiter": Use AMD AITer kernels (ROCm only)
+                        - "flydsl": Use AMD FlyDSL kernels (ROCm only)
                         - "emulation": use BF16/FP16 GEMM, dequantizing
                         weights and running QDQ on activations. (default:
                         auto)
@@ -1827,7 +1851,7 @@ VllmConfig:
                         Contents must be hashable. (default: {})
   --attention-config ATTENTION_CONFIG, -ac ATTENTION_CONFIG
                         Attention configuration.
-                        API docs: https://docs.vllm.ai/en/v0.23.0/api/vllm/con
+                        API docs: https://docs.vllm.ai/en/v0.24.0/api/vllm/con
                         fig/#vllm.config.AttentionConfig
                         Should either be a valid JSON string or JSON keys
                         passed individually. (default:
@@ -1839,9 +1863,9 @@ VllmConfig:
                         disable_flashinfer_q_quantization=False,
                         mla_prefill_backend=None,
                         use_prefill_query_quantization=False,
-                        use_fp4_indexer_cache=False, use_non_causal=False,
-                        flex_attn_block_m=None, flex_attn_block_n=None,
-                        flex_attn_q_block_size=None,
+                        use_fp4_indexer_cache=False, indexer_kv_dtype='bf16',
+                        use_non_causal=False, flex_attn_block_m=None,
+                        flex_attn_block_n=None, flex_attn_q_block_size=None,
                         flex_attn_kv_block_size=None))
   --compilation-config COMPILATION_CONFIG, -cc COMPILATION_CONFIG
                         `torch.compile` and cudagraph capture configuration
@@ -1852,7 +1876,7 @@ VllmConfig:
                         `-cc='{"mode":3}'`).
                         You can specify the full compilation config like so:
                         `{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
-                        API docs: https://docs.vllm.ai/en/v0.23.0/api/vllm/con
+                        API docs: https://docs.vllm.ai/en/v0.24.0/api/vllm/con
                         fig/#vllm.config.CompilationConfig
                         Should either be a valid JSON string or JSON keys
                         passed individually. (default: {'mode': None,
@@ -1883,15 +1907,21 @@ VllmConfig:
                         False}, 'local_cache_dir': None,
                         'fast_moe_cold_start': None, 'static_all_moe_layers':
                         []})
+  --diffusion-config DIFFUSION_CONFIG, -dc DIFFUSION_CONFIG
+                        Diffusion LLM (dLLM) configuration.
+                        API docs: https://docs.vllm.ai/en/v0.24.0/api/vllm/con
+                        fig/#vllm.config.DiffusionConfig
+                        Should either be a valid JSON string or JSON keys
+                        passed individually. (default: None)
   --ec-transfer-config EC_TRANSFER_CONFIG
                         The configurations for distributed EC cache transfer.
-                        API docs: https://docs.vllm.ai/en/v0.23.0/api/vllm/con
+                        API docs: https://docs.vllm.ai/en/v0.24.0/api/vllm/con
                         fig/#vllm.config.ECTransferConfig
                         Should either be a valid JSON string or JSON keys
                         passed individually. (default: None)
   --kernel-config KERNEL_CONFIG
                         Kernel configuration.
-                        API docs: https://docs.vllm.ai/en/v0.23.0/api/vllm/con
+                        API docs: https://docs.vllm.ai/en/v0.24.0/api/vllm/con
                         fig/#vllm.config.KernelConfig
                         Should either be a valid JSON string or JSON keys
                         passed individually. (default: KernelConfig(ir_op_prio
@@ -1901,13 +1931,13 @@ VllmConfig:
                         linear_backend='auto'))
   --kv-events-config KV_EVENTS_CONFIG
                         The configurations for event publishing.
-                        API docs: https://docs.vllm.ai/en/v0.23.0/api/vllm/con
+                        API docs: https://docs.vllm.ai/en/v0.24.0/api/vllm/con
                         fig/#vllm.config.KVEventsConfig
                         Should either be a valid JSON string or JSON keys
                         passed individually. (default: None)
   --kv-transfer-config KV_TRANSFER_CONFIG
                         The configurations for distributed KV cache transfer.
-                        API docs: https://docs.vllm.ai/en/v0.23.0/api/vllm/con
+                        API docs: https://docs.vllm.ai/en/v0.24.0/api/vllm/con
                         fig/#vllm.config.KVTransferConfig
                         Should either be a valid JSON string or JSON keys
                         passed individually. (default: None)
@@ -1927,7 +1957,7 @@ VllmConfig:
                         throughput-oriented kernels). (default: balanced)
   --profiler-config PROFILER_CONFIG
                         Profiling configuration.
-                        API docs: https://docs.vllm.ai/en/v0.23.0/api/vllm/con
+                        API docs: https://docs.vllm.ai/en/v0.24.0/api/vllm/con
                         fig/#vllm.config.ProfilerConfig
                         Should either be a valid JSON string or JSON keys
                         passed individually. (default:
@@ -1943,11 +1973,11 @@ VllmConfig:
                         active_iterations=5, wait_iterations=0))
   --reasoning-config REASONING_CONFIG
                         The configurations for reasoning model.
-                        API docs: https://docs.vllm.ai/en/v0.23.0/api/vllm/con
+                        API docs: https://docs.vllm.ai/en/v0.24.0/api/vllm/con
                         fig/#vllm.config.ReasoningConfig
                         Should either be a valid JSON string or JSON keys
                         passed individually. (default: None)
-  --spec-method {custom_class,deepseek_mtp,dflash,draft_model,eagle,eagle3,ernie_mtp,exaone4_5_mtp,exaone_moe_mtp,extract_hidden_states,gemma4_mtp,glm4_moe_lite_mtp,glm4_moe_mtp,glm_ocr_mtp,hy_v3_mtp,longcat_flash_mtp,medusa,mimo_mtp,mimo_v2_mtp,mlp_speculator,mtp,nemotron_h_mtp,ngram,ngram_gpu,pangu_ultra_moe_mtp,qwen3_5_mtp,qwen3_next_mtp,step3p5_mtp,suffix,None}
+  --spec-method {custom_class,deepseek_mtp,dflash,draft_model,eagle,eagle3,ernie_mtp,exaone4_5_mtp,exaone_moe_mtp,extract_hidden_states,gemma4_mtp,glm4_moe_lite_mtp,glm4_moe_mtp,glm_ocr_mtp,hy_v3_mtp,longcat_flash_mtp,medusa,mimo_mtp,mimo_v2_mtp,minimax_m3_mtp,mlp_speculator,mtp,nemotron_h_mtp,ngram,ngram_gpu,pangu_ultra_moe_mtp,qwen3_5_mtp,qwen3_next_mtp,step3p5_mtp,suffix,None}
                         The name of the speculative method to use. If users
                         provide and set the `model` param, the speculative
                         method type will be detected automatically if
@@ -1965,13 +1995,13 @@ VllmConfig:
                         present, otherwise, it is required. (default: None)
   --speculative-config SPECULATIVE_CONFIG, -sc SPECULATIVE_CONFIG
                         Speculative decoding configuration.
-                        API docs: https://docs.vllm.ai/en/v0.23.0/api/vllm/con
+                        API docs: https://docs.vllm.ai/en/v0.24.0/api/vllm/con
                         fig/#vllm.config.SpeculativeConfig
                         Should either be a valid JSON string or JSON keys
                         passed individually. (default: None)
   --structured-outputs-config STRUCTURED_OUTPUTS_CONFIG
                         Structured outputs configuration.
-                        API docs: https://docs.vllm.ai/en/v0.23.0/api/vllm/con
+                        API docs: https://docs.vllm.ai/en/v0.24.0/api/vllm/con
                         fig/#vllm.config.StructuredOutputsConfig
                         Should either be a valid JSON string or JSON keys
                         passed individually. (default:
@@ -1983,7 +2013,7 @@ VllmConfig:
   --weight-transfer-config WEIGHT_TRANSFER_CONFIG
                         The configurations for weight transfer during RL
                         training.
-                        API docs: https://docs.vllm.ai/en/v0.23.0/api/vllm/con
+                        API docs: https://docs.vllm.ai/en/v0.24.0/api/vllm/con
                         fig/#vllm.config.WeightTransferConfig
                         Should either be a valid JSON string or JSON keys
                         passed individually. (default: None)
