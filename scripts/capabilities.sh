@@ -34,7 +34,7 @@ ENVS="$(docker run --rm --entrypoint python3 "$IMG" -c \
   echo "## Key multi-choice knobs (the loop's option space) ###############################"
   for flag in linear-backend moe-backend attention-backend kv-cache-dtype quantization \
               compilation-config cudagraph-mode; do
-    line="$(grep -oE -- "--$flag[ =]\{[^}]*\}" <<<"$HELP" | head -1)"
+    line="$(grep -oE -- "--$flag[ =]\{[^}]*\}" <<<"$HELP" | head -1 || true)"
     [ -n "$line" ] && echo "$line" || echo "--$flag : (no enumerated choices; see full help)"
   done
   echo
