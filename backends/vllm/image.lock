@@ -13,18 +13,21 @@
 # Default image for freshly generated baselines (stable release, pinned by digest).
 # NOTE: pin the LOCAL RepoDigest (the multi-arch index digest from `docker inspect`), which
 # resolves to the pulled local image — NOT the per-arch digest from `docker manifest inspect`.
-AHL_VLLM_DEFAULT_IMAGE="vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f"  # v0.23.0
+AHL_VLLM_DEFAULT_IMAGE="vllm/vllm-openai@sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f"  # v0.24.0
 AHL_VLLM_DEFAULT_ENTRYPOINT_SERVE=true   # image ENTRYPOINT is already `vllm serve` -> pass MODEL positionally
 
 # ── Validated catalog (ref | entrypoint_serve | notes) ────────────────────────
-# v0.24.0   vllm/vllm-openai@sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f  serve=yes
+# v0.24.0   vllm/vllm-openai@sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f  serve=yes  [DEFAULT]
 #           stable release; verified vllm 0.24.0 (torch 2.11+cu130), size 21.3GB. Release highlights
 #           relevant to GB10/sm_121: NVFP4 on Blackwell (DGX Spark named), MoE path enabled on SM120
 #           (+GLM-5.1/DeepSeek-V4), Model-Runner-V2 quantized-by-default + Qwen/DeepSeek-V2 MoE
-#           spec-decode migration, DFlash spec decoding, spec-decode DoS hardening. Being validated
-#           on Qwen3.6-35B-A3B (35B 0.23→0.24 transition campaign); promote to [DEFAULT] once all
-#           three gates pass. capabilities snapshot: backends/vllm/capabilities/0.24.0.txt.
-# v0.23.0   vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f  serve=yes  [DEFAULT]
+#           spec-decode migration, DFlash spec decoding, spec-decode DoS hardening. VALIDATED on
+#           Qwen3.6-35B-A3B (0.23→0.24 campaign, 2026-07-05): all 3 gates green, quality up
+#           (mmlu 78→82.8), and MTP n=2 = +5.9% c16 (0.24 MRv2 spec-decode unlocked it). Capabilities
+#           diff vs 0.23: --linear-backend +flashinfer_b12x,+flashinfer_cutedsl; --moe-backend +flydsl;
+#           no flags removed. Note: on sm_121, --linear-backend flashinfer_b12x and --kv-cache-dtype
+#           nvfp4 both serve_fail (35B). capabilities snapshot: backends/vllm/capabilities/0.24.0.txt.
+# v0.23.0   vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f  serve=yes
 #           stable release (2026-06-12); FlashInfer b12x MoE+FP4 GEMM for SM120/121, per-tensor FP8
 #           CUTLASS on SM12.1, KV-load deadlock fixes. arm64 manifest digest: df5f8edb3866…
 # 0.23.0-qwen3nextmtp-fix  vllm-openai:0.23.0-qwen3nextmtp-fix  (local id sha256:628a16cc5a4a)  serve=yes

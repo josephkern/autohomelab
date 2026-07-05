@@ -62,4 +62,50 @@ Gotcha: `promote.sh` derived the version as `22` from the first `vX.Y.Z` in the 
 The serving `--override-generation-config` (chat sampling) bleeds into lm-eval → depresses
 generative tasks. eval.sh should pin greedy (temperature 0) for eval, or strip the override, so
 accuracy isn't config-coupled. Until then, rely on mmlu (loglikelihood) + relative recovery at
-matched settings.
+matched settings. **[RESOLVED in the 0.24 campaign below** — suite.sh now runs generative tasks
+greedy + thinking-OFF, so gsm8k reads a true 96–98 instead of the config-coupled 42.]
+
+## 20260705 — vLLM 0.23.0 → 0.24.0 transition campaign → CAMPAIGN COMPLETE (VLLM-24 promoted)
+
+### Environment
+- node `gb10-1988a9714b4e` (GB10 sm_121, aarch64, ~121.6 GiB unified, driver 580.159.03, CUDA 13.0)
+- backend `vllm/vllm-openai@sha256:251eba5c…` = **vLLM 0.24.0** (torch 2.11+cu130), size 21.3 GB
+- GuideLLM 0.6.0 · lm-eval (suite defaults) · model revision `e850c696e6d75f965367e816c16bc7dacd955ffa`
+- runbook: `VLLM-24-RedHatAI_Qwen3.6-35B-A3B_NVFP4_final.sh` (promoted from `20260704_mtp-n2_tuned.sh`)
+
+### Setup / capabilities-diff (0.23 → 0.24)
+Pulled + pinned v0.24.0 by digest (`image.lock`). Full `--help=all` snapshot
+(`capabilities/0.24.0.txt`) — **no flags removed**; `--linear-backend` gains `flashinfer_b12x` +
+`flashinfer_cutedsl`; `--moe-backend` gains `flydsl`; `kv-cache-dtype` unchanged. (Also fixed a
+`capabilities.sh` bug that truncated the snapshot whenever `--help=all` actually populated — it does
+on 0.24, was empty on 0.22/0.23.)
+
+### Baseline (0.24, config-identical to the VLLM-23 winner except image) — all 3 gates GREEN
+Smoke PASS 4/4. Quality **up** vs 0.23 at the same config: **mmlu 78.19 → 82.82** (think-on,
+LIMIT=100), gsm8k **98.0** (think-off; the old 42.0 was the sampling-bleed artifact, now fixed),
+mmlu_pro **68.21**. Throughput flat (within noise): chat c1=55.5 c16=337.7 c32=473.0; coder
+c16=299.6. So the version bump alone = higher accuracy, same speed, no regression.
+
+### Tune loop (4-candidate ablation, N=3, c1/c16; MMLU_REF=82.82)
+| candidate | c16 | verdict |
+|---|---|---|
+| baseline (flashinfer_cutlass + fp8 KV + MTP n=1) | 339.96 | reference |
+| moe-auto (`--moe-backend auto`) | 339.5 | discard −0.1% **+ mmlu 81.75 (−1.3%) QUALITY FAIL** |
+| **mtp-n2 (MTP num_spec 1→2)** | **360.98** | **KEEP +6.2% c16** |
+| linear-b12x (`--linear-backend flashinfer_b12x`) | — | **serve_fail** (b12x FP4 GEMM won't init on sm_121) |
+| kv-nvfp4 (`--kv-cache-dtype nvfp4`) | — | **serve_fail** on sm_121 |
+
+**Winner: mtp-n2.** Key learning: MTP `num_speculative_tokens=2` was only **+2.8% (sub-threshold)
+on 0.23**, but **+6.2% on 0.24** — the 0.24 **Model-Runner-V2 Qwen-MoE spec-decode migration** is
+what made n=2 scale under batching. `moe-auto` still ties cutlass (and drops mmlu); the two *new*
+0.24 backends (`flashinfer_b12x` linear GEMM, `nvfp4` KV) both **serve_fail on sm_121** — same
+Blackwell-kernel-init story as marlin-MoE on 0.23. flashinfer_cutlass MoE + fp8 KV remain the path.
+
+### Finalize + promote
+Standard suite on `mtp-n2` (LIMIT=100; FULL skipped — spec-decode is greedy-lossless vs n=1, so
+accuracy is provably ≈ baseline): smoke PASS; mmlu **82.65** (−0.2% vs ref), gsm8k **96** (noise),
+mmlu_pro **68.21** (==); full sweep **confirms the gain both shapes** — chat c16 **357.44 (+5.9%)**
+c32 492.71 (+4.2%), coder c16 316.72 (+5.7%). All three gates green → promoted with `VLLM_TAG=24`
+(avoids the version-derivation bug; the header carries a `v0.23.0→v0.24.0` migration string).
+`image.lock` default flipped to 0.24.0; launcher regenerated (`launchers/VLLM-24-…`). VLLM-23
+artifacts kept as the 0.23 record.
