@@ -171,9 +171,10 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
   #47025 (guidance-backend crash w/ spec decode), #44006→PR #44297 (MERGED 06-02: "trim grammar
   advance at the reasoning boundary" — why 0.25 recovers non-fatally), PR #44927 (OPEN since 06-08,
   0 reviews: should_advance() off-by-one — the remaining fix), RFC #48197 (07-10: full
-  StructuredOutputManager × spec-decode refactor). ACTION: optionally comment our 3-backend ×
-  think/MTP isolation matrix on #48228/#46118 (the #35031 playbook); watch #44927 + RFC #48197;
-  retest grammar smoke on 0.26.
+  StructuredOutputManager × spec-decode refactor). Our 6-row isolation matrix POSTED to #48228
+  (20260712): vllm-project/vllm#48228 issuecomment-4951567229. Watch #44927 + RFC #48197 for the
+  fix; retest grammar smoke on 0.26; the outlines engine-crash leg is not filed upstream (could be
+  its own issue if asked).
   ALSO: smoke.sh has NO grammar-path check (its JSON check is unforced sampling — hence the flakes);
   add Gate-1 check #5: tool_choice=required must return a tool_call, json_schema must comply.
 - [x] ~~smoke.sh structured-JSON check needs a retry~~ **MISDIAGNOSIS, retracted 20260712**: the
