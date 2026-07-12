@@ -17,6 +17,16 @@ AHL_VLLM_DEFAULT_IMAGE="vllm/vllm-openai@sha256:251eba5cc7c12fed0b75da22a9240e58
 AHL_VLLM_DEFAULT_ENTRYPOINT_SERVE=true   # image ENTRYPOINT is already `vllm serve` -> pass MODEL positionally
 
 # ── Validated catalog (ref | entrypoint_serve | notes) ────────────────────────
+# v0.25.0   vllm/vllm-openai@sha256:fc56161ee42a011aeee78b65d0a81b6683c7d04402fd40503d14d4d6c98f07cb  serve=yes
+#           stable release (pulled 2026-07-12); verified vllm 0.25.0, size 19.7GB. NOT yet the default —
+#           validation in progress (35B 0.24→0.25 transition baseline). Release highlights for GB10/sm_121:
+#           #45739 NVFP4 swizzled-scale zero-init restored (Blackwell decode throughput), #42890 NVFP4 KV
+#           cache rework (retest kv-nvfp4 — serve_fail on 0.24), #46316 Qwen3Next NVFP4+MTP fix SHIPPED
+#           (from our #35031 writeup → 0.23.0-qwen3nextmtp-fix image obsolete on 0.25 except pynvml patch),
+#           dspark spec-method now first-class, PagedAttention legacy removed, MRv2 default for dense.
+#           Capabilities diff vs 0.24: --moe-backend +hpc; --linear-backend +humming,+xpu*; --kv-cache-dtype
+#           +int4_per_token_head; --spec-method +dspark,+bailing_hybrid_mtp; new env VLLM_MOE_SKIP_PADDING;
+#           NOTHING REMOVED that we use. Snapshot: backends/vllm/capabilities/0.25.0.txt.
 # v0.24.0   vllm/vllm-openai@sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f  serve=yes  [DEFAULT]
 #           stable release; verified vllm 0.24.0 (torch 2.11+cu130), size 21.3GB. Release highlights
 #           relevant to GB10/sm_121: NVFP4 on Blackwell (DGX Spark named), MoE path enabled on SM120

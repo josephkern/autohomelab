@@ -163,3 +163,33 @@ promoted config on today's conditions (finalize was 357.44).
 Net: `--moe-backend marlin` (0.24, sm_121) NOW SERVES with the triton drafter override but buys
 nothing on this model. The drafter-side `moe_backend` spec-config knob remains a valid dimension —
 it's just not a lever HERE.
+
+## 20260712 — vLLM 0.24.0 → 0.25.0 transition test → NEUTRAL (0.24 stays _final; 0.25 validated)
+
+v0.25.0 released; pulled + pinned `sha256:fc56161e…` (image.lock catalog, NOT default), capabilities
+snapshot `0.25.0.txt` diffed vs 0.24: nothing we use removed; +moe-backend `hpc`, +spec-method
+`dspark`/`bailing_hybrid_mtp`, +kv int4_per_token_head, +env `VLLM_MOE_SKIP_PADDING`. Release items
+for this lab: **#46316 (our Qwen3Next NVFP4+MTP fix) SHIPPED**, #45739 NVFP4 swizzled-scale Blackwell
+decode, #42890 NVFP4-KV rework, dspark first-class.
+
+Transition baseline `20260712_v0.25.0_baseline.sh` = VLLM-24 _final, image-only delta. Same-night,
+same-protocol matched pair (N=3 chat c1/c16, acceptance sidecar, mmlu LIMIT=100 greedy):
+
+| | 0.24 _final (tonight) | 0.25 baseline | delta |
+|---|---|---|---|
+| chat c16 median | 359.4 | 358.86 | −0.15% (noise) |
+| chat c1 median | 55.18 | 56.01 | +1.5% (noise) |
+| drafter acceptance (cumulative) | 68.0% | 68.3% | == |
+| smoke | 4/4 | 4/4 | == |
+| mmlu (LL, LIMIT=100) | **81.72** | **81.79** | == |
+
+**Verdict: NEUTRAL.** #45739 doesn't move this config on sm_121. No re-promote (no gain); the 35B
+stays on the VLLM-24 _final. 0.25 is **serve-validated** on this model — recommended base for NEW
+campaigns that need its features (Qwen3-Next MTP without the patched image; dspark), default flip
+left as a user call.
+
+**LAB LESSON — mmlu LIMIT=100 drifts ~1 pt ACROSS SESSIONS on identical config+image** (July-5 ref
+82.82 vs tonight 81.72, same _final, same digest). In-loop quality gates are only valid as
+SAME-SESSION matched pairs (tonight's protocol). The 0.24-campaign moe-auto fail was same-day →
+still valid. Also: the structured-JSON smoke check flaked 2/7 serves tonight (temp-1.0 sampling;
+`(`-prefix once, doubled `{"` once) — smoke.sh could use a 1-retry on that check.

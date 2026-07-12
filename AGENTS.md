@@ -156,7 +156,20 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
   saying `image v0.22.0 -> v0.23.0` yields `VLLM-22-…` on a 0.23.0 config). Workaround: pass
   `VLLM_TAG=<minor>` (used `VLLM_TAG=23` for the 35B promote). Fix: derive from the pinned
   `VLLM_IMAGE` digest via the `image.lock` catalog, or grep only the `VLLM_IMAGE=` line's comment.
-- [ ] **NEXT LAB RUN → vLLM 0.23.0.** Released ~2026-06-12 (≈17h before 2026-06-13), a proper
+- [ ] **smoke.sh structured-JSON check needs a retry** — at temp-1.0 serving configs it flaked 2/7
+  serves on 20260712 (`(`-prefix, doubled `{"`), each costing a full serve cycle in run_experiment.sh.
+  Add 1 retry (or force greedy for that check specifically) before failing the gate.
+- [ ] **mmlu LIMIT=100 drifts ~1 pt across sessions on IDENTICAL config+image** (35B _final: 82.82 on
+  20260705 vs 81.72 on 20260712, same digest). Quality keep/discard comparisons are only valid as
+  same-session matched pairs — always re-measure the reference in the same session as the candidate.
+- [x] **vLLM 0.25.0 transition (20260712)** — pulled + digest-pinned (`image.lock` catalog; 0.24 still
+  DEFAULT), capabilities diff clean (nothing removed; +hpc MoE, +dspark spec-method,
+  +VLLM_MOE_SKIP_PADDING). 35B image-only baseline = NEUTRAL across all gates (c16/c1/acceptance/mmlu
+  all ==) → no re-promote; 0.25 serve-validated. Note: **#46316 shipped in 0.25** — Qwen3-Next MTP no
+  longer needs the patched image (only the pynvml patch, DGX-Spark-specific); rebuild per the
+  image.lock 0.23.0-qwen3nextmtp-fix entry's instructions when next serving those models.
+- [x] ~~**NEXT LAB RUN → vLLM 0.23.0.**~~ DONE (0.23 campaign 20260614, 0.24 transition 20260705,
+  0.25 tested 20260712 — see above). Original notes: Released ~2026-06-12 (≈17h before 2026-06-13), a proper
   *release* (not a nightly) → the legitimate image bump. At transition: pull `vllm/vllm-openai`
   0.23.0, **pin by `sha256:` digest** in `image.lock`, `scripts/capabilities.sh` to verify the
   version + **diff** the flag/backend surface vs 0.22.0, then re-baseline native-FP4 on 0.23.0 and
