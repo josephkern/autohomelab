@@ -88,7 +88,7 @@ run_level() {
   watchdog "$hit" & local wd=$!
   set +e
   ( cd "$bundle" && timeout "$LEVEL_TIMEOUT" uv run --project "$REPO_ROOT" guidellm benchmark run \
-      --target "$TARGET" --model "$SERVED_NAME" --processor "$MODEL" --random-seed "$SEED" \
+      --target "$TARGET" --model "$SERVED_NAME" --processor "${PROCESSOR:-$MODEL}" --random-seed "$SEED" \
       --profile concurrent --rate "$level" \
       --data "$data" --max-seconds "$MAX_SECONDS" --output-path "$json" ) >"$bundle/level_c$level.log" 2>&1
   local rc=$?
