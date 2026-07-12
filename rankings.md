@@ -14,14 +14,15 @@ sentinel; **c16** = batched objective.
 |---|-------|---------------|----------------|----|---------|-----|------|-------|----------|
 | 1 | RedHatAI/Qwen3-8B-NVFP4 | 8B dense · NVFP4 | kvfp8 (fp8 KV) | 41.9 | **563.2** | 950.6 | 71.0 | 87.6 | — |
 | 2 | WeiboAI/VibeThinker-3B | 3B dense · BF16 | baseline | 29.8 | **485.1** | 852.7 | — | — | — ◆ |
-| 3 | RedHatAI/Qwen3.6-35B-A3B-NVFP4 | 35B/3B MoE · NVFP4 | baseline (MTP-on) | 56.4 | **340.6** | 470.7 | 78.2 | 90.0 | — |
-| 4 | nvidia/Qwen3-Next-80B-A3B-Thinking-NVFP4 | 80B/3B MoE · NVFP4 | mtp-n1 (MTP) | 56.2 | **295.1** | — | 84.3 | 81 ‡ | — |
-| 5 | nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4 | 80B/3B MoE · NVFP4 | mtp-n1 (MTP) | 50.8 | **266.7** | 362.5 | 84.9 | 96.0 | 71.9 |
-| 6 | RedHatAI/Qwen3-Coder-Next-NVFP4 | 80B/3B MoE · NVFP4 | baseline (MTP stripped) | 37.1 | **220.1** | 286.7 | 81.8 | 94.2 | 70.1 ★ |
-| 7 | nvidia/NVIDIA-Nemotron-Labs-3-Puzzle-75B-A9B-NVFP4 | 75B/9B hybrid MoE · NVFP4 | mtp-n1 (MTP) | 29.5 | **173.1** | 240.4 | 83.7 | 95.0 | 71.9 † |
-| 8 | unsloth/Qwen3.6-27B-NVFP4 | 27B dense mm · NVFP4 | mtp-n1 (MTP) | 16.8 | **161.5** | — | 84.3 | 98.0 | 71.6 |
-| 9 | RedHatAI/gemma-4-31B-it-NVFP4 | 31B dense mm · NVFP4 | baseline | 10.5 | **109.0** | 136.7 | 41.2 ✗ | 73.0 | 48.4 |
-| 10 | RedHatAI/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 | 120B/12B MoE · NVFP4 | mtp-n1 (MTP) | 22.4 | **93.7** | 120.5 | 85.8 | 61.0 | 75.0 |
+| 3 | unsloth/Qwen3.6-35B-A3B-NVFP4-Fast | 35B/3B MoE · NVFP4-Fast | baseline (champion-parity, 0.25) | 77.0 | **404.9** | 539.1 | 81.3 | 96.0 | 68.6 ¶ |
+| 4 | RedHatAI/Qwen3.6-35B-A3B-NVFP4 | 35B/3B MoE · NVFP4 | mtp-n2 (VLLM-24; dethroned by #3) | 55.2 | **359.4** | 492.7 | 81.7 | 96.0 | 68.2 |
+| 5 | nvidia/Qwen3-Next-80B-A3B-Thinking-NVFP4 | 80B/3B MoE · NVFP4 | mtp-n1 (MTP) | 56.2 | **295.1** | — | 84.3 | 81 ‡ | — |
+| 6 | nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4 | 80B/3B MoE · NVFP4 | mtp-n1 (MTP) | 50.8 | **266.7** | 362.5 | 84.9 | 96.0 | 71.9 |
+| 7 | RedHatAI/Qwen3-Coder-Next-NVFP4 | 80B/3B MoE · NVFP4 | baseline (MTP stripped) | 37.1 | **220.1** | 286.7 | 81.8 | 94.2 | 70.1 ★ |
+| 8 | nvidia/NVIDIA-Nemotron-Labs-3-Puzzle-75B-A9B-NVFP4 | 75B/9B hybrid MoE · NVFP4 | mtp-n1 (MTP) | 29.5 | **173.1** | 240.4 | 83.7 | 95.0 | 71.9 † |
+| 9 | unsloth/Qwen3.6-27B-NVFP4 | 27B dense mm · NVFP4 | mtp-n1 (MTP) | 16.8 | **161.5** | — | 84.3 | 98.0 | 71.6 |
+| 10 | RedHatAI/gemma-4-31B-it-NVFP4 | 31B dense mm · NVFP4 | baseline | 10.5 | **109.0** | 136.7 | 41.2 ✗ | 73.0 | 48.4 |
+| 11 | RedHatAI/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 | 120B/12B MoE · NVFP4 | mtp-n1 (MTP) | 22.4 | **93.7** | 120.5 | 85.8 | 61.0 | 75.0 |
 
 ### Accuracy notes
 - **mmlu** = loglikelihood, thinking-ON (the in-loop knowledge reference). **gsm8k** + **mmlu_pro** =
@@ -39,6 +40,10 @@ sentinel; **c16** = batched objective.
   quality (mmlu-LL confirms MTP lossless: 83.51→83.67). The mtp-n1 winner *measured* 91 / 69.2 at
   LIMIT=100, within batched-serving noise (same pattern as the Super row). Unusually, `nemotron_h_mtp`
   loglikelihood WORKS (valid prompt_logprobs) — most spec-decode configs NaN it.
+- **¶ Fast-quant A/B (20260712):** unsloth NVFP4-Fast vs RedHatAI, champion-parity flags on vLLM
+  0.25 — Fast wins EVERY level both shapes (chat c1 +39.5%, c16 +12.7%; coder c16 +16%) at
+  tied-or-better quality; unsloth's own calibration is the lever. Old #4 row shows the RedHatAI
+  0.24-campaign values (same-session refs). 8B/27B rows still 0.23-era numbers.
 - Per-model raw rows + think-on/off variants live in each
   `results/gb10-1988a9714b4e/<org>/<model>/accuracy.tsv` and `logbook.md`.
 
