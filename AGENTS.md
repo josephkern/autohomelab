@@ -168,9 +168,11 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
   upstream vLLM report (#35031-style: FSM desync at the <think>→content boundary under spec-decode).
   ALSO: smoke.sh has NO grammar-path check (its JSON check is unforced sampling — hence the flakes);
   add Gate-1 check #5: tool_choice=required must return a tool_call, json_schema must comply.
-- [ ] **smoke.sh structured-JSON check needs a retry** — at temp-1.0 serving configs it flaked 2/7
-  serves on 20260712 (`(`-prefix, doubled `{"`), each costing a full serve cycle in run_experiment.sh.
-  Add 1 retry (or force greedy for that check specifically) before failing the gate.
+- [x] ~~smoke.sh structured-JSON check needs a retry~~ **MISDIAGNOSIS, retracted 20260712**: the
+  check runs `response_format:json_object` at **temp 0** — those "flakes" (`(`-prefix, doubled `{"`)
+  were the xgrammar×reasoning×MTP grammar bug intermittently corrupting forced output, not sampling
+  noise. Do NOT add a retry (it would mask a real defect the gate is correctly catching). The fix is
+  the structured-outputs backend (see grammar-500 entry); smoke gained a de-facto grammar gate.
 - [ ] **mmlu LIMIT=100 drifts ~1 pt across sessions on IDENTICAL config+image** (35B _final: 82.82 on
   20260705 vs 81.72 on 20260712, same digest). Quality keep/discard comparisons are only valid as
   same-session matched pairs — always re-measure the reference in the same session as the candidate.
