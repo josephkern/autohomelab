@@ -193,3 +193,26 @@ left as a user call.
 SAME-SESSION matched pairs (tonight's protocol). The 0.24-campaign moe-auto fail was same-day →
 still valid. Also: the structured-JSON smoke check flaked 2/7 serves tonight (temp-1.0 sampling;
 `(`-prefix once, doubled `{"` once) — smoke.sh could use a 1-retry on that check.
+
+## 20260712 — grammar-500 isolation → ROOT CAUSE: MTP × reasoning × xgrammar (0.24); 0.25 recovers
+
+Production symptom (user report: "qwen refuses tools"): probes showed `tool_choice:"required"` and
+named tool_choice → HTTP 500 on the _final serve (xgrammar `Failed to advance FSM … grammar rejected
+tokens [248069, 271, 248058] … Terminating request`); `auto` always fine. Isolation matrix
+(probe: required / named / json_object / auto, per serve):
+
+| config | required | named | json_object | FSM errors |
+|---|---|---|---|---|
+| _final 0.24 (MTP n2 + thinking) | **500** | **500** | 200 loose (```-fenced) | fatal |
+| 0.24 mtp-off (thinking on) | 200 ✓ | 200 ✓ | 200 strict-valid | none |
+| 0.24 _final + AHL_THINK_OFF=1 (MTP on) | 200 ✓ | 200 ✓ | 200 strict-valid | none |
+| 0.25 image-only (MTP + thinking) | 200 ✓ | 200 ✓ | 200 **invalid** | logged, non-fatal |
+
+**Conclusion: three-way interaction.** Grammar-forced decoding + reasoning parser + MTP spec-decode
+desync the xgrammar FSM at the `<think>`→content boundary (rejected tokens are the boundary tokens);
+either feature alone is fine. vLLM 0.25 makes the failure non-fatal (recovers, still logs FSM error)
+but json_object in that combo is still non-strict. Upstream-report candidate (same class as #35031).
+Operational note: OWUI native tool calling uses `auto` → daily chat unaffected; anything forcing
+tool_choice hard-fails on the 0.24 production serve. **The functional argument for moving the 35B
+production serve to 0.25 is now stronger than the (neutral) perf one.** Probe scripts:
+scratchpad run_grammar_isolation.sh / probe_grammar.sh; diag mtp-off runbook was scratch-only.

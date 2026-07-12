@@ -156,6 +156,18 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
   saying `image v0.22.0 -> v0.23.0` yields `VLLM-22-…` on a 0.23.0 config). Workaround: pass
   `VLLM_TAG=<minor>` (used `VLLM_TAG=23` for the 35B promote). Fix: derive from the pinned
   `VLLM_IMAGE` digest via the `image.lock` catalog, or grep only the `VLLM_IMAGE=` line's comment.
+- [ ] **BUG: grammar-forced tool_choice 500s on the 35B production serve (found 20260712).**
+  `tool_choice:"required"` AND named tool_choice both → HTTP 500: xgrammar `Failed to advance FSM
+  ... grammar rejected tokens [248069, 271, 248058] ... Terminating request`. `tool_choice:"auto"`
+  works perfectly (clean tool_calls). `response_format:json_object` returns 200 but output began
+  with ```-fence → enforcement questionable. Suspects: reasoning `<think>` prefix not admitted by
+  the tool-grammar, or MTP-accepted draft tokens bypassing FSM validation (all promoted configs use
+  MTP). **ISOLATED 20260712: three-way interaction — grammar decoding × reasoning parser × MTP**
+  (either alone fine; mtp-off OR think-off OR 0.25 image all pass; 0.25 = non-fatal recovery but
+  json_object still non-strict with think+MTP). Full matrix in the 35B logbook. REMAINING: file the
+  upstream vLLM report (#35031-style: FSM desync at the <think>→content boundary under spec-decode).
+  ALSO: smoke.sh has NO grammar-path check (its JSON check is unforced sampling — hence the flakes);
+  add Gate-1 check #5: tool_choice=required must return a tool_call, json_schema must comply.
 - [ ] **smoke.sh structured-JSON check needs a retry** — at temp-1.0 serving configs it flaked 2/7
   serves on 20260712 (`(`-prefix, doubled `{"`), each costing a full serve cycle in run_experiment.sh.
   Add 1 retry (or force greedy for that check specifically) before failing the gate.
