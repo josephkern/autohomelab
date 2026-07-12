@@ -109,3 +109,57 @@ c32 492.71 (+4.2%), coder c16 316.72 (+5.7%). All three gates green → promoted
 (avoids the version-derivation bug; the header carries a `v0.23.0→v0.24.0` migration string).
 `image.lock` default flipped to 0.24.0; launcher regenerated (`launchers/VLLM-24-…`). VLLM-23
 artifacts kept as the 0.23 record.
+
+## 20260712 — marlin-MoE serve-probe on 0.24 (lead from an unverified external DGX-Spark report)
+
+Trigger: a Twitter post claimed `--moe-backend marlin` serves this model family on GB10 w/ vLLM 0.24
+and dramatically raises MTP draft acceptance (47%→81%). Our 0.23 record says marlin serve_fails on
+sm_121. Two serve-probes against the VLLM-24 _final config (env identical: image sha256:251eba5c,
+same revision/flags), production launcher stopped for the window, restored after.
+
+| probe | delta vs _final | verdict |
+|---|---|---|
+| moe-marlin-024 | `--moe-backend marlin` | **serve_fail — NEW failure mode.** Target NVFP4 MoE now ACCEPTS MARLIN on 0.24 ("weight-only FP4… Marlin kernel", the 0.23 init-fail is gone); engine dies in the **MTP drafter's unquantized MoE**: `moe_backend='marlin' is not supported for unquantized MoE. Expected ['triton','flashinfer_trtllm','flashinfer_cutlass','aiter']`. |
+| moe-marlin-mtp-triton | marlin **+** spec-config `"moe_backend":"triton"` (drafter override) | **SERVES** (ready 327s). Smoke **PASS 4/4**. SpecDecoding (n=2, ~2k drafted toks of ad-hoc chat traffic): **avg draft acceptance 86–95%** per window, mean acceptance length **2.7–2.9 / 3.0**, per-position ~0.93 / 0.86. |
+
+Learnings:
+1. The external report's two flags are **one coupled config**: on an MTP model, global marlin
+   CANNOT serve without the drafter-side `moe_backend` override in `--speculative-config` — the
+   override is a REQUIREMENT, not an optimization. (Drafter-side `moe_backend` is itself a
+   previously-unknown tuning dimension for all our MTP configs.)
+2. Marlin on sm_121 (0.24) = **weight-only FP4** ("no native FP4 computation" warning) → different
+   numerics vs flashinfer_cutlass → any keep decision needs the mmlu reference (moe-auto −1.3%
+   precedent), not just tok/s.
+3. The post's "47% acceptance without marlin" does NOT obviously apply to us — no acceptance
+   reference exists for the _final (cutlass-drafter) config yet. NOT MEASURED HERE: baseline
+   acceptance, c1/c16 tok/s (probe only — no bench, no eval, no results.tsv row).
+
+Follow-up (next tune session on this model): N=3 c1/c16 of marlin+triton vs _final, + acceptance
+logging on BOTH, + mmlu ref. Also worth a cheap standalone probe: _final config + drafter-only
+`"moe_backend":"triton"` (keep cutlass target) — isolates the drafter dimension.
+Runbooks: `20260712_moe-marlin-024_tuned.sh` (fail record), `20260712_moe-marlin-mtp-triton_tuned.sh`.
+
+### 20260712 addendum — N=3 comparison: marlin+triton vs _final → DISCARD
+
+Ran the full N=3 (chat c1/c16, 180s/level) on both configs back-to-back, box cleared (production
+launcher stopped for the window), acceptance captured via a /metrics sidecar (cumulative counters).
+
+| config | c16 med | c1 med | drafter acceptance (cumulative, whole run) |
+|---|---|---|---|
+| _final (cutlass MoE, cutlass drafter) | **359.4** | 55.18 | 126461/186030 = **68.0%** |
+| moe-marlin-mtp-triton (marlin MoE, triton drafter) | 362.18 | 56.93 | 126497/185604 = **68.2%** |
+
+**DISCARD: c16 +0.8% (sub-threshold, noise floor).** Acceptance is IDENTICAL (68.0 vs 68.2%) —
+the drafter MoE kernel does NOT move draft acceptance on this checkpoint; the 86–95% seen in the
+earlier ad-hoc probe was a low-concurrency artifact (c≈5, identical prompts; acceptance always
+drops under batching — same pattern as Puzzle 90-93% c1 → 77% c16). The external report's
+"marlin doubled acceptance (47→81%)" claim is NOT reproduced; their 47% baseline likely reflects
+their own broken first config, not the kernel. mmlu gate not needed (discarded on throughput).
+
+Run notes: attempt 1 smoke-flaked (structured-JSON check, temp-1.0 sampling — consider a smoke
+retry knob); attempt 2 hit the known GB10 c16 wedge (watchdog caught it, crash row 20260712-004308,
+engine log saved; c1=56.18 preserved). Attempt 3 clean. _final reference (359.4) reconfirms the
+promoted config on today's conditions (finalize was 357.44).
+Net: `--moe-backend marlin` (0.24, sm_121) NOW SERVES with the triton drafter override but buys
+nothing on this model. The drafter-side `moe_backend` spec-config knob remains a valid dimension —
+it's just not a lever HERE.
