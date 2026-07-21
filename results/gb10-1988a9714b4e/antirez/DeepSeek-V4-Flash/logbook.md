@@ -25,8 +25,9 @@ first 3 rows were harness errors (marked `discard`, HARNESS-ERROR in notes). ben
 `/v1/models`.
 
 **Gate 1 (works), baseline serve:** smoke 3/3 PASS (chat, JSON, native DSML tool-call; reasoning n/a).
-Chat content showed answer followed by leaked reasoning-style text ("4We need to answer…") — served chat
-template emits think-text into content at temp 0; harmless for the gate, noted for OWUI UX.
+The "4We need to answer…" text in the smoke output is NOT a reasoning leak — smoke.sh concatenates
+`content`+`reasoning_content` for its non-empty check; ds4 actually returns a clean separate
+`reasoning_content` channel (verified 20260721: content `"8"`, reasoning in its own field).
 
 **Runs** (results.tsv is the journal; keep/discard by N=3 median c1, chat shape):
 
