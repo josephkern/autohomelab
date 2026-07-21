@@ -13,8 +13,13 @@
 #   tail -f ~/.ds4/deepseek-v4-flash.log                   # follow startup / serving logs
 #   PORT=8001 ./DS4-….sh                                   # override the bind port
 #   MTP=~/gguf/DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf ./DS4-….sh   # legacy one-stage MTP (bench: ~no gain on GB10)
-#   DSPARK=1 ./DS4-….sh    # DSpark spec decode (uses the DSpark support GGUF via --mtp; greedy requests only)
-#   BATCH=4 ./DS4-….sh     # --batched-session N resident KV sessions (GB10 = ordered exact fallback)
+#   DSPARK=1 ./DS4-….sh    # DSpark spec decode (greedy only; bench 20260721: DISCARD, −17% chat / −18% code)
+#   BATCH=4 ./DS4-….sh     # --batched-session N (GB10 = ordered fallback; bench 20260721: no agg gain at c4,
+#                          #  ~4 t/s per user, per-req latency worse — situational, default off)
+#
+# Campaign 20260721 (ds4@efdadd4, results/gb10-*/antirez/DeepSeek-V4-Flash/): baseline c1 median
+# 17.96 tok/s greedy chat(512/256); DSpark + batched-session both discarded — this default
+# (target-only, single-session) is the validated config.
 #
 # One-time setup:
 #   Build engine:  (cd ~/code/ds4 && make cuda-spark)        # antirez/ds4 canonical main
