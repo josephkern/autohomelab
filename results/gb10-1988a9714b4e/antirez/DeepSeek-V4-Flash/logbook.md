@@ -145,3 +145,11 @@ engine drop tuned for it.
 
 **State after round 3b:** launcher default unchanged (pre-0731 q2-imatrix, ds4@b030961, c1 19.63);
 pre-0731 model re-served on :8000 for OWUI. accuracy.tsv gains the two matched rows.
+
+**20260808 addendum — CTX default 32768 → 65536 (user-directed, for pi.dev agent use).** MLA keeps
+it cheap: context buffers 1053.75 → 1739.75 MiB (compressed_kv_rows 8194 → 16386; raw rows
+unchanged — sized to the prefill chunk, not ctx). Smoke 3/3 PASS; single c1 sanity 19.44 (vs 19.63
+N=3 median at 32K = noise; short-context decode unaffected by the allocation, and long-context
+taper ~18→14 t/s across 2K→64K per upstream gb10.csv applies as contexts actually fill). The ds4
+model is also now registered in pi's `~/.pi/agent/models.json` (id deepseek-v4-flash, 64K window,
+8K gen cap) alongside the vLLM 35B — the two share :8000, only one live at a time.

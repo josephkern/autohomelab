@@ -47,7 +47,9 @@ DSPARK="${DSPARK:-}"           # 1 = DSpark spec decode (auto-uses DSPARK_GGUF v
 DSPARK_GGUF="${DSPARK_GGUF:-$HOME/gguf/DeepSeek-V4-Flash-DSpark-support.gguf}"
 BATCH="${BATCH:-}"             # N = --batched-session N resident KV sessions (size CTX*N to fit memory)
 MTP_DRAFT="${MTP_DRAFT:-2}"    # draft tokens per speculative cycle (only used with legacy MTP)
-CTX="${CTX:-32768}"           # allocated context tokens
+CTX="${CTX:-65536}"           # allocated context tokens (64K default 20260808 for pi/agent use:
+                              # MLA KV is tiny — ~2 GiB context buffers at 64K; decode tapers
+                              # ~18->14 t/s as ctx fills per upstream gb10.csv)
 HOST="${HOST:-0.0.0.0}"       # bind address; 0.0.0.0 so the OWUI container can reach it
 PORT="${PORT:-8000}"          # OpenAI API port
 LOG="${LOG:-$HOME/.ds4/deepseek-v4-flash.log}"
