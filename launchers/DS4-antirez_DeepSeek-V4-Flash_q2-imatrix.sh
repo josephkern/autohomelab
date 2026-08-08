@@ -23,6 +23,9 @@
 # Campaign 20260808 (ds4@b030961, 2026-08-05 drop): engine-only update KEEP — c1 median 19.63
 # (+9.3%), TTFT 2729→658 ms (native sm_121a + MMQ prefill tier + decode graphs). Config unchanged.
 # DSpark/batched verdicts stand; Flash-0731 MXFP4 (~156 GB) does not fit GB10.
+# Round 3b 20260808: 0731 q2 checkpoint refresh DISCARD — c1 flat (19.61) but gsm8k 76→60 strict /
+# 99→82 flexible on matched pairs (likely longer thinking + truncation; see logbook). File kept in
+# ~/gguf; this launcher stays on the pre-0731 GGUF.
 #
 # One-time setup:
 #   Build engine:  (cd ~/code/ds4 && make cuda-spark)        # antirez/ds4 canonical main

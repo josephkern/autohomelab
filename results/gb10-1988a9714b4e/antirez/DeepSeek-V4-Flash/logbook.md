@@ -113,3 +113,35 @@ pre-July). Same rationale as round 2 for skipping the accuracy gate: no serving 
 smoke passes, and the decode-graph path is documented byte-identical upstream. Server left up on
 :8000 (baseline config) for OWUI. Old binary parked at `/tmp/ds4-server-efdadd4` (session-scoped;
 rebuild from git for a true rollback).
+
+---
+
+## 20260808 — round 3b: Flash 0731 checkpoint refresh (q2-imatrix) — DISCARD
+
+**Candidate.** `DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf`
+(82.7 GB, antirez/deepseek-v4-gguf `ds4f-q2` target — same quant recipe as our validated file, new
+DeepSeek "0731" checkpoint). Engine held fixed at ds4@b030961. This is a MODEL change, so unlike
+rounds 2–3 the quality gate ran: matched same-session pairs, gsm8k 5-shot LIMIT=100, greedy
+(temp 0), GEN_TOKS=4096, chat endpoint (THINK=off harness path; ds4 has no server-side thinking
+toggle — reasoning streams to `reasoning_content`, lm-eval scores `content`), CONC=4,
+tokenizer deepseek-ai/DeepSeek-V4-Flash via eval.sh's new `TOKENIZER` env (harness fix this
+round: the ds4 stub's MODEL is a journal identity, not a resolvable HF repo).
+
+| leg | c1 (N=3 median) | gsm8k strict | gsm8k flexible |
+|---|---|---|---|
+| pre-0731 (validated) | 19.63 | **76.0** | **99.0** |
+| 0731 refresh | 19.61 (19.68/19.61/19.55) | 60.0 | 82.0 |
+
+**Verdict: DISCARD.** Throughput identical (same recipe/size, as expected — the checkpoint doesn't
+change the arithmetic), smoke 3/3 PASS, but quality is decisively worse: −16 strict / −17 flexible,
+~3σ beyond the ±4–5 stderr. Flexible-extract dropping to 82 means ~18% of answers had no extractable
+number at all — consistent with the 0731 checkpoint thinking much longer and hitting the 4096-token
+cap before answering (one observed request spent 3650+ tokens still in reasoning; upstream also
+notes behavioral quirks in the new checkpoint, e.g. b030961 "the new DS4F checkpoint struggles with
+anchored [upto] edits"). **Caveat:** a GEN_TOKS=8192 matched re-pair would disambiguate "dumber"
+from "chattier-and-truncated"; either way, at equal serving budget the old checkpoint wins, so the
+default stands. 0731 GGUF kept on disk (`~/gguf/…-0731.gguf`) for a possible re-pair or a future
+engine drop tuned for it.
+
+**State after round 3b:** launcher default unchanged (pre-0731 q2-imatrix, ds4@b030961, c1 19.63);
+pre-0731 model re-served on :8000 for OWUI. accuracy.tsv gains the two matched rows.

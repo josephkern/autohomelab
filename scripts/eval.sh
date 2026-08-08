@@ -7,7 +7,10 @@
 #      bleed into eval; GREEDY=0 uses the server's sampling), GEN_KWARGS (full manual gen_kwargs),
 #      THINK (default on; THINK=off evals GENERATIVE tasks via the chat endpoint with thinking
 #      disabled — serve the model AHL_THINK_OFF=1 to match. For reasoning models, thinking-on
-#      depresses generative scores: 35B gsm8k 40->90 with thinking off).
+#      depresses generative scores: 35B gsm8k 40->90 with thinking off),
+#      TOKENIZER (client-side tokenizer HF repo when the runbook MODEL isn't a resolvable repo —
+#      e.g. ds4 host-backend stubs: MODEL=antirez/DeepSeek-V4-Flash is the journal identity, the
+#      real tokenizer is deepseek-ai/DeepSeek-V4-Flash; mirrors bench_ds4.sh's PROCESSOR).
 # Server must be up (serve.sh). Records a row to accuracy.tsv + the raw lm-eval json in the bundle.
 #
 # NOTE: coder tasks EXECUTE generated code (HF_ALLOW_CODE_EVAL + --confirm_run_unsafe_code) — run
@@ -88,7 +91,7 @@ echo "== lm-eval $SUITE [$TASKS] limit=${LIMIT:-full} sampling=$([ "$GREEDY" = 1
 # generate for many minutes per item (32K tokens @ ~tens of tok/s, slower under concurrency) and 300s
 # times out -> no results. Default 1800s; raise for very long budgets / high CONC.
 uv run --project "$REPO_ROOT" lm_eval --model "$MODEL_TYPE" \
-  --model_args "base_url=${ENDPOINT},model=${SERVED_NAME},tokenizer=${MODEL},num_concurrent=${CONC},max_retries=3,timeout=${EVAL_TIMEOUT:-1800},tokenized_requests=False" \
+  --model_args "base_url=${ENDPOINT},model=${SERVED_NAME},tokenizer=${TOKENIZER:-$MODEL},num_concurrent=${CONC},max_retries=3,timeout=${EVAL_TIMEOUT:-1800},tokenized_requests=False" \
   --tasks "$TASKS" --gen_kwargs "$GK" ${LIMIT:+--limit "$LIMIT"} "${CHAT_ARGS[@]}" \
   --output_path "$BUNDLE" "${CODE_ARGS[@]}"
 
