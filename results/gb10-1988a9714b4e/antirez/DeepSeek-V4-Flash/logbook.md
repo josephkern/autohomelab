@@ -64,3 +64,52 @@ bandwidth than accepted tokens save. Matches the legacy one-stage MTP result (�
 decode in ds4 is not worth it on this box regardless of acceptance. Load-time detect line:
 `stages=3 block=5 markov_rank=256 tensors=81`. Server emits no acceptance counters in the log, so
 acceptance rate itself was not observable; the wall-clock verdict stands either way.
+
+---
+
+## 20260808 — round 3: engine update efdadd4 → b030961 (2026-08-05 upstream, 123 commits)
+
+**Environment.** GB10 sm_121, driver 580.159.03, CUDA 13.0 (V13.0.88), host backend (no docker).
+Engine ds4@b030961 (`b0309611041655f4e45671cfd9c9886aff161406`), built `make cuda-spark` — the
+target now compiles **native `sm_121a` with `-DDS4_CUDA_HAVE_MXF4=1`** (FP4 matrix instructions)
+and links the **vendored llama.cpp MMQ prefill tier** (`cuda/mmq/`, from the Entrpi batched-serving
+fork). Model unchanged: DeepSeek-V4-Flash q2-imatrix GGUF (81 GiB, pre-0731 checkpoint — loads and
+serves cleanly on the new engine; fixtures are versioned by checkpoint upstream). GuideLLM 0.6.0
+via bench_ds4.sh, greedy (temp 0), chat(512/256), N=3, seed 42. Box quiesced (no vLLM serve; only
+the idle OWUI app plane).
+
+**What's in the drop (relevant to GB10):** decode-island CUDA graph capture for serial decode (ON
+by default, `DS4_CUDA_DECODE_GRAPHS=0` disables; upstream measured +1–2% on a GB10 with this exact
+model and byte-identical greedy output); SM121-specific attention work (token-tiled HMMA indexed
+attention, heads8 occupancy pinning, register-blocked + MXFP4 indexer scoring); MMQ prefill tier +
+aligned self-load repack (load log: iq2 44.34 GiB / q2k 28.22 GiB / q8 6.15 GiB aligned-repacked in
+~20 s); DSpark greedy-identity correctness fixes (partial accepts replayed through ordinary decode);
+new Flash **0731** checkpoint + native MXFP4 quant (~156 GB — exceeds GB10's 121.6 GiB, not
+serveable resident here; q2 remains our fit) + 0731-specific DSpark support GGUF.
+
+**Leg A — engine A/B, config unchanged (target-only, single-session, ctx 32768):**
+
+| config | c1 runs | median | vs efdadd4 |
+|---|---|---|---|
+| engine-b030961 | 19.72 / 19.62 / 19.63 | **19.63** | **+9.3%** (17.96) → **KEEP** |
+
+Smoke 3/3 PASS (chat, JSON, native DSML tool-call). TTFT (c1 chat mean) **2729 ms → 658 ms (−76%)**
+— the MMQ prefill tier; request latency 15.79 s → 14.20 s. Spread is tight (0.10 t/s), well past
+the >3% KEEP rule. Upstream's own refreshed `speed-bench/gb10.csv` (ds4-bench, 2048-tok ctx steps)
+shows 18.05 t/s gen @2k / 825–900 t/s prefill — consistent with what we see on the server path.
+
+**Not revisited this round (with reasons):** DSpark — the round-2 −17% was a bandwidth argument;
+this drop's DSpark changes are correctness fixes that replay accepts through ordinary decode
+(strictly more work), and our support GGUF is the pre-0731 one (0731 support must not pair with the
+old model) → verdict stands. batched-session — the vendored fork tier is prefill-side; single-GPU
+decode is still the ordered exact fallback, and the box is single-user → situational verdict stands.
+MXFP4 model — doesn't fit (above). Decode-graph isolation (`DS4_CUDA_DECODE_GRAPHS=0`) not run: the
+keep decision doesn't need the attribution split (upstream's own A/B attributes ~1–2 of the ~9 points
+to graphs; the rest is the SM121a/native-arch + attention kernel work).
+
+**Campaign outcome.** Launcher default config **unchanged and remains validated**; the engine build
+moves to **ds4@b030961**, new baseline **c1 median 19.63 tok/s** (was 17.96 on efdadd4, 13.75-class
+pre-July). Same rationale as round 2 for skipping the accuracy gate: no serving knob changed, greedy
+smoke passes, and the decode-graph path is documented byte-identical upstream. Server left up on
+:8000 (baseline config) for OWUI. Old binary parked at `/tmp/ds4-server-efdadd4` (session-scoped;
+rebuild from git for a true rollback).

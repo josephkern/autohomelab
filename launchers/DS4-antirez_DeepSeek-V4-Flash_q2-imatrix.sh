@@ -20,6 +20,9 @@
 # Campaign 20260721 (ds4@efdadd4, results/gb10-*/antirez/DeepSeek-V4-Flash/): baseline c1 median
 # 17.96 tok/s greedy chat(512/256); DSpark + batched-session both discarded — this default
 # (target-only, single-session) is the validated config.
+# Campaign 20260808 (ds4@b030961, 2026-08-05 drop): engine-only update KEEP — c1 median 19.63
+# (+9.3%), TTFT 2729→658 ms (native sm_121a + MMQ prefill tier + decode graphs). Config unchanged.
+# DSpark/batched verdicts stand; Flash-0731 MXFP4 (~156 GB) does not fit GB10.
 #
 # One-time setup:
 #   Build engine:  (cd ~/code/ds4 && make cuda-spark)        # antirez/ds4 canonical main
