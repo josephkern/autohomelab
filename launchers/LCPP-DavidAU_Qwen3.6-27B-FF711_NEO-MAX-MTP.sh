@@ -22,6 +22,23 @@
 #   TOKENIZER=DavidAU/…-NM-DAU-MTP scripts/eval.sh launchers/LCPP-…-MTP.smoke-runbook.sh general
 #   TAG=<slug> scripts/bench_llamacpp.sh launchers/LCPP-…-MTP.smoke-runbook.sh chat coder
 #
+# CAMPAIGN RESULT 20260809 (llamacpp@0865990) — THIS FILE IS THE PROMOTED ARTIFACT.
+# The tune loop's winner IS this file's default config, so promotion changed nothing but the record.
+# Baseline/winner: chat c16 63.51 / c1 19.09 (N=3 median); finalize sweep c1 18.88, c4 28.02,
+# c8 36.05, c16 70.32. Gates: 1 PASS (4/4) · 2 PARTIAL (gsm8k 99.0 @LIMIT=100 think-off; mmlu_pro
+# deferred) · 3 PASS chat (coder INVALID at MAX_SECONDS=180 — needs >=600; c32 uncharacterized).
+# All five tune candidates discarded — but note ~10% cross-session c16 drift exceeds the +3% KEEP
+# rule, so "not separable" is the honest verdict, not "worse". Full detail + the bandwidth analysis:
+#   results/gb10-1988a9714b4e/DavidAU/Qwen3.6-27B-…-NEO-MAX-MTP-GGUF/logbook.md
+#
+#   MTP on/off (matched Q5_K_M pair):  c1 19.09 vs 12.03  -> MTP is worth +58.7% single-stream
+#   MTP_DRAFT 1 / 2 / 3:               c1 16.61 / 19.09 / 20.01 ; c16 64.30 / 63.51 / 61.58
+#   Q4_K_M / Q5_K_M / Q6_K (all MTP):  c1 20.10 / 19.09 / 16.89 ; c16 63.37 / 63.51 / 58.63
+#
+# LATENCY VARIANT (documented, not the default): for single-user interactive use — what this model
+# actually does on OWUI — MTP_DRAFT=3 is the best measured c1 (20.01, +4.8%) at -3.0% c16. The
+# charter tunes c16, so d2 stays default; set MTP_DRAFT=3 if latency matters more than batch.
+#
 # MODEL NOTES (from the model card + config.json of the bf16 source):
 # - arch `qwen35` DENSE 27B, 64 layers, hybrid attention: `linear_attention` x3 then
 #   `full_attention` every 4th layer. Only the 16 full-attention layers hold a growing KV cache

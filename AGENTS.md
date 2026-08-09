@@ -286,6 +286,46 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
   needs >1 `=`), but you MUST pass **`--processor <full HF repo>`** — synthetic-text generation
   needs a real tokenizer and the short `--served-model-name` is not resolvable. bench.sh passes
   `--model "$SERVED_NAME" --processor "$MODEL"`.
+- **`MAX_SECONDS=180` is NOT universal — it assumes a fast model. Scale it to the model.**
+  `output_tokens_per_second.successful.mean` averages only requests that COMPLETED; everything still
+  in flight when the stage ends is `incomplete` and silently excluded. On a slow model the coder
+  shape (4096/1024) needs ~50 s per request, so a 180 s stage drains 2–5 requests per level and the
+  "result" is an average over a handful of lucky completions — which goes **non-monotonic** yet still
+  looks like a real measurement (FF711 20260809: coder c1 27.57 → **c4 121.23** → c8 47.72 → c16
+  56.42, all void; the chat shape at 39–42 successful was fine). **Before trusting any GuideLLM mean,
+  check the successful/incomplete counts in the level json**:
+  `jq '.benchmarks[0].metrics.request_concurrency | {ok:.successful.count, inc:.incomplete.count}'`.
+  Rule of thumb: want ≥20 successful per level; slow dense models need `MAX_SECONDS>=600` for coder.
+
+**llama.cpp host backend — GB10 lessons (FF711 campaign, 20260809)**
+- **`CTX = CTX_PER_SLOT * NP` in the launcher is a trap.** Raising `NP` alone silently doubles total
+  context and KV. `NP=32` at the default 12288/slot → ctx 393216, ~25 GiB KV, which **over-commits
+  unified memory into swap** on the 121 GiB box: throughput collapsed (c16 63.5 → 36.3) and degraded
+  *between* benches (c1 18.75 → 14.19) as swap kicked in. It is also two changes at once. Hold total
+  ctx constant when sweeping slot count (`NP=32 CTX_PER_SLOT=6144`).
+- **Decode is bandwidth-bound and you can verify it arithmetically.** Dense Q5_K_M 27B, MTP OFF:
+  21.18 GB/token × 12.03 tok/s = **255 GB/s ≈ 93% of the GB10's 273 GB/s peak**. There is no engine
+  headroom at c1 without speculation. Quant scaling follows the bytes: Q5→Q6 is +13.5% bytes and
+  measured −11.5% c1 (predicted −11.9%).
+- **MTP trades bandwidth efficiency for tokens.** With MTP on, *apparent* bandwidth drops (~172 GB/s)
+  because the verify pass computes 3 positions instead of 1 plus the draft head — but net c1 is
+  **+58.7%**. Don't read the lower apparent bandwidth as a regression.
+- **Speculation depth optimum moves shallower as batch grows.** Draft 1→3: accepted length rises
+  1.78→2.69 while acceptance falls 0.778→0.564. Best c1 at depth 3, best c16 at depth 1. Per-request
+  `draft acceptance = …` lines in the server log are the ground truth — aggregate them per run
+  before theorising about why a quant or depth won.
+- **Cross-session c16 drift ~10% on this box** (same config: tune-loop median 63.51 vs finalize
+  70.32; sample counts and output lengths matched, so not a sampling artifact). Suspected page-cache
+  /memory state after cycling several 18–24 GB GGUFs. **This exceeds the +3% KEEP rule** — treat
+  small c16 deltas across sessions as *not separable*, and prefer c1 (stable to ~1.4%) when the
+  candidate's effect should show there.
+
+**Spec-decode is NOT automatically greedy-lossless — check per engine**
+- vLLM MTP/draft is greedy-lossless (scores carry over; that's why generative gates suffice there).
+- **antirez/ds4 DSpark is NOT**: upstream README states a long greedy DSpark run "may diverge from a
+  run without DSpark after an otherwise valid accepted block" (not a reduced-precision mode, but
+  numerically different). `--dspark-strict` / `--quality` keep target-only decode for reproducibility.
+  → any DSpark config needs **its own Gate 2**, not the baseline's.
 
 **Adapter gotcha**
 - `adapter.sh info/peakmem` are called standalone (no runbook sourced), so they read the image
