@@ -13,7 +13,8 @@
 #   tail -f ~/.ds4/deepseek-v4-flash.log                   # follow startup / serving logs
 #   PORT=8001 ./DS4-….sh                                   # override the bind port
 #   MTP=~/gguf/DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf ./DS4-….sh   # legacy one-stage MTP (bench: ~no gain on GB10)
-#   DSPARK=1 ./DS4-….sh    # DSpark spec decode (greedy only; bench 20260721: DISCARD, −17% chat / −18% code)
+#   ./DS4-….sh             # DSpark is ON BY DEFAULT since round 4 (20260809): +7.0% c1, quality unchanged
+#   DSPARK= ./DS4-….sh     # disable DSpark (target-only decode, the pre-round-4 default)
 #   DSPARK=1 DSPARK_CONF=0.5 ./DS4-….sh   # sweep the confidence threshold (CUDA default 0.7)
 #   DSPARK=1 DSPARK_STRICT=1 ./DS4-….sh   # target-only decode: reproducibility/quality control leg
 #   BATCH=4 ./DS4-….sh     # --batched-session N (GB10 = ordered fallback; bench 20260721: no agg gain at c4,
@@ -24,7 +25,14 @@
 # (target-only, single-session) is the validated config.
 # Campaign 20260808 (ds4@b030961, 2026-08-05 drop): engine-only update KEEP — c1 median 19.63
 # (+9.3%), TTFT 2729→658 ms (native sm_121a + MMQ prefill tier + decode graphs). Config unchanged.
-# DSpark/batched verdicts stand; Flash-0731 MXFP4 (~156 GB) does not fit GB10.
+# DSpark/batched verdicts stood (carried forward, NOT re-measured); Flash-0731 MXFP4 (~156 GB) does
+# not fit GB10.
+# Campaign 20260809 ROUND 4 (ds4@84cc882): **DSpark PROMOTED, now the default.** Same-session
+# target-only base c1 19.27 -> DSpark 20.61 (+7.0%); gsm8k strict 74.0 == 74.0 (matched pair, so the
+# documented non-lossless divergence costs nothing here); smoke 3/3. The --dspark-strict control at
+# +0.2% proves the gain is speculation, not load-path noise. Confidence axis is FLAT (0.0/0.3/0.7/
+# 0.85 all 20.50-20.61) -> keep the 0.7 default. Round 1's -17% was measured at confidence 0.9 on
+# engine efdadd4; at 0.85 on this engine the same setting gives +6.4%, so the ENGINE fixed it.
 # Round 3b 20260808: 0731 q2 checkpoint refresh DISCARD — c1 flat (19.61) but gsm8k 76→60 strict /
 # 99→82 flexible on matched pairs (likely longer thinking + truncation; see logbook). File kept in
 # ~/gguf; this launcher stays on the pre-0731 GGUF.
@@ -45,7 +53,19 @@ set -euo pipefail
 DS4_BIN="${DS4_BIN:-$HOME/code/ds4/ds4-server}"
 MODEL="${MODEL:-$HOME/gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf}"
 MTP="${MTP:-}"                 # legacy one-stage MTP GGUF path (bench: ~no gain on GB10); superseded by DSPARK
-DSPARK="${DSPARK:-}"           # 1 = DSpark spec decode (auto-uses DSPARK_GGUF via --mtp; greedy requests only)
+# DSpark defaults ON since round 4, but it must YIELD to an explicit legacy MTP request: both paths
+# use --mtp and the guard below hard-errors if each is set. Without this, `MTP=… ./DS4-….sh` (the
+# documented legacy invocation) would fail the moment DSPARK gained a non-empty default.
+# NOTE the `-` (not `:-`): ${DSPARK-1} defaults only when DSPARK is UNSET, so an explicitly empty
+# `DSPARK= ./DS4-….sh` still disables. With `:-` an empty value would be replaced by the default and
+# the documented disable invocation would silently turn DSpark ON.
+if [ -n "$MTP" ]; then DSPARK="${DSPARK-}"; else DSPARK="${DSPARK-1}"; fi
+                               # 1 = DSpark spec decode (auto-uses DSPARK_GGUF via --mtp; greedy requests only)
+                               # DEFAULT ON since round 4 (20260809): +7.0% c1, gsm8k strict
+                               # UNCHANGED (74.0 == 74.0 matched pair). Disable with `DSPARK= ./…sh`.
+                               # CAVEAT: greedy-only — upstream "sampled decoding does not use DSpark
+                               # proposals", so OWUI chat at temp>0 sees no speedup; the win is on
+                               # agent/tool/structured (greedy) traffic. Costs a ~6 GB support GGUF.
 DSPARK_GGUF="${DSPARK_GGUF:-$HOME/gguf/DeepSeek-V4-Flash-DSpark-support.gguf}"
 DSPARK_CONF="${DSPARK_CONF:-}" # --dspark-confidence F (0..1): prunes draft suffixes unlikely to repay
                                # their verification cost. Engine default on CUDA is 0.7 (Metal 0.6);

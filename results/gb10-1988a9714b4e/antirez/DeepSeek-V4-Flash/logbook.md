@@ -153,3 +153,74 @@ N=3 median at 32K = noise; short-context decode unaffected by the allocation, an
 taper ~18→14 t/s across 2K→64K per upstream gb10.csv applies as contexts actually fill). The ds4
 model is also now registered in pi's `~/.pi/agent/models.json` (id deepseek-v4-flash, 64K window,
 8K gen cap) alongside the vLLM 35B — the two share :8000, only one live at a time.
+
+---
+
+## Round 4 — 20260809 — **DSpark PROMOTED** (engine `ds4@84cc882`, +7.0% c1, quality neutral)
+
+Triggered by 32 upstream commits since the round-3 pin `b030961`, notably
+`0e89a0e dspark: commit accepted verifier state directly` (ds4.c +135) and
+`84cc882 rocm: enable DSpark speculative decoding` (the feature maturing across a third backend).
+Also landed: server-side client-disconnect cancellation (`e9ded97`/`8a703b6` — relevant, GuideLLM
+cancels at stage end) and tool-call recovery / OpenAI tool-schema spelling (`0ead8a8`/`3196149`,
+Gate-1 surface). Rebuilt with `make cuda-spark` (sm_121a, clean).
+
+**PROVENANCE CORRECTION.** Two things the earlier record implied that are wrong:
+`--dspark-confidence` is **not** a new flag — it existed at `b030961` with the same 0.7 CUDA
+default. And the DSpark DISCARD was **round 1** (20260721, engine `efdadd4`): c1 median 14.91 vs a
+17.96 baseline = −17%, measured at confidence **0.9**, not the default. Round 3 never re-tested
+DSpark; it carried round 1's verdict forward. **Before this round, DSpark had never been measured
+at its default threshold on any engine we've pinned.**
+
+### Gate 3 — c1, N=3 median, greedy, same-session target-only base **19.27**
+
+| candidate | c1 | Δ | per-run spread |
+|---|---|---|---|
+| target-only baseline | 19.27 | — | 0.05% |
+| `--dspark-strict` (control) | 19.30 | +0.2% → discard | 0.2% |
+| DSpark conf 0.0 | 20.50 | +6.4% | — |
+| DSpark conf 0.3 | 20.52 | +6.5% | 0.4% |
+| DSpark conf 0.5 | 21.56 | +11.9% | **7.2%** |
+| **DSpark conf 0.7 (default) — WINNER** | **20.61** | **+7.0%** | 2.6% |
+| DSpark conf 0.85 | 20.50 | +6.4% | 4.9% |
+
+1. **The `--dspark-strict` control at +0.2% is what makes this trustworthy**: loading the DSpark
+   support GGUF while keeping target-only decode costs nothing, so the whole gain is speculation.
+2. **The confidence axis is FLAT.** Four settings land within 0.11 tok/s (20.50 / 20.52 / 20.61 /
+   20.50). DSpark configs are **10–100× noisier** than target-only decode (acceptance depends on
+   generated content; target-only is fixed work per token) — c05's runs spanned 20.28–21.75. Its
+   21.56 median is therefore most likely a **noise excursion, not a peak**; four identical neighbours
+   are the stronger evidence. → take the default, carry no extra flag.
+3. **Attribution: the engine, not the threshold.** At a near-identical threshold to round 1
+   (0.85 vs 0.9) the result moved **−17% → +6.4%**, a ~24-point swing confidence cannot explain.
+
+### Gate 2 — matched pair, SAME SESSION (mandatory: DSpark is not greedy-lossless)
+
+| config | gsm8k strict | flexible |
+|---|---|---|
+| target-only | 74.0 | 97.0 |
+| **DSpark @ 0.7** | **74.0** | 98.0 |
+
+`LIMIT=100`, think-off, `TOKENIZER=deepseek-ai/DeepSeek-V4-Flash`. **Strict-match identical.** The
+divergence upstream documents is real in principle but costs nothing measurable here — and this is
+the same gate that correctly killed the 0731 checkpoint at 76→60, so it has demonstrated teeth.
+Note the same-session target-only leg came in at **74.0 vs round 3b's stored 76.0** on an identical
+GGUF+config: a 2-point cross-session drift, wider than the ~1 pt AGENTS.md records for mmlu, and
+exactly why the matched pair was worth the extra hour instead of comparing against the stored value.
+
+Gate 1: smoke 3/3 PASS on every DSpark leg (the queue smoke-gates each candidate).
+
+### PROMOTED: `DSPARK=1` is now the launcher default
+
+⚠️ **The +7% applies to GREEDY requests only.** Upstream: "Sampled decoding does not use DSpark
+proposals." Benchmarks pin `temp=0` (DSpark's best case), so typical OWUI chat at temp>0 will see
+**no** speedup; the win lands on agent/tool/structured traffic. Enabled by default anyway — no
+measured downside, and it costs one extra ~6 GB support GGUF (peak ~110 GB used of 121). Disable
+with `DSPARK= ./DS4-….sh`.
+
+### Not run / follow-ups
+
+- `--mtp-margin F` (verifier acceptance margin, default 3) — never swept; a plausible next axis.
+- A higher-N (N≥7) 0.5-vs-0.7 head-to-head would settle whether 0.5 is real. Low prior given the
+  four flat neighbours; skipped as a poor use of box time.
+- DSpark × `--batched-session` interaction untested (batched was discarded solo in round 1).
