@@ -45,8 +45,10 @@ run(){
 }
 
 # Candidate queue (logbook "Candidate queue" table). One axis per candidate, all vs the same base.
-declare -a QUEUE=(mtp-off mtp-d1 mtp-d3 q4km q6k)
-want(){ [ "$#" -eq 0 ] && return 0; local s="$1"; shift; for a in "$@"; do [ "$a" = "$s" ] && return 0; done; return 1; }
+declare -a QUEUE=(mtp-off mtp-d1 mtp-d3 q4km q6k np32)
+# want <slug> [selection...] — true if no selection was given, or the slug is in it.
+# (The slug is always $1, so the "no selection" test must come AFTER the shift.)
+want(){ local s="$1"; shift; [ "$#" -eq 0 ] && return 0; for a in "$@"; do [ "$a" = "$s" ] && return 0; done; return 1; }
 SEL=("$@")
 
 log "=== ff711 llama.cpp tune queue start (base c16=$BASE_C16) ==="
@@ -65,6 +67,13 @@ want q4km "${SEL[@]}" && run q4km "Q4_K_M MTP (smaller = less bandwidth per toke
   QUANT="$G-MTP-Q4_K_M.gguf" MTP=1 MTP_DRAFT=2
 want q6k "${SEL[@]}" && run q6k "Q6_K MTP (larger = quality headroom, cost check)" \
   QUANT="$G-MTP-Q6_K.gguf" MTP=1 MTP_DRAFT=2
+# 4. Slots — c32 is only meaningful with NP >= 32 (llama.cpp QUEUES past -np).
+#    TRAP: the launcher derives CTX=CTX_PER_SLOT*NP, so raising NP alone DOUBLES total context
+#    (196608 -> 393216, ~12.6 -> ~25 GiB KV) and over-commits unified memory into swap — that is
+#    two changes, not one, and it measures swapping. Hold total ctx constant by halving the
+#    per-slot budget. NOTE 6144/slot only just covers coder(4096/1024); chat is unaffected.
+want np32 "${SEL[@]}" && run np32 "32 slots at constant total ctx (enables a valid c32)" \
+  QUANT="$G-MTP-Q5_K_M.gguf" MTP=1 MTP_DRAFT=2 NP=32 CTX_PER_SLOT=6144
 
 {
   echo

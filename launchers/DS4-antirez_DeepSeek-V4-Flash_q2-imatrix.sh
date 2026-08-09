@@ -14,6 +14,8 @@
 #   PORT=8001 ./DS4-….sh                                   # override the bind port
 #   MTP=~/gguf/DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf ./DS4-….sh   # legacy one-stage MTP (bench: ~no gain on GB10)
 #   DSPARK=1 ./DS4-….sh    # DSpark spec decode (greedy only; bench 20260721: DISCARD, −17% chat / −18% code)
+#   DSPARK=1 DSPARK_CONF=0.5 ./DS4-….sh   # sweep the confidence threshold (CUDA default 0.7)
+#   DSPARK=1 DSPARK_STRICT=1 ./DS4-….sh   # target-only decode: reproducibility/quality control leg
 #   BATCH=4 ./DS4-….sh     # --batched-session N (GB10 = ordered fallback; bench 20260721: no agg gain at c4,
 #                          #  ~4 t/s per user, per-req latency worse — situational, default off)
 #
@@ -45,6 +47,14 @@ MODEL="${MODEL:-$HOME/gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-c
 MTP="${MTP:-}"                 # legacy one-stage MTP GGUF path (bench: ~no gain on GB10); superseded by DSPARK
 DSPARK="${DSPARK:-}"           # 1 = DSpark spec decode (auto-uses DSPARK_GGUF via --mtp; greedy requests only)
 DSPARK_GGUF="${DSPARK_GGUF:-$HOME/gguf/DeepSeek-V4-Flash-DSpark-support.gguf}"
+DSPARK_CONF="${DSPARK_CONF:-}" # --dspark-confidence F (0..1): prunes draft suffixes unlikely to repay
+                               # their verification cost. Engine default on CUDA is 0.7 (Metal 0.6);
+                               # 0 forces fixed five-token blocks (diagnostics only). THE tuning axis
+                               # for round 4 — it did not exist when round 3 DISCARDed DSpark.
+DSPARK_STRICT="${DSPARK_STRICT:-}"  # 1 = --dspark-strict: load DSpark but keep target-only decode.
+                               # DSpark is NOT greedy-lossless (upstream README: a long greedy run may
+                               # diverge from non-DSpark decode after a valid accepted block), so this
+                               # is the reproducibility/quality control leg, not a perf config.
 BATCH="${BATCH:-}"             # N = --batched-session N resident KV sessions (size CTX*N to fit memory)
 MTP_DRAFT="${MTP_DRAFT:-2}"    # draft tokens per speculative cycle (only used with legacy MTP)
 CTX="${CTX:-65536}"           # allocated context tokens (64K default 20260808 for pi/agent use:
@@ -89,7 +99,11 @@ MTP_ARGS=()
 if [ -n "$DSPARK" ]; then
   [ -n "$MTP" ] && { echo "ERROR: DSPARK and legacy MTP are mutually exclusive (both use --mtp)" >&2; exit 1; }
   [ -f "$DSPARK_GGUF" ] || { echo "ERROR: DSpark support GGUF not found: $DSPARK_GGUF" >&2; exit 1; }
+  # --dspark-confidence implies --dspark, but pass both so the log line is unambiguous about
+  # which threshold produced a given results.tsv row (bench_ds4.sh hashes the served cmdline).
   MTP_ARGS=(--mtp "$DSPARK_GGUF" --dspark)
+  [ -n "$DSPARK_CONF" ]   && MTP_ARGS+=(--dspark-confidence "$DSPARK_CONF")
+  [ -n "$DSPARK_STRICT" ] && MTP_ARGS+=(--dspark-strict)
 elif [ -n "$MTP" ]; then
   [ -f "$MTP" ] || { echo "ERROR: MTP GGUF not found: $MTP" >&2; exit 1; }
   MTP_ARGS=(--mtp "$MTP" --mtp-draft "$MTP_DRAFT")
@@ -97,7 +111,7 @@ fi
 BATCH_ARGS=()
 [ -n "$BATCH" ] && BATCH_ARGS=(--batched-session "$BATCH")
 
-echo "starting ds4-server: DeepSeek-V4-Flash on ${HOST}:${PORT} (ctx=${CTX}${DSPARK:+, DSpark=on}${MTP:+, MTP=on draft=$MTP_DRAFT}${BATCH:+, batched-session=$BATCH})"
+echo "starting ds4-server: DeepSeek-V4-Flash on ${HOST}:${PORT} (ctx=${CTX}${DSPARK:+, DSpark=on${DSPARK_CONF:+ conf=$DSPARK_CONF}${DSPARK_STRICT:+ STRICT/target-only}}${MTP:+, MTP=on draft=$MTP_DRAFT}${BATCH:+, batched-session=$BATCH})"
 nohup "$DS4_BIN" -m "$MODEL" --cuda --ctx "$CTX" --host "$HOST" --port "$PORT" --cors "${MTP_ARGS[@]}" "${BATCH_ARGS[@]}" > "$LOG" 2>&1 &
 echo $! > "$PIDFILE"
 disown || true
