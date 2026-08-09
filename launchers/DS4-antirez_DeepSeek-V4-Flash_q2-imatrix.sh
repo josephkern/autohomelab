@@ -49,8 +49,10 @@ DSPARK="${DSPARK:-}"           # 1 = DSpark spec decode (auto-uses DSPARK_GGUF v
 DSPARK_GGUF="${DSPARK_GGUF:-$HOME/gguf/DeepSeek-V4-Flash-DSpark-support.gguf}"
 DSPARK_CONF="${DSPARK_CONF:-}" # --dspark-confidence F (0..1): prunes draft suffixes unlikely to repay
                                # their verification cost. Engine default on CUDA is 0.7 (Metal 0.6);
-                               # 0 forces fixed five-token blocks (diagnostics only). THE tuning axis
-                               # for round 4 — it did not exist when round 3 DISCARDed DSpark.
+                               # 0 forces fixed five-token blocks (diagnostics only). NOT a new flag —
+                               # it already existed at the round-3 pin b030961 with the same 0.7
+                               # default. Round 4 sweep (20260809, base 19.27): 0.5 -> 21.56 (+11.9%),
+                               # 0.7 -> 20.61 (+7.0%), 0.85 -> 20.50 (+6.4%). Lower admits more drafts.
 DSPARK_STRICT="${DSPARK_STRICT:-}"  # 1 = --dspark-strict: load DSpark but keep target-only decode.
                                # DSpark is NOT greedy-lossless (upstream README: a long greedy run may
                                # diverge from non-DSpark decode after a valid accepted block), so this

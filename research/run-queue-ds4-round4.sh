@@ -6,8 +6,12 @@
 #   84cc882 "rocm: enable DSpark speculative decoding"          (DSpark maturing across backends)
 #   e9ded97/8a703b6 server: cancel work on client disconnect    (GuideLLM cancels at stage end)
 #   0ead8a8/3196149 server: tool-call recovery + OpenAI schema spelling  (Gate 1 surface)
-# and a NEW tuning axis that did not exist when round 3 DISCARDed DSpark (-17% chat / -18% code):
-#   --dspark-confidence F   prunes draft suffixes unlikely to repay verification. CUDA default 0.7.
+# PROVENANCE, stated correctly (an earlier draft of this header got it wrong):
+#   --dspark-confidence is NOT new — it already existed at the round-3 pin b030961, same 0.7 CUDA
+#   default. And the DSpark DISCARD was ROUND 1 (20260721, engine efdadd4): c1 14.91 median vs a
+#   17.96 baseline = -17%, measured at confidence **0.9**, not the default. Round 3 (b030961) never
+#   re-tested DSpark; it carried round 1's verdict forward. So before this round, DSpark had never
+#   been measured at its default threshold, on this engine, at all.
 #
 # OBJECTIVE = c1 (ds4 is single-session; LEVELS_SET defaults to 1 in bench_ds4.sh), N=3 median,
 # greedy (TEMP=0 — DSpark only engages on greedy requests). Reference: round 3 c1 median 19.63.
@@ -88,7 +92,7 @@ PY
   log "$slug -> c1=$c1 :: $note"
 }
 
-declare -a QUEUE=(dspark-default dspark-c05 dspark-c085 dspark-strict)
+declare -a QUEUE=(dspark-default dspark-c05 dspark-c085 dspark-strict dspark-c03 dspark-c00)
 want(){ local s="$1"; shift; [ "$#" -eq 0 ] && return 0; for a in "$@"; do [ "$a" = "$s" ] && return 0; done; return 1; }
 SEL=("$@")
 
@@ -99,6 +103,10 @@ want dspark-default "${SEL[@]}" && run dspark-default "DSpark @ CUDA default con
 # The new axis. Lower = admit more draft suffixes; higher = prune harder.
 want dspark-c05  "${SEL[@]}" && run dspark-c05  "DSpark confidence 0.5 (admit more drafts)"  DSPARK=1 DSPARK_CONF=0.5
 want dspark-c085 "${SEL[@]}" && run dspark-c085 "DSpark confidence 0.85 (prune harder)"      DSPARK=1 DSPARK_CONF=0.85
+# Round 4b: the curve was still climbing at the low end (0.85 +6.4% < 0.7 +7.0% < 0.5 +11.9%),
+# so push past the edge of the original sweep. 0 = fixed five-token blocks (upstream: diagnostic).
+want dspark-c03 "${SEL[@]}" && run dspark-c03 "DSpark confidence 0.3 (admit still more)" DSPARK=1 DSPARK_CONF=0.3
+want dspark-c00 "${SEL[@]}" && run dspark-c00 "DSpark confidence 0 (fixed 5-token blocks)" DSPARK=1 DSPARK_CONF=0
 # Control: loads DSpark but keeps target-only decode. Isolates load-time/verifier overhead from
 # the speculative win, and is the byte-for-byte reproducibility leg.
 want dspark-strict "${SEL[@]}" && run dspark-strict "DSpark loaded, target-only decode (control)" DSPARK=1 DSPARK_STRICT=1
