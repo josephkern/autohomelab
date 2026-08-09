@@ -1,0 +1,2 @@
+run_id	commit	node_fp	model	config_hash	script	suite	tasks	limit	scores	data	think
+20260809-150447-eval	649abfe	gb10-1988a9714b4e	DavidAU/Qwen3.6-27B-Fable-Fusion-711-Uncensored-Heretic-NM-DAU-NEO-MAX-MTP-GGUF	540d611c	launchers/LCPP-DavidAU_Qwen3.6-27B-FF711_NEO-MAX-MTP.smoke-runbook.sh	general	gsm8k	100	gsm8k=99.0	results/gb10-1988a9714b4e/DavidAU/Qwen3.6-27B-Fable-Fusion-711-Uncensored-Heretic-NM-DAU-NEO-MAX-MTP-GGUF/data/20260809-150447-eval	off

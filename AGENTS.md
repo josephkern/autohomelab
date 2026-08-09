@@ -46,6 +46,20 @@ within tolerance), **fast** (tok/s @ 1/16/32 via GuideLLM — the tuned objectiv
 - **Bench** (`scripts/bench.sh`) → GuideLLM sweep → raw bundle + one `results.tsv` row.
 - **Tune** (`program.md` loop) → mutate the runbook to maximize tok/s; keep/discard by result.
 
+**HOST-PROCESS backends (GGUF).** Some engines are native host processes, not Docker images with an
+adapter — currently **ds4** (antirez "DwarfStar", DeepSeek-V4 arch only) and **llama.cpp** (broad
+GGUF arch coverage). They keep the same *results contract* but bypass the adapter layer, so:
+serve with a hand-authored `launchers/<ENGINE>-<org>_<model>.sh` instead of `serve.sh`; bench with
+the engine's `scripts/bench_<engine>.sh` sibling (same GuideLLM invocation, same `results.tsv`
+columns, `backend=<engine>@<git-short-sha>` — pinned by **git sha**, since there is no image digest);
+and drive Gates 1–2 through a **runbook stub** (`<launcher>.smoke-runbook.sh`) that carries just
+`MODEL`/`SERVED_NAME`/`PROCESSOR`+`TOKENIZER` and parser MARKERS. **`suite.sh` cannot drive these** —
+it calls the vLLM `serve.sh` — so run smoke/eval/bench individually. `promote.sh` likewise doesn't
+apply: the promoted artifact is the launcher itself, with the winning config as its defaults.
+GGUF repos ship no `tokenizer.json`, so `PROCESSOR`/`TOKENIZER` must point at the **unquantized
+source repo** or GuideLLM synthetic data and lm-eval loglikelihood tasks both break.
+Build llama.cpp with `scripts/build_llamacpp.sh` (CUDA, sm_121 explicit).
+
 ## Runbooks are the reproducible unit
 
 `runbooks/<HFOrg>/<Model>/` is **model-centric**. A runbook `.sh` is the *complete* config:

@@ -68,18 +68,39 @@ PIDFILE="${PIDFILE:-$HOME/.llamacpp/ff711-27b.pid}"
 
 mkdir -p "$(dirname "$LOG")"
 
+# Stop any prior server and WAIT for it to actually exit. A server with in-flight slots takes
+# ~30s to cancel them and release :$PORT; a fixed short sleep here races the new process into a
+# bind failure that looks like a silent startup hang (hit during the FF711 campaign). Poll instead,
+# then escalate to SIGKILL rather than starting on a port that is still held.
 stop_prior() {
-  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-    echo "stopping llama-server (pid $(cat "$PIDFILE"))"
-    kill "$(cat "$PIDFILE")" 2>/dev/null || true
-  fi
+  local pids=()
+  [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null && pids+=("$(cat "$PIDFILE")")
   local stray
   stray="$(pgrep -f "llama-server .*--port ${PORT}( |\$)" 2>/dev/null || true)"
-  if [ -n "$stray" ]; then
-    echo "stopping stray llama-server on :${PORT} (pid ${stray})"
-    kill ${stray} 2>/dev/null || true
-  fi
-  [ -n "$stray" ] && sleep 2 || true
+  [ -n "$stray" ] && pids+=(${stray})
+  [ "${#pids[@]}" -eq 0 ] && return 0
+
+  # de-duplicate (pidfile and pgrep usually name the same process)
+  mapfile -t pids < <(printf '%s\n' "${pids[@]}" | sort -u)
+  echo "stopping prior llama-server (pid ${pids[*]}) — draining slots, this can take ~30s"
+  kill "${pids[@]}" 2>/dev/null || true
+
+  local waited=0
+  while [ "$waited" -lt "${STOP_TIMEOUT:-90}" ]; do
+    local alive=0
+    for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null && alive=1; done
+    # the port must be free too — the socket outlives the process briefly
+    if [ "$alive" -eq 0 ] && ! (exec 3<>"/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null; then
+      exec 3<&- 2>/dev/null || true
+      echo "  prior server stopped after ${waited}s"
+      return 0
+    fi
+    sleep 2; waited=$((waited + 2))
+  done
+
+  echo "  still up after ${waited}s — SIGKILL" >&2
+  kill -9 "${pids[@]}" 2>/dev/null || true
+  sleep 3
 }
 
 if [ "${1:-}" = "stop" ]; then
@@ -109,13 +130,17 @@ stop_prior
 
 echo "starting llama-server: $(basename "$QUANT") on ${HOST}:${PORT}"
 echo "  ctx=${CTX} (np=${NP} x ${CTX_PER_SLOT}/slot), ngl=${NGL}, fa=${FA}, MTP=${MTP}$([ "$MTP" = 1 ] && echo " draft=${MTP_DRAFT}")${THINK_OFF:+, thinking=OFF}"
+# APPEND, never truncate: a departing server keeps its log fd open while it drains, so a
+# truncating redirect leaves the old process writing at a stale offset (sparse file, interleaved
+# nonsense). The separator keeps runs readable.
+{ echo; echo "===== $(date -u +%Y-%m-%dT%H:%M:%SZ) start: $(basename "$QUANT") np=$NP ctx=$CTX MTP=$MTP${THINK_OFF:+ think=off} ====="; } >> "$LOG"
 nohup "$LCPP_BIN" \
   -m "$QUANT" -a "$ALIAS" \
   --host "$HOST" --port "$PORT" \
   -c "$CTX" -np "$NP" -ngl "$NGL" -fa "$FA" \
   --jinja --reasoning-format deepseek \
   "${SPEC_ARGS[@]}" "${THINK_ARGS[@]}" \
-  > "$LOG" 2>&1 &
+  >> "$LOG" 2>&1 &
 echo $! > "$PIDFILE"
 disown || true
 
