@@ -277,3 +277,34 @@ default; carry no env knobs.
 
 Practical note: `SCHEDULER_SKIP=0` removes only ONE cooldown path — 2111 skips still fired from
 `slow_skip` / `no_draft_skip` / `cold_low_confidence_skip`. Only `DS4_DSPARK_SCHEDULER=0` zeroes them.
+
+### Round 5 addendum — upstream `ds4-bench` speed-bench vs the checked-in `gb10.csv`
+
+Ran upstream's own harness at `gb10.csv`'s exact parameters (`--ctx-start 2048 --ctx-max 65536
+--step-incr 2048 --gen-tokens 128 --cuda`, promessi_sposi.txt), 6m30s, 32 frontiers. Ours saved as
+`speedbench-gb10-84cc882.csv`. **`ds4-bench` has no DSpark/MTP flags — it measures TARGET-ONLY
+decode**, which is the right comparison against `gb10.csv` (also target-only) and cleanly separates
+engine change from the DSpark win.
+
+| ctx | prefill Δ | gen_steady Δ |
+|---|---|---|
+| 2048 | 825.76 → 813.60 (−1.5%) | 18.20 → 17.95 (−1.4%) |
+| 16384 | 872.44 → 871.23 (−0.1%) | 15.18 → 14.98 (−1.3%) |
+| 32768 | 855.94 → 854.48 (−0.2%) | 14.51 → 14.33 (−1.2%) |
+| 65536 | 822.98 → 823.34 (+0.0%) | 13.91 → 13.74 (−1.2%) |
+
+All 32 frontiers regressed on generation: mean **−1.47%**, range −1.2% to −1.8%. Prefill is flat
+(mean −0.39%).
+
+⚠️ **CONFOUNDED — this is a CROSS-MACHINE comparison.** `speed-bench/gb10.csv` was authored by
+antirez on **his** DGX Spark (commit `e0c63d9`, 2026-08-05), not on this node, so the offset may be
+hardware (thermals/firmware/binning) rather than the 32 commits. What IS controlled: `kvcache_bytes`
+matches his column exactly (52184460 @ctx2048), so the model and config are identical.
+
+Corroborating same-box signal: our GuideLLM target-only c1 went **19.44 → 19.27 (−0.9%)** across the
+same engine change at matched ctx 65536 — same direction, similar magnitude, completely independent
+harness (HTTP+GuideLLM vs in-process). **Best read: a ~1% target-only decode regression is plausible
+but not proven.** It is swamped by DSpark's +7.0%, so it does not change the promotion.
+
+Side benefit: the two harnesses agreeing to within ~0.5 pt is a useful validation of our GuideLLM
+setup on this backend.
