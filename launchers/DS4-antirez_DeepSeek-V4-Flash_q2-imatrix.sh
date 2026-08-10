@@ -133,8 +133,20 @@ fi
 BATCH_ARGS=()
 [ -n "$BATCH" ] && BATCH_ARGS=(--batched-session "$BATCH")
 
+# DSpark's runtime knobs are ENV vars (DS4_DSPARK_SCHEDULER_*, DS4_DSPARK_STATS, DS4_DSPARK_EXEC_TIER,
+# DS4_MTP_*), which nohup inherits automatically — no flag plumbing needed. But bench_ds4.sh derives
+# config_hash from the served CMDLINE, so two env-tuned runs would otherwise collide on an identical
+# hash and be indistinguishable in results.tsv. Surface them here so the log records what was set.
+DS4_TUNING_ENV="$(env | grep -E '^(DS4_DSPARK|DS4_MTP)' | sort | tr '\n' ' ' || true)"
+[ -n "$DS4_TUNING_ENV" ] && echo "  tuning env: $DS4_TUNING_ENV"
+
 echo "starting ds4-server: DeepSeek-V4-Flash on ${HOST}:${PORT} (ctx=${CTX}${DSPARK:+, DSpark=on${DSPARK_CONF:+ conf=$DSPARK_CONF}${DSPARK_STRICT:+ STRICT/target-only}}${MTP:+, MTP=on draft=$MTP_DRAFT}${BATCH:+, batched-session=$BATCH})"
-nohup "$DS4_BIN" -m "$MODEL" --cuda --ctx "$CTX" --host "$HOST" --port "$PORT" --cors "${MTP_ARGS[@]}" "${BATCH_ARGS[@]}" > "$LOG" 2>&1 &
+{ echo "===== $(date -u +%Y-%m-%dT%H:%M:%SZ) start: ctx=$CTX DSpark=${DSPARK:-off}${DSPARK_CONF:+ conf=$DSPARK_CONF}${DSPARK_STRICT:+ strict} env=[${DS4_TUNING_ENV:-none}] ====="; } >> "$LOG"
+# APPEND, never truncate (same lesson as the llama.cpp launcher). ds4 prints its DSpark stats block
+# from ds4_session_free() at shutdown, so a truncating `>` wipes the departing run's stats the
+# instant the next one starts — which made round-5 legs impossible to compare retroactively and also
+# erased the separator line written just above.
+nohup "$DS4_BIN" -m "$MODEL" --cuda --ctx "$CTX" --host "$HOST" --port "$PORT" --cors "${MTP_ARGS[@]}" "${BATCH_ARGS[@]}" >> "$LOG" 2>&1 &
 echo $! > "$PIDFILE"
 disown || true
 

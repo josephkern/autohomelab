@@ -220,7 +220,60 @@ with `DSPARK= ./DS4-….sh`.
 
 ### Not run / follow-ups
 
-- `--mtp-margin F` (verifier acceptance margin, default 3) — never swept; a plausible next axis.
+- ~~`--mtp-margin F` — a plausible next axis~~ **RETRACTED 20260810: it is unreachable under DSpark.**
+  `ds4_session_eval_speculative_argmax()` returns into `ds4_session_eval_dspark_speculative_argmax()`
+  at ds4.c:~66049 when `support_kind == DS4_SUPPORT_DSPARK`, while `e->mtp_margin` is first read at
+  ds4.c:66091 — after that early return, same function. It is further gated on `draft_n == 2` (the
+  legacy `--mtp-draft` count) and sits on the legacy MTP path, which is mutually exclusive with
+  DSpark (both use `--mtp`) and was already benched as ~no gain on GB10. Sweeping it would measure
+  nothing on the promoted config.
+- **Round 5 axis instead: the DSpark adaptive SCHEDULER**, the only runtime-tunable surface on the
+  promoted path (env, not flags): `DS4_DSPARK_SCHEDULER_{WINDOW 4, SKIP 2, SLOW_SKIP 4,
+  NO_DRAFT_SKIP 3, SHORT_ACCEPT_NO_DRAFT_SKIP 4, COLD_LOW_CONFIDENCE_SKIP 7, MIN_AVG_MILLI 1500,
+  TAIL_MIN_TOKENS 10}`, plus `DS4_DSPARK_STATS` (acceptance/skip diagnostics) and
+  `DS4_DSPARK_EXEC_TIER`. NOTE `DS4_DSPARK_MAX_BLOCK_SIZE`(16)/`MAX_STAGES`(8) are compile-time
+  #defines, NOT env knobs. Caveat: env does not appear in the served cmdline, so `config_hash`
+  cannot distinguish these runs — the launcher now logs the tuning env, and rows must carry it in notes.
 - A higher-N (N≥7) 0.5-vs-0.7 head-to-head would settle whether 0.5 is real. Low prior given the
   four flat neighbours; skipped as a poor use of box time.
 - DSpark × `--batched-session` interaction untested (batched was discarded solo in round 1).
+
+---
+
+## Round 5 — 20260810 — DSpark adaptive scheduler: **no change, and that is the finding**
+
+`--mtp-margin` was RETRACTED before testing (unreachable under DSpark — see the round-4 follow-ups).
+The replacement axis came from measurement: `DS4_DSPARK_STATS=1` on the promoted config showed the
+scheduler declining to draft in **89 of 152 cycles (59%)**, `no_draft=112` (74%), while acceptance
+when it *did* draft was **72.84%**. Hypothesis: the break-even heuristics are calibrated for other
+hardware and are leaving throughput on the table on GB10.
+
+Fresh same-session DSpark-default base **c1 20.98** (21.34 / 20.98 / 20.90) — note this is +1.8%
+above round 4's 20.61 for an *identical* config, more session drift.
+
+| candidate | c1 | Δ | runs | accept_rate | avg_accept | scheduler_skips |
+|---|---|---|---|---|---|---|
+| base (default) | 20.98 | — | 21.34/20.98/20.90 | 72.84%* | 0.388* | 89 / 152* |
+| `SCHEDULER=0` (always draft) | 21.36 | +1.8% | 21.36/21.32/21.36 | **88.31%** | **1.965** | **0** / 3754 |
+| `SCHEDULER_SKIP=0` | 21.48 | +2.4% | 21.15/21.48/21.50 | 91.16% | 1.092 | 2111 / 4927 |
+| `NO_DRAFT_SKIP=0` | 21.39 | +2.0% | 21.25/21.39/21.41 | 88.62% | 1.435 | 992 / 4260 |
+| `SCHEDULER_WINDOW=1` | 21.49 | +2.4% | 21.41/21.58/21.49 | 89.50% | 1.033 | 2508 / 5012 |
+
+\* base stats are from a single 220-token probe, not the bench workload — the launcher truncated the
+log on each restart so per-leg base stats over a matched workload were lost. **Fixed:** the launcher
+now appends (`>>`), same lesson the llama.cpp launcher already carried.
+
+**ALL DISCARDED (none clears +3%), and the uniform ~+2% is almost certainly not real.** Four
+structurally different interventions all landing in 21.36–21.49 is the signature of a depressed
+baseline, not four equal wins — and the base's own first run (21.34) sits inside that cluster before
+drifting to 20.90. Best estimate: every config including the default is worth ~21.4.
+
+**The real result is a confirmed negative with a verified mechanism.** `SCHEDULER=0` did exactly what
+it was supposed to: skips → **0**, drafting in 81% of cycles (up from ~26%), acceptance 72.8 → 88.3%,
+and accepted draft tokens per cycle up **5×** (0.388 → 1.965). Throughput did not move. The extra
+propose+verify cost almost exactly cancels the extra accepted tokens — **antirez's break-even
+scheduler is well-calibrated, and you cannot beat it by forcing more speculation.** Ship the plain
+default; carry no env knobs.
+
+Practical note: `SCHEDULER_SKIP=0` removes only ONE cooldown path — 2111 skips still fired from
+`slow_skip` / `no_draft_skip` / `cold_low_confidence_skip`. Only `DS4_DSPARK_SCHEDULER=0` zeroes them.
