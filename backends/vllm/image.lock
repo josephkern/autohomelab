@@ -17,6 +17,34 @@ AHL_VLLM_DEFAULT_IMAGE="vllm/vllm-openai@sha256:fc56161ee42a011aeee78b65d0a81b66
 AHL_VLLM_DEFAULT_ENTRYPOINT_SERVE=true   # image ENTRYPOINT is already `vllm serve` -> pass MODEL positionally
 
 # ── Validated catalog (ref | entrypoint_serve | notes) ────────────────────────
+# v0.27.1   vllm/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967  serve=yes
+#           stable patch release (2026-08-11, pulled 2026-08-15); size 22.5GB. Pulled for the
+#           Qwen3.8-27B-NVFP4 campaign (qwen3_5 arch). 0.27.1 itself is one commit on 0.27.0:
+#           #50424 "support quantized DSpark Markov heads". The substance is in 0.27.0 (561 commits):
+#           GB10/sm_121-RELEVANT: **#49904 fixed CUDA arch detection producing kernel-less builds on
+#           SM121** (our GPU — verify kernels actually load), #44993 "grammar advanced across the
+#           reasoning boundary with spec decode" (the remaining fix for our tracked xgrammar x
+#           reasoning-parser x MTP 500 — RETEST the grammar smoke here, see AGENTS.md follow-up).
+#           Qwen3.5-family: #50210 text-only dense+MoE, #48912 EVS video token pruning. Hybrid/Mamba:
+#           #48018 ReplaySSM decode caching, #50157 FlashInfer Mamba SSU algo selection, #49736 fewer
+#           GPU<->CPU syncs in hybrid Mamba (all relevant — qwen3_5 is 48/64 Gated DeltaNet layers).
+#           MRv2: #48892 multi-layer MTP speculator. BREAKING ENV: torch 2.13.0 / torchvision 0.28.0 /
+#           Triton 3.7.1 (#48155), transformers 5.14.1, FlashInfer 0.6.16.post3. REMOVED models:
+#           Plamo2 (#49729), Ouro (#49786); removed flags: --max-num-partial-prefills,
+#           --max-long-partial-prefills (#49244) — we don't use either. NOT yet serve-validated on
+#           this node; capabilities snapshot: backends/vllm/capabilities/0.27.1.txt.
+#           MEASURED capabilities diff vs 0.25.0 (20260815): --moe-backend +batched_triton (only
+#           choice-list change); --linear-backend, --kv-cache-dtype, spec-decode methods (mtp, dspark,
+#           qwen3_next_mtp, eagle/eagle3, medusa, ngram, deepseek_mtp, bailing_hybrid_mtp) ALL IDENTICAL.
+#           Serve flags REMOVED: only the two partial-prefill ones above (unused by us). Serve flags
+#           ADDED (14): --use-replayssm, --replayssm-buffer-len, --mamba-ssu-algorithm,
+#           --kda-prefill-backend, --max-num-scheduled-tokens, --prefix-match-unit,
+#           --enable-bf16x3-router-gemm, --enable-moe-shared-loras, --enable-fault-tolerance,
+#           --fault-tolerance-config, --mm-hasher-algorithm, --video-pruning-method, --cohere-format,
+#           --cohere-is-reasoning-model. NOTE the first four are HYBRID/MAMBA tuning dimensions that
+#           DO NOT EXIST on 0.25.0 — directly applicable to qwen3_5 (48 of 64 layers Gated DeltaNet)
+#           and to any future hybrid model. Env vars: +VLLM_TRITON_USE_TD, +VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS,
+#           +VLLM_ENABLE_STARTUP_PLAN, +VLLM_MAX_COMPLETION_PROMPTS (and -VLLM_CI_USE_S3, -TPU/ROCm-only vars).
 # v0.25.0   vllm/vllm-openai@sha256:fc56161ee42a011aeee78b65d0a81b6683c7d04402fd40503d14d4d6c98f07cb  serve=yes  [DEFAULT]
 #           stable release (pulled 2026-07-12); verified vllm 0.25.0, size 19.7GB. DEFAULT since
 #           20260712 (user call): 35B transition baseline NEUTRAL on all gates (c16/c1/acceptance/
