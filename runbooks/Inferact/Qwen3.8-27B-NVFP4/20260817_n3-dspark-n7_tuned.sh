@@ -15,17 +15,28 @@
 #   headline does NOT survive arithmetic on this box: 10.34 target passes/s x 3.39 accepted = ~35
 #   tok/s, and their FP8 target is HEAVIER than our NVFP4 so it would be slower still. We are
 #   testing the mechanism because the published acceptance is good, NOT because we expect 75.
-# MISMATCH TO WATCH: the drafter was trained against the FP8 target (Qwen/Qwen3.8-27B-FP8) with an
-#   unquantized BF16 draft; our target is the NVFP4 build. Same base model and hidden geometry, but
-#   a drafter keys off target hidden states, so NVFP4's different numerics may cost acceptance.
-#   That is precisely the empirical question -- if acceptance collapses, this is the answer.
-# Risk: HIGH, and NUMERIC-RISKY. draft_sample_method "probabilistic" is NOT greedy: it loosens the
-#   acceptance rule from exact-match rejection sampling, which is how acceptance length gets
-#   inflated -- at the cost of no longer provably preserving the target's output distribution.
-#   Our charter already records that ds4's DSpark is documented as divergent under greedy decode
-#   (a DIFFERENT engine, but the same family of technique). So unlike MTP, a KEEP here does NOT
-#   inherit the baseline's Gate 2: this config needs its OWN accuracy run, in the SAME session as
-#   a reference re-measure, before it could ever be promoted.
+# MISMATCH TO WATCH (the main risk): the drafter was trained against the FP8 target
+#   (Qwen/Qwen3.8-27B-FP8) with an unquantized BF16 draft; our target is the NVFP4 build.
+#   VERIFIED 20260817: Qwen/Qwen3.8-27B's config matches this checkpoint's on EVERY field
+#   (hidden 5120, 64 layers, vocab 248320, heads 24/4, head_dim 256, intermediate 17408, linear
+#   16/48, full_attention_interval 4, mtp 1), so Inferact's build is a quantization of the same
+#   base and the drafter is shape-compatible -- it should LOAD. But a drafter keys off target
+#   HIDDEN STATES, and NVFP4 is numerically coarser than the FP8 states it was trained on, so
+#   acceptance may degrade by an unknown amount. That is the empirical question; a collapse in
+#   acceptance IS the answer, and a cheap one.
+# Risk: HIGH, and NUMERIC-RISKY -- but NOT for the reason first written here. Correction: the
+#   acceptance rule is set by `rejection_sample_method` (default "standard" = proper probabilistic
+#   rejection sampling), NOT by draft_sample_method. `DraftSampleMethod = Literal["greedy",
+#   "probabilistic"]` only selects how DRAFT tokens are proposed and whether draft logits are
+#   cached; "probabilistic" is the classic distribution-preserving formulation. So this flag does
+#   not, by itself, trade quality for acceptance.
+#   The Gate-2 requirement stands on different grounds: DSpark is a DIFFERENT DRAFTER ARCHITECTURE
+#   (DFlash block-diffusion + a confidence head that chooses draft length DYNAMICALLY), and a
+#   dynamic, confidence-gated draft length is not obviously covered by the standard rejection-
+#   sampling guarantee. Our charter separately records ds4's DSpark as divergent under greedy
+#   decode (different engine, same family of technique). So unlike vLLM MTP, a KEEP here does NOT
+#   inherit the baseline's Gate 2: it needs its OWN accuracy run, in the SAME session as a
+#   reference re-measure, before it could ever be promoted.
 # Requires: drafter download ~2.7 GB (1.36B params BF16), pre-fetched into the HF cache.
 # TUNED VARIANT (mtp-n3) — base: runbooks/Inferact/Qwen3.8-27B-NVFP4/baseline.sh
 # Deltas vs base: ADD --speculative-config '{"method":"mtp","num_speculative_tokens":3}'
