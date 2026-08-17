@@ -68,7 +68,15 @@ smoke=PASS; "$SCRIPT_DIR/smoke.sh" "$RUNBOOK" || smoke=FAIL; log "Gate 1 smoke: 
 
 # Gate 2 — quality on the thinking-ON serve
 gen=ok; res=ok
-if [ "$REASONING" = 1 ]; then
+if [ "$REASONING" = 1 ] && [ "$SPEC" = 1 ]; then
+  # BOTH reasoning AND spec-decode. These two branches used to be mutually exclusive with
+  # reasoning first, so this combination silently took the reasoning path and ran loglikelihood
+  # mmlu anyway — which spec-decode cannot serve (NaN prompt_logprobs -> HTTP 400 per request).
+  # There is no thinking-ON quality task available for this combination: mmlu is the only
+  # loglikelihood task here and spec-decode rules it out. Gate 2 is therefore entirely the
+  # generative gsm8k + mmlu_pro run on the thinking-OFF serve below.
+  log "Gate 2: reasoning + spec-decode -> loglikelihood mmlu SKIPPED (spec-decode NaN prompt_logprobs); Gate 2 = generative gsm8k+mmlu_pro on the think-off serve below"
+elif [ "$REASONING" = 1 ]; then
   ensure_up && TASKS=mmlu "$SCRIPT_DIR/eval.sh" "$RUNBOOK" general || gen=error
   log "Gate 2 mmlu (loglikelihood, think-on): $gen   [generative gsm8k/mmlu_pro -> think-off pass below]"
 elif [ "$SPEC" = 1 ]; then

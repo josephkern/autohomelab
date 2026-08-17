@@ -126,6 +126,17 @@ per-candidate.
   **NaN prompt_logprobs**, so loglikelihood `mmlu` 400s (`Out of range float values are not JSON compliant`).
   The quality gate for ANY spec-decode config must use **generative** tasks (gsm8k/mmlu_pro think-off), not
   loglikelihood mmlu (Nemotron-3-Super MTP final). Spec-decode is greedy-lossless, so generative scores match.
+  **REASONING × SPEC-DECODE branch-order bug (found + fixed 20260817, Qwen3.8-27B finalize).** suite.sh
+  tested `REASONING` and `SPEC` as mutually exclusive `if/elif` with reasoning FIRST, so a runbook that is
+  BOTH (reasoning-parser **and** `--speculative-config` — i.e. every promoted reasoning model with MTP)
+  fell into the reasoning branch and ran loglikelihood `mmlu` anyway; the spec-decode skip was
+  unreachable. Symptom: a full 56,168-request mmlu run (14,042 × 4 choices) grinding out
+  `400 Out of range float values are not JSON compliant: nan` per request for over an hour, still
+  "progressing" — lm-eval retries and keeps going, so it does NOT abort, and would have reported a score
+  computed over whatever subset happened to succeed. Fixed by testing the combination first: for
+  reasoning+spec there is NO thinking-ON quality task available (mmlu is the only loglikelihood task and
+  spec-decode rules it out), so Gate 2 is entirely the generative gsm8k+mmlu_pro think-off pass.
+  **Lesson: confirming a guard's condition fires is not the same as confirming its branch is reachable.**
   **Thinking-OFF generative eval:** reasoning models (runbook has `--reasoning-parser`) emit `<think>`
   CoT on the raw eval path that truncates/derails generative tasks (35B gsm8k **40→90** with thinking
   off). suite.sh auto-detects them and runs gsm8k + mmlu_pro on a **second, thinking-OFF serve**
