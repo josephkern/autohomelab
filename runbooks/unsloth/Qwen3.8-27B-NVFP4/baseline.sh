@@ -7,11 +7,20 @@
 # WHY THIS CAMPAIGN EXISTS: this is the SAME BASE MODEL as the Inferact/Qwen3.8-27B-NVFP4
 # campaign — Qwen/Qwen3.8-27B's config matches both checkpoints on every field (hidden 5120,
 # 64 layers, vocab 248320, heads 24/4, head_dim 256, intermediate 17408, linear 16/48,
-# full_attention_interval 4, mtp 1) — but a DIFFERENT NVFP4 quantization. Ours measures 25.5 GB
-# of weights on disk; this one is ~19.9 GB of parameter bytes. Decode on this box is pinned at
-# the memory-bandwidth wall (~255 GB/s of the GB10's 273 GB/s peak, reproduced independently by
-# the FF711 llama.cpp campaign), so bytes-per-token maps almost directly to c1 tok/s. A ~22%
-# lighter checkpoint is therefore a first-principles throughput lever, not a tuning guess.
+# full_attention_interval 4, mtp 1) — but a DIFFERENT NVFP4 quantization.
+#
+# MEASURED on-disk weights (20260818, after download — NOT the HF API's parameter-byte estimate,
+# which reported ~19.9 GB and understated it):
+#     Inferact  25.53 GB  (6 shards, MTP head included)
+#     unsloth   23.42 GB  (model.safetensors 22.57 + model_mtp.safetensors 0.85)
+# => unsloth is 8.3% lighter, so the naive bandwidth-bound prediction is c1 x1.09.
+#
+# Decode on this box is pinned at the memory-bandwidth wall (~255 GB/s of the GB10's 273 GB/s peak,
+# reproduced independently by the FF711 llama.cpp campaign), so bytes-per-token maps almost directly
+# to c1 tok/s. FALSIFIABLE PREDICTION for the baseline: Inferact's no-spec c1 was 10.34, so if the
+# two checkpoints differ ONLY in bytes, unsloth baseline c1 should land near 11.2. A materially
+# different number means the quantization differs in more than size (which layers were kept at
+# higher precision, and therefore which kernels run) — and that is worth knowing either way.
 #
 # CONTROLLED COMPARISON: every flag below is IDENTICAL to
 # runbooks/Inferact/Qwen3.8-27B-NVFP4/baseline.sh except MODEL and MODEL_REVISION, so the
