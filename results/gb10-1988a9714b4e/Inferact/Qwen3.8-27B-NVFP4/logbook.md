@@ -103,3 +103,68 @@ finalize (program.md §3).
 **Power outage 20260816→20260817** took the box down after the last wave-2 bench completed
 (20260816-2216). No run was lost mid-flight and no partial bundle was left on disk; the wave-2
 results above were committed on 20260817 after the box came back.
+
+## Session 3 — 20260817/18: finalize + promote
+
+`FULL=1 scripts/suite.sh 20260816_mtp-n3_tuned.sh` (cfg `dd2f3eef`) → `SUITE-dd2f3eef.md`.
+Promoted as **`VLLM-27-Inferact_Qwen3.8-27B_NVFP4_final.sh`** (`VLLM_TAG=27` passed explicitly to
+dodge the known promote.sh version-derivation bug).
+
+### Gates
+
+| gate | finalize | baseline reference | verdict |
+|---|---|---|---|
+| 1 works | **PASS** (4/4) | PASS | == |
+| 2 gsm8k (FULL, think-off) | **95.45** | 97.0 @ n=100 | within noise |
+| 2 mmlu_pro (FULL, think-off) | **66.81** | 67.79 @ n=100 | within noise |
+| 3 chat c16 | **171.12** | 116.63 | **+46.7%** |
+| 3 coder | see curve below | — | valid on re-measure |
+
+Both quality numbers are FULL-dataset against 100-sample references, so the ~1 pt deltas are inside
+the reference's own sampling error (binomial SE at n=100 is ~4 pts). Expected: vLLM MTP is
+greedy-lossless. **No loglikelihood `mmlu` number exists for this config and cannot** — see the
+suite bug below.
+
+### Coder curve: MTP's benefit decays with concurrency and inverts at c32
+
+| level | baseline | mtp-n3 final | delta |
+|---|---|---|---|
+| c1 | 12.62 | 19.47 | +54.3% |
+| c4 | 32.21 | 51.19 | +58.9% |
+| c8 | 54.65 | 80.96 | +48.1% |
+| c16 | 82.98 | 88.56 | +6.7% |
+| c32 | 102.02 | 96.88 | **−5.0%** |
+
+On the long shape, speculative work competes for compute against an already-saturated batch, so the
+MTP win erodes from +54% at c1 to −5% at c32. **Deployment caveat for the promoted config:** it is a
+large win for interactive/low-concurrency long-context use and a slight loss for c32 batch
+long-context throughput. The chat shape does not show this inversion (c32 177.34 → 214.33, +20.9%).
+
+### Two harness defects found and fixed this session
+
+1. **`suite.sh` ran loglikelihood `mmlu` on a spec-decode config.** `REASONING` and `SPEC` were tested
+   as mutually exclusive `if/elif` with reasoning FIRST, so a runbook that is BOTH — every promoted
+   reasoning model carrying MTP, including this winner — took the reasoning branch and the
+   spec-decode skip was unreachable. Symptom: 56,168 requests (14,042 × 4 choices) emitting
+   `400 Out of range float values are not JSON compliant: nan` for 1h15m while still advancing its
+   progress bar, because lm-eval retries and continues. It would have completed and reported a score
+   over whatever subset avoided a NaN. Fixed (commit `2f4a5eb`); for reasoning+spec there is no
+   thinking-ON quality task available at all, so Gate 2 is entirely the generative think-off pass.
+2. **`suite.sh` applied chat's `MAX_SECONDS=180` to the coder shape**, producing a VOID first coder
+   sweep: successful/incomplete per level `c1 3/0, c4 9/3, c8 12/7, c16 10/16, c32 2/31`, giving a
+   non-monotonic curve (c8 70.88 > c16 68.88) whose c32 figure of 256.19 was the mean of TWO
+   requests. Chat at the same setting was fine (12/46/72/113/136) — the default is only unsafe for
+   the long shape, which is why it survived. Fixed (commit `c83624a`): per-shape budgets with
+   `MAX_SECONDS_CODER=600`. Re-measure drained 8/30/46/51/51 and is the curve above. The void row
+   (`20260817-201312-coder`) is kept, marked `discard`, with its counts in the notes.
+
+AGENTS.md carried the "180s is NOT universal" lesson from the FF711 campaign, but the executable
+default had never been changed to match — the documented rule and the code disagreed, and the code
+won silently. **Lesson recorded: confirming a guard's condition fires is not the same as confirming
+its branch is reachable.**
+
+### Campaign result
+
+Winner = MTP n=3, **+46.7% c16 chat** over baseline with quality neutral. Grammar/tool-call smoke
+passed on an MTP+reasoning config across three independent serves — the retest `image.lock` asked
+for on the tracked xgrammar × reasoning-parser × MTP bug (0.27.0 #44993). Campaign closed.
