@@ -242,6 +242,30 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
   prefix-LM bidirectional attention / `final_logit_softcapping` on NVFP4). Decide per-model whether
   the quality gate uses mmlu (loglikelihood) or pivots to gsm8k + mmlu_pro (generative). Tie-in with
   the greedy-eval follow-up below.
+- [ ] **Accuracy is only ever measured at ONE concurrency (c16) — repo-wide blind spot (found 20260818).**
+  `eval.sh:26` sets `CONC="${CONC:-16}"` and NOTHING in the repo has ever overridden it, so every
+  accuracy row across all 14 campaigns is a single point at **c16** — and `accuracy.tsv` has no
+  `conc` column, so it isn't even recorded. Gate 2 sits at fixed c16 while Gate 3 sweeps 1→32; the
+  two never cross. We therefore have **no data** on whether quality holds at c1 (how OWUI is
+  actually used) or c32 (where this box once deadlocked). Plausible mechanisms for batch-dependent
+  output: GEMM tile/split-k reduction order, piecewise CUDA-graph capture sizes and their fallback,
+  the spec-decode rejection sampler running per batch, hybrid Mamba state under prefix-caching's
+  forced `align` mode, and preemption/recompute under KV pressure. Precedent: the tracked xgrammar ×
+  reasoning-parser × MTP bug is exactly a scheduling/spec-decode-dependent CORRECTNESS failure.
+  Cheap to close — `CONC` is already an env var, so `CONC=1`/`CONC=32` gsm8k runs on one serve in one
+  session settle it; the only work is adding a `conc` column to `accuracy.tsv` (and backfilling the
+  existing rows as 16).
+- [ ] **`LIMIT=100` accuracy noise (±4–5 pts) is WIDER than the KEEP rule's ~1% tolerance.** At n=100,
+  p≈0.9, binomial SE is ~4.3 pts. Measured spreads match: 35B mmlu 77.6→82.82 across 7 runs (5.2 pts),
+  gemma-4 gsm8k 68→73, Qwen3-8B gsm8k 87→92. So an in-loop quality comparison at LIMIT=100 cannot
+  resolve a 1% difference — it can only catch gross breakage. Either raise the in-loop limit for
+  quality-gating decisions or state explicitly that LIMIT=100 is a smoke-level check, not a tolerance test.
+- [ ] **`config_hash` is blind to HOST-PROCESS launcher settings.** ds4 gsm8k recorded 60.0/76.0/74.0/74.0
+  under an IDENTICAL `config_hash` (`10b02344`) — 60 vs 76 is ~3.7σ, not sampling noise. The hash comes
+  from the `.smoke-runbook.sh` stub, which carries only `MODEL`/`SERVED_NAME`/parser markers and does
+  NOT capture the launcher's `DSPARK`/`NP`/`CTX` settings. Two genuinely different configs can share a
+  hash, which silently breaks keep/discard provenance for ds4 and llama.cpp. Fold the launcher's
+  effective flags into the hash for host backends.
 - [ ] **Build a small PRIVATE held-out eval** (tier 4) — authored by us, never published; the only
   fully-uncontaminated signal for promotion decisions.
 - [x] **eval.sh pins greedy for eval** — done: `GREEDY=1` (default) sends
