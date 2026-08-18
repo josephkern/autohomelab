@@ -14,7 +14,9 @@
 #   LIMIT=N       eval sample cap when not FULL (default 100, the in-loop reference setting).
 #   LEVELS_SET    throughput levels (default 1,4,8,16,32 — the full characterization curve).
 #   SHAPES        throughput shapes (default "chat coder").
-#   MAX_SECONDS   per-stage bench seconds (default 180).
+#   MAX_SECONDS   per-stage bench seconds for the chat shape (default 180).
+#   MAX_SECONDS_CODER  per-stage bench seconds for the coder shape (default 600 — the coder
+#                 shape drains far fewer requests per stage; 180 yields VOID non-monotonic data).
 #
 # Serves once, runs everything against the live endpoint, tears down. Appends results.tsv +
 # accuracy.tsv rows and writes a SUITE-<cfg>.md summary. Crash-safe: bench.sh's watchdog +
@@ -29,6 +31,14 @@ RUNBOOK="${1:?usage: suite.sh <runbook.sh>}"
 
 if [ "${FULL:-0}" = 1 ]; then unset LIMIT; else export LIMIT="${LIMIT:-100}"; fi
 export MAX_SECONDS="${MAX_SECONDS:-180}"
+# The coder shape (4096/1024) needs FAR longer per stage than chat: GuideLLM's
+# output_tokens_per_second.successful.mean averages ONLY completed requests, so a stage that ends
+# with most requests still in flight reports an average over a handful of lucky completions — which
+# goes non-monotonic while still looking like data (AGENTS.md "MAX_SECONDS=180 is NOT universal").
+# Measured 20260818 on Qwen3.8-27B at 180s: coder drained 3/9/12/10/2 successful across c1..c32 and
+# produced c8 70.88 > c16 68.88 with c32 256.19 from TWO requests. Chat at the same setting was fine
+# (12/46/72/113/136). Rule of thumb: >=20 successful per level.
+export MAX_SECONDS_CODER="${MAX_SECONDS_CODER:-600}"
 export LEVELS_SET="${LEVELS_SET:-1,4,8,16,32}"
 SHAPES="${SHAPES:-chat coder}"
 
@@ -90,7 +100,16 @@ fi
 
 # Gate 3 — throughput, full curve, both shapes (deployed config; one bench.sh call)
 bench=ok
-ensure_up && STATUS=measured NOTES="suite full-sweep" "$SCRIPT_DIR/bench.sh" "$RUNBOOK" $SHAPES || bench=crash
+# Per-shape stage time — one bench.sh call per shape so coder gets its own (longer) budget.
+for _shape in $SHAPES; do
+  case "$_shape" in
+    coder) _ms="$MAX_SECONDS_CODER" ;;
+    *)     _ms="$MAX_SECONDS" ;;
+  esac
+  ensure_up && MAX_SECONDS="$_ms" STATUS=measured NOTES="suite full-sweep" \
+    "$SCRIPT_DIR/bench.sh" "$RUNBOOK" "$_shape" || bench=crash
+  log "Gate 3 throughput [$_shape @ ${_ms}s/level]: $bench"
+done
 log "Gate 3 throughput ($SHAPES): $bench"
 "$SCRIPT_DIR/serve.sh" down >/dev/null 2>&1 || true
 
