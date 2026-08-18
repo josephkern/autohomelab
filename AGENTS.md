@@ -376,11 +376,29 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
   "generation throughput: 0.0 … Running: N") + a **hard `timeout`** backstop → on hang it kills
   guidellm, writes a `status=crash` row, and `adapter down`s for clean recovery. A hang is now a
   fast logged data point, not a 40-min stall.
-- **RESOLVED by per-level isolation:** running each concurrency level as its own GuideLLM call
-  (not one multi-rate `sweep`) both preserves completed levels on a hang AND **made c32 stop
-  hanging** — so the deadlock was a single-call c16→c32 stage-transition artifact, not c32 load.
-  Full 180s c32 then ran clean (chat c32=687.7). The watchdog/crash-recovery remains as a safety
-  net for any future wedge.
+- **PARTIALLY mitigated by per-level isolation — NOT resolved (corrected 20260818).** Running each
+  concurrency level as its own GuideLLM call preserves completed levels on a hang AND stopped the
+  **c32** case reproducing (full 180s c32 then ran clean, chat c32=687.7). The original note claimed
+  this RESOLVED the wedge. **It did not.** An audit of every `status=crash` row found **10 wedge
+  events on this node**, nine of them AFTER per-level isolation was in place, spanning **four vLLM
+  versions (0.22.0/0.23.0/0.24.0/0.25.0)** and four models (Qwen3-8B-NVFP4 dense, Qwen3.6-35B-A3B
+  MoE, Nemotron-3-Super-120B MoE, 35B-A3B-Fast), 2026-06-13 → 2026-07-12. Level distribution:
+  **c32 ×1, c16 ×7, c1 ×2** — i.e. it fires at **concurrency ONE**, so batch occupancy is not the
+  trigger and "sustained high concurrency" in this note's title is misleading. Power at wedge
+  15–30 W vs 33–44 W healthy. The watchdog is the real mitigation, not the isolation.
+- **UPSTREAM = vLLM issue #43885** (open, GB10-specific, `get_output()` spin-loop on a stuck CUDA
+  stream; their signature: 96% util at 19 W vs 36 W healthy — ours 96%/15 W). **If this wedge happens
+  again: reference #43885 and RUN THE FORENSICS** before the watchdog tears the container down —
+  `py-spy dump --native --pid $(pgrep -f 'VLLM::EngineCore')` is the one artefact that would upgrade
+  our report from symptom-matching to evidence, plus `nvidia-smi -q` and `docker logs --tail 500`.
+  Full protocol, our 10-event table, and a ready-to-post draft comment (deliberately NOT posted,
+  user decision 20260818) live in **`research/upstream/vllm-43885-gb10-wedge.md`**. Verify the
+  py-spy invocation works BEFORE the next wedge — the capture window is short and rare.
+  Related: **#49210** (EngineCore livelock, 100% CPU, MTP + xgrammar — our tracked three-way bug),
+  **#50934** (GB10 sm_121 CUDA misaligned address, NVFP4 + Marlin MoE + MTP), **#43702** (RFC:
+  non-blocking core loop — confirms the engine core BLOCKS when idle, so EngineCore at ~100% CPU
+  during active serving is EXPECTED work, not a spin; the pathological cases all show **zero
+  throughput**, which is the discriminator).
 
 **First green run — Qwen3-8B-NVFP4 Marlin baseline (2026-06-13)**
 - Validation (30s/stage) output tok/s: c1≈42, c4≈145, c8≈250, c16≈358, c32≈426 — c1 matches
