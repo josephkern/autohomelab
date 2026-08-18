@@ -164,3 +164,78 @@ because it is the unstable one.
 
 **Bracket closed.** n=3 is an interior optimum (n=2 below it, n=4 below it and unstable), so no
 extension is warranted in either direction.
+
+## Session 1 (cont.) — 20260818: wave 2 — zero for three
+
+Reference = MTP n=3 at **208.86**. KEEP threshold >3% ⇒ >215.1.
+
+| candidate | c16 med | verdict |
+|---|---|---|
+| `--max-num-scheduled-tokens 8192` | — | **serve_fail — invalid flag value (my error)** |
+| `qwen3_5_mtp` (n=3) | 206.94 | **DISCARD** (−0.9%, flat) |
+| DSpark n=7 (RadixArk drafter) | — | **serve_fail — method is DeepSeek-V4-only** |
+
+Wave 2 found nothing. Same shape as the Inferact campaign, whose wave 2 was also a clean sweep of
+nothing. **On both checkpoints MTP depth is the only lever that has ever mattered**; everything
+tested downstream of it has been noise or breakage.
+
+### `qwen3_5_mtp` is not a better path — question closed
+
+206.94 vs 208.86 (−0.9%, inside the ~4% run-to-run spread seen on n=3). The arch-specific method
+behaves as the generic `mtp` on this model. Recorded so nobody re-opens it.
+
+### `--max-num-scheduled-tokens 8192` is invalid here — and the "loose thread" never existed
+
+```
+VllmConfig received max_num_scheduled_tokens but it does not have enough slots to support the
+speculative decoding settings. It should be greater by at least 0, but got
+max_num_batched_tokens=2048 and max_num_scheduled_tokens=8192
+```
+
+The constraint is `max_num_scheduled_tokens ≤ max_num_batched_tokens`, and **with spec-decode active
+`max_num_batched_tokens` is itself 2048**, so 8192 is invalid by construction.
+
+**CORRECTION to the Inferact logbook's "one loose thread left".** That note claimed the startup
+warning names `max_num_scheduled_tokens` and that raising `--max-num-batched-tokens` (wave 2 there,
+16384, +0.11%) "never actually tested the quantity the warning names". That reading was backwards —
+the warning says *"consider increasing **max_num_batched_tokens**"*, which is exactly what that
+experiment did. The thread was already closed and came back flat: **the scheduler budget is not the
+constraint.** No further work is warranted on this axis for either checkpoint.
+
+### vLLM's `method: dspark` is DeepSeek-V4-specific, NOT a generic drafter loader
+
+```
+File "vllm/models/deepseek_v4/nvidia/dspark.py", line 72, in __init__
+    self.hc_mult = config.hc_mult
+AttributeError: 'Qwen3Config' object has no attribute 'hc_mult'
+```
+
+It loads NVIDIA's DSpark implementation for **DeepSeek-V4** and expects a config carrying `hc_mult`;
+`RadixArk/Qwen3.8-27B-DSpark` ships a `Qwen3Config`. Same name, different mechanisms. The drafter's
+own card prescribes **SGLang**, which is consistent.
+
+**Bearing on the 0xBakeer writeup:** its published serve command pairs vLLM **0.27.1** with
+`{"method":"dspark", ...}` and a "Qwen3.8-27B-DSpark, 5 layers, 2.6 GB" drafter — which matches
+RadixArk exactly (we downloaded it: 2.6 GB). We ran that combination on stock 0.27.1 and it fails at
+model init. **That serve command is not reproducible as published**, absent an unpublished drafter or
+a patched vLLM. Its measured *numbers* remain untested by us either way; this refutes the recipe, not
+the results. The general lesson from that writeup — accepted LENGTH is the currency, not acceptance
+rate — still stands and is what motivated the n=4 probe.
+
+### Byproduct: the engine-core CPU question, answered with a stack
+
+`py-spy` on a healthy MTP n=3 serve mid-c16-bench, 3/3 samples identical: the engine core sits in
+**spec-decode draft attention-metadata construction** (`build_for_drafting` →
+`build_per_group_and_layer_attn_metadata` → flashinfer `build` → `seq_lens_cpu`), *not* in
+`get_output()` and not spin-waiting on the GPU. That is depth-dependent per-step CPU work.
+
+Consequences: **`--async-scheduling` is a live candidate** (previously dismissed on a spin-wait
+theory that the stack falsified), and there is now a testable mechanism for the depth turnover
+(n=4 wins c1 28.99 vs 25.64, loses c16) that does not require acceptance decay. Full method +
+control stack: `research/upstream/vllm-43885-gb10-wedge.md`.
+
+## Status
+
+Winner unchanged: **`20260818_mtp-n3_tuned.sh`, chat c16 208.86** (+53.2% over baseline, +22.1% over
+the promoted Inferact final). Tune loop has one untested candidate left worth running
+(`--async-scheduling`); otherwise ready for program.md §3 finalize.
