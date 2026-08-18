@@ -98,3 +98,61 @@ been applied to this checkpoint yet.
 Baseline validated = current best (chat c16 **136.36**). Proceeding to program.md §2 tune loop.
 First candidate is MTP: Inferact's optimum was n=3, but depth is checkpoint-dependent and this build
 runs a different FP4 GEMM, so acceptance and per-draft cost must be **re-derived, not inherited**.
+
+## Session 1 (cont.) — 20260818: wave 1, MTP depth bracket
+
+Reference = the baseline measured this session, chat c16 **136.36**. KEEP threshold >3% ⇒ >140.5.
+
+| candidate | c16 med | c1 med | vs baseline | vs promoted Inferact final (171.12) | verdict |
+|---|---|---|---|---|---|
+| baseline | 136.36 | 13.60 | — | −20.3% | — |
+| MTP n=2 | 188.34 | 23.15 | +38.1% | +10.1% | keep-worthy, beaten |
+| **MTP n=3** | **208.86** | 25.64 | **+53.2%** | **+22.1%** | **KEEP — winner** |
+| MTP n=4 | *unstable* | 28.99 | — | — | **DISCARD** |
+
+**The two levers stack.** Checkpoint +16.9%, then MTP +53.2% on top ⇒ **+79.1% over the Inferact
+baseline** at c16 (116.63 → 208.86). Stacking is slightly sublinear — MTP is worth +53.2% here vs
++43.8% on Inferact at its own optimum… *(note the direction: MTP is worth MORE here, not less)* —
+consistent with the two mechanisms being partly independent rather than competing for the same
+bottleneck.
+
+### MTP n=4 is INTERMITTENTLY FATAL at c16 — discarded on stability, not speed
+
+Three attempts, two crashes:
+
+| attempt | c16 | outcome |
+|---|---|---|
+| wave 1 queue | 449358.18 (bogus) | **crash** |
+| ad-hoc retest | 205.50 | survived |
+| N=3 run | 1992.87 (bogus) | **crash** |
+
+Both crashes share one signature: the c16 stage records ~16 "successful" against **~110,000 errored**
+requests, and `gpu_metrics.csv` shows the container dying mid-stage (sys_used 72 GB → 7 GB, SM clock
+2398 → 208 MHz, power 10.7 W → 3.7 W). **c1 on the same serve is healthy every time** (ok=20,
+errored=0). So the failure is concurrency-triggered, not a bad config that fails to serve.
+
+The bogus tok/s values arise because the handful of "successful" requests return in ~0 s against a
+dead endpoint, so `successful.mean` explodes. **Both rows are marked `crash` with `tps_c16=na`** —
+left in place as the record, but they must never be read as measurements. This is the third distinct
+instance today of a broken run producing a confident-looking number rather than an error.
+
+**Intermittent is worse than deterministic**: n=4 passed a spot check between two failures, so a
+single validation run would have promoted an unstable config. The surviving run measured 205.50,
+*below* n=3's 208.86, so n=4 loses on speed as well — it is discarded on both grounds and no further
+depth was explored.
+
+**Crash cause NOT captured.** The container was gone before it could be inspected on both failures,
+and the one run with `docker logs -f` attached did not crash. Recorded as an open question; a
+dedicated repro with log capture would be needed to file this upstream.
+
+### Depth optimum is batch-dependent — third independent observation
+
+n=4 has the best c1 (**28.99**, +13% over n=3) while losing at c16. Same pattern as the Inferact MTP
+bracket (n=4 best c1, n=3 best c16) and FF711 on llama.cpp (best c1 at depth 3, best c16 at depth 1).
+The c16 objective systematically selects a **shallower** draft than a latency-first deployment would.
+Worth carrying into the final config note, since the promoted artifact is tuned for c16 throughput
+while interactive traffic is effectively c1 — but n=4 is not available as the latency option here,
+because it is the unstable one.
+
+**Bracket closed.** n=3 is an interior optimum (n=2 below it, n=4 below it and unstable), so no
+extension is warranted in either direction.
