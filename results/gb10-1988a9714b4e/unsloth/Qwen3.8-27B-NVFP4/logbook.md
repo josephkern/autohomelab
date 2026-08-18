@@ -110,11 +110,19 @@ Reference = the baseline measured this session, chat c16 **136.36**. KEEP thresh
 | **MTP n=3** | **208.86** | 25.64 | **+53.2%** | **+22.1%** | **KEEP — winner** |
 | MTP n=4 | *unstable* | 28.99 | — | — | **DISCARD** |
 
-**The two levers stack.** Checkpoint +16.9%, then MTP +53.2% on top ⇒ **+79.1% over the Inferact
-baseline** at c16 (116.63 → 208.86). Stacking is slightly sublinear — MTP is worth +53.2% here vs
-+43.8% on Inferact at its own optimum… *(note the direction: MTP is worth MORE here, not less)* —
-consistent with the two mechanisms being partly independent rather than competing for the same
-bottleneck.
+**The two levers stack, and MORE than additively — which contradicts the prediction.** Checkpoint
++16.9%, then MTP +53.2% on top ⇒ **+79.1% over the Inferact baseline** at c16 (116.63 → 208.86).
+
+I predicted MTP would be worth **less** on this checkpoint, reasoning that MTP buys back
+bandwidth-bound time and the faster FP4 GEMM path leaves less bandwidth-starvation to recover.
+Measured the opposite: MTP is worth **+53.2%** here against **+43.8%** on Inferact at its own tune-loop
+optimum (+46.7% at finalize). The prediction was backwards.
+
+The likely reason is that MTP's payoff scales with how cheaply the *verify* pass runs, not only with
+how starved decode is: a faster GEMM makes each speculative verification cheaper, so more drafted
+tokens pay off per unit time. That is a hypothesis fitted after the fact and is NOT established —
+the acceptance-rate data that would test it (per-request `draft acceptance` lines in the vLLM log)
+was never captured for either campaign. Recorded as an open question, not a conclusion.
 
 ### MTP n=4 is INTERMITTENTLY FATAL at c16 — discarded on stability, not speed
 
