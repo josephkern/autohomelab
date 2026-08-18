@@ -37,10 +37,59 @@ symptom-matching, not evidence. Closing that gap is the entire point of the prot
    concurrency LEVEL, shape, and the running/waiting/KV% from the last healthy log line.
 6. Record whether `docker stop` alone recovered it (it always has so far — worth confirming each time).
 
-Note `py-spy` is not installed in the vLLM container by default; run it from the host against the
-container PID (the host `pgrep -f 'VLLM::EngineCore'` sees it), or `docker exec` after
-`uvx --from py-spy py-spy`. **Verify this works BEFORE the next wedge** — a wedge is a rare,
-time-limited window and fumbling the capture wastes it.
+### VERIFIED capture method (tested end-to-end 20260818) — the host route does NOT work
+
+Both host paths are closed on this node: `sudo -n` requires a password, and
+`/proc/sys/kernel/yama/ptrace_scope=1` restricts tracing to descendants while EngineCore is a
+root-owned process in a container namespace. `docker exec` alone also fails — Docker withholds
+`CAP_SYS_PTRACE` and its seccomp profile blocks ptrace, giving
+`Error: Failed to copy Py_Version symbol ... Permission denied (os error 13)` even as root inside
+the container. **Working recipe:**
+
+```bash
+# 1. serve with ptrace enabled (adapter.sh AHL_PTRACE=1 adds --cap-add=SYS_PTRACE
+#    --security-opt seccomp=unconfined; OFF by default so normal runs stay byte-identical)
+AHL_PTRACE=1 scripts/serve.sh <runbook>
+docker inspect -f 'CapAdd={{.HostConfig.CapAdd}}' ahl-vllm   # expect [CAP_SYS_PTRACE]
+
+# 2. py-spy is not in the image
+docker exec ahl-vllm pip install -q py-spy
+
+# 3. find the CONTAINER-side pid (differs from the host pid)
+CPID=$(docker exec ahl-vllm sh -c 'ls /proc | grep -E "^[0-9]+$" | while read p; do \
+  c=$(tr "\0" " " < /proc/$p/cmdline 2>/dev/null); case "$c" in *EngineCore*) echo $p;; esac; done' | head -1)
+
+# 4. capture
+docker exec ahl-vllm py-spy dump --pid "$CPID"
+```
+
+**A wedge cannot be captured unless the serve was ALREADY started with `AHL_PTRACE=1`** — the
+capability cannot be added to a running container. For any run where a wedge is plausible (full
+sweeps, c1/c16 on the long shape), serve with it on.
+
+### HEALTHY-STATE CONTROL STACK (unsloth/Qwen3.8-27B-NVFP4, MTP n=3, mid c16 bench, 3/3 samples)
+
+This is the baseline to diff a wedged stack against. Note it is **NOT** `get_output()`:
+
+```
+Thread (active): "MainThread"
+    seq_lens_cpu (vllm/v1/attention/backend.py:515)
+    build (vllm/v1/attention/backends/flashinfer.py:1234)
+    build_for_drafting (vllm/v1/attention/backend.py:754)
+    build_per_group_and_layer_attn_metadata (vllm/v1/spec_decode/llm_base_proposer.py:999)
+    propose (vllm/v1/spec_decode/llm_base_proposer.py:707)
+    propose_draft_token_ids (vllm/v1/worker/gpu_model_runner.py:5268)
+    sample_tokens (vllm/v1/worker/gpu_model_runner.py:4658)
+    step_with_batch_queue (vllm/v1/engine/core.py:671)
+    _process_engine_step (vllm/v1/engine/core.py:1439)
+    run_busy_loop (vllm/v1/engine/core.py:1386)
+```
+
+Under healthy load with MTP the engine core sits in **spec-decode draft attention-metadata
+construction**, not in a generic output wait. If a wedged stack shows `get_output()`, that is a clean
+diff and direct evidence for #43885. Caveat: `py-spy dump` shows the Python frame, not whether it is
+computing or blocked; `seq_lens_cpu` looks like a device->host copy, so this frame may itself be a
+synchronisation point. `py-spy record` (proportions) or `--native` (C stack) would resolve that.
 
 ## Our data (as of 20260818) — 10 events, one node
 

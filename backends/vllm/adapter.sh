@@ -52,7 +52,16 @@ cmd_up() {
 
   echo "image:  $VLLM_IMAGE" >&2
   echo "model:  $MODEL ${MODEL_REVISION:+@$MODEL_REVISION}" >&2
-  docker run -d --name "$CONTAINER" --ipc=host --gpus all \
+  # AHL_PTRACE=1 adds the capability py-spy needs to attach to the EngineCore process.
+  # Docker does NOT grant CAP_SYS_PTRACE by default and its seccomp profile blocks ptrace, so
+  # `docker exec ahl-vllm py-spy dump` fails with "Permission denied (os error 13)" even as root
+  # inside the container (verified 20260818). The host route is also closed here: `sudo -n` needs a
+  # password on this node and /proc/sys/kernel/yama/ptrace_scope=1 restricts tracing to descendants.
+  # OFF by default so normal runs stay byte-identical; turn it on when you need forensics
+  # (AGENTS.md -> GB10 wedge -> research/upstream/vllm-43885-gb10-wedge.md).
+  local ptrace_args=()
+  [ "${AHL_PTRACE:-0}" = 1 ] && ptrace_args=(--cap-add=SYS_PTRACE --security-opt seccomp=unconfined)
+  docker run -d --name "$CONTAINER" --ipc=host --gpus all "${ptrace_args[@]}" \
     -p "${AHL_PORT}:8000" "${env_args[@]}" \
     -v "${HF_HOME:-$HOME/.cache/huggingface}:/root/.cache/huggingface" \
     "$VLLM_IMAGE" "${serve_prefix[@]}" "$MODEL" \
