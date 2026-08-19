@@ -211,6 +211,54 @@ sweep's top concurrency level, not by anyone.**
 
 ---
 
+## 9. The benchmark shapes do not resemble the workload the models are actually deployed into (added 2026-08-19)
+
+The harness has exactly two shapes:
+
+| shape | prompt | output |
+|---|---|---|
+| `chat` | 512 | 256 |
+| `coder` | 4,096 | 1,024 |
+
+**All 313 rows in the results journal use one of these two.** No measurement anywhere in the project
+uses a prompt longer than 4,096 tokens, on models whose native context is 262,144.
+
+The actual deployment pattern for this node is **one long-context orchestrator (>66k, targeting
+~128k) fanning out to many short-context subagents**. Neither shape represents either half of that:
+the orchestrator is 16–32x longer than our longest prompt, and the subagent fan-out is a
+concurrency-of-short-sequences pattern that `chat` approximates only accidentally.
+
+### Why this compounds the other findings
+
+- **The tuned objective may be optimising for a workload nobody runs.** `median c16 chat(512/256)` is
+  the target every keep/discard decision in every campaign was made against. If production is "one
+  128k sequence plus a handful of 8k ones", the ranking of configs under that objective is not known
+  to transfer. MTP depth, for instance, was chosen at c16 with 512-token prompts; its optimum is
+  already known to move with batch size, and nothing tells us where it sits at 128k.
+- **It made us discard the single most relevant optimisation for the real workload.**
+  `--enable-prefix-caching` measured **-0.54%** and was discarded — because GuideLLM synthetic prompts
+  share no prefix, so the benchmark *cannot* observe prefix reuse. An orchestrator resending a growing
+  context every turn is the canonical shared-prefix case; the same flag is reported elsewhere as worth
+  14-22x on prefill for 19k/53k shared prefixes. **The harness is structurally blind to it**, and the
+  campaign record currently says "bench-neutral, keep for real traffic" on intuition rather than data.
+- **The capacity envelope (§8) only becomes visible at deployment scale.** At 512-token prompts,
+  context and concurrency never contend; at 128k they trade directly against one pool.
+
+### Questions
+
+- Should the shape set include one or more **deployment-representative shapes** — e.g. a long-context
+  shape (64k-128k prompt) and an orchestrator/subagent mix — rather than only synthetic short ones?
+- Should the tuning objective be **per-deployment-profile** rather than a single global `median c16
+  chat`? A config tuned for batch-throughput and a config tuned for a long-context orchestrator are
+  not obviously the same config.
+- Should GuideLLM's synthetic data be supplemented with a **shared-prefix generator**, so
+  prefix-caching effects are measurable at all? Any flag whose benefit only appears under prefix reuse
+  is currently guaranteed to measure as noise.
+- More generally: **what evidence would justify a `_final` for a given deployment?** Today the answer
+  is "it won on a 512-token benchmark", which is a weaker claim than the artifact's name implies.
+
+---
+
 ## Suggested review output
 
 1. A severity-ranked defect list for the measurement pipeline (§1) with proposed invariants.
