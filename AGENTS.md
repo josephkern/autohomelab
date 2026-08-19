@@ -84,22 +84,119 @@ validated-image *registry* + the default for new baselines.
 
 Per **(node, model)** under `results/<node_fp>/<org>/<model>/`:
 
-- **`results.tsv`** — data journal, one row per benchmark run. Committed.
+- **`results.tsv`** — throughput journal, one row per (run, shape). Committed.
+- **`accuracy.tsv`** — Gate-2 journal, one row per lm-eval call. Committed. Columns:
+  `run_id commit node_fp model config_hash script suite tasks limit scores data think`
+  (`think` = `on`/`off`; there is **no `conc` column** — see the accuracy-at-one-concurrency follow-up).
 - **`logbook.md`** — narrative (what was tried/kept/discarded + the environment block). Committed.
-- **`data/`** — raw GuideLLM bundles per `run_id`. Gitignored.
+- **`SUITE-<cfg>.md`** — the per-config validation report `suite.sh` writes. Committed.
+- **`data/<run_id>/`** — raw bundle: `level_c<N>.json` (GuideLLM output, one per level — the
+  evidence the validity verdicts are computed from), `level_c<N>.log`, `gpu_metrics.csv`
+  (power/temp/util sidecar), `vllm_crash.log` on a wedge. **Gitignored** — which is exactly why
+  the validity columns exist: they put the auditable part of the bundle into the committed journal.
 
-`results.tsv` columns (tab-separated):
+### `results.tsv` — 23 columns (tab-separated)
 
 ```
 run_id  commit  node_fp  model  shape  backend  config_hash  script
-tps_c1  tps_c4  tps_c8  tps_c16  tps_c32  peak_gb  status  notes  data
+load_s  max_s  seed  tps_c1  tps_c4  tps_c8  tps_c16  tps_c32  peak_gb
+req_counts  validity  knobs  status  notes  data
 ```
 
-- tok/s = GuideLLM `output_tokens_per_second.successful.mean` per stage.
-- `shape` = workload, `chat(512/256)` (default) or `coder(4096/1024)`.
-- `backend` = `vllm@<ver>(img:sha256:<short>)`. `status` ∈ `measured`/`keep`/`discard`/`crash`.
-- `peak_gb` may be `na` on unified-memory nodes (nvidia-smi can't report it).
-- `scripts/aggregate.py` concatenates all `results.tsv` for cross-node comparison.
+Binding spec: **[docs/validity-contract.md](docs/validity-contract.md)** §2. The header string and
+every validity rule are defined **once**, in `scripts/lib/validity.py`, and consumed from there by
+`bench.sh`, `bench_ds4.sh`, `bench_llamacpp.sh` and `aggregate.py` (`scripts/lib/validity.sh` is a
+thin bash shim and re-implements nothing). Column order is fixed, no value is ever empty (use
+`na`), and no value contains a tab or newline.
+
+| column | meaning |
+|---|---|
+| `run_id` | `<UTC YYYYmmdd-HHMMSS>-<shape>`; also the `data/` bundle directory name |
+| `commit` | repo short SHA at bench time |
+| `node_fp` | hardware fingerprint from the probe (`results/<node_fp>/`) |
+| `model` | full HF repo id |
+| `shape` | workload — `chat(512/256)` (default, the tuning objective) or `coder(4096/1024)` |
+| `backend` | `vllm@<ver>(img:sha256:<short>)`; host-process engines use `<engine>@<git-short-sha>` |
+| `config_hash` | first 8 hex of `sha256sum <runbook>` — provenance for the exact config |
+| `script` | runbook path relative to the repo root |
+| `load_s` | time-to-healthy recorded by `serve.sh`; `na` if the serve state doesn't match this runbook |
+| `max_s` | `MAX_SECONDS` per level actually used — **not** universal, scale it to the model |
+| `seed` | `AHL_SEED` (default 42) → identical synthetic prompts across configs, so comparisons are paired |
+| `tps_c1 … tps_c32` | GuideLLM `output_tokens_per_second.successful.mean` per level; `na` = level not run, `hang` = the level that wedged |
+| `peak_gb` | peak memory; `na` on unified-memory nodes (nvidia-smi can't report it) — falls back to a system-used proxy |
+| `req_counts` | **new** — per-level request outcome `ok/incomplete/errored`, semicolon-joined, run levels only: `c1:41/0/0;c16:118/4/0`. `na` when no bundle survives. This is what makes a number auditable without the raw bundle |
+| `validity` | **new** — `ok`, or a `+`-joined list of verdict tokens: `low_sample+nonmonotonic` (table below) |
+| `knobs` | **new** — the full effective knob set resolved at run time, `k=v` comma-joined: `levels=1,16,max_s=180,seed=42,prompt=512,output=256,stall=90,ltimeout=480,gllm=0.6.0`. A baseline at `MAX_SECONDS=600` and a finalize at the 180 default used to be indistinguishable in the journal |
+| `status` | see the status vocabulary below |
+| `notes` | free text: `hang@c<N>` on a wedge, the `thermal=…` sidecar summary, plus any `NOTES=` |
+| `data` | bundle path relative to the repo root (gitignored content) |
+
+`scripts/aggregate.py` concatenates every `results.tsv` for cross-node comparison, and **filters
+`void`/`suspect` out of its default view**.
+
+### Validity verdicts
+
+Computed per row from the per-level GuideLLM JSON; **fatal** verdicts void a row, **suspect**
+verdicts flag it. Full rules and thresholds: [docs/validity-contract.md](docs/validity-contract.md)
+§3–4; the reasoning a human applies by hand is in [docs/validation.md](docs/validation.md) (Gate 3).
+
+| token | rule | severity |
+|---|---|---|
+| `ok` | all checks pass | — |
+| `no_data` | a run level has `successful < AHL_MIN_DATA` (default **5**), or its `level_c<N>.json` is missing/unparseable | fatal |
+| `low_sample` | a run level has `successful < AHL_MIN_SUCCESSFUL` (default **20**) | suspect |
+| `over_roofline` | a level's tok/s exceeds the physical ceiling (bandwidth roofline) | fatal |
+| `nonmonotonic` | a higher concurrency level is >**10%** below a lower one | suspect |
+| `errored` | a level has `errored > 10%` of `successful + errored` | suspect |
+
+`no_data` and `low_sample` are mutually exclusive (report the more severe). Verdicts cover **run**
+levels only — an `na` level is skipped, never scored as zero. Sample count is the primary detector;
+monotonicity is secondary and deliberately loose, because `c8 > c16` within noise is a legitimate
+result on a bandwidth-bound box.
+
+### Status vocabulary
+
+`measured` · `keep` · `discard` · `crash` · `suspect` · `void`.
+
+| status | means |
+|---|---|
+| `measured` | **the invariants passed** — valid data, not yet judged. It no longer means merely "a row exists" |
+| `keep` / `discard` | adjudicated against the KEEP rule (set via `STATUS=` at bench time) |
+| `crash` | engine wedge/hang; the offending level's tok/s cell is `hang` |
+| `suspect` | measured, but an invariant questions it — **not citable** without an adjudication recorded in the logbook |
+| `void` | **not data.** Must not be cited, medianed, plotted, or promoted on |
+
+### Enforcement — record and flag, exit 4
+
+A failing run is **still written** to `results.tsv`: the evidence must survive in the committed
+journal, not only in the gitignored bundle. What changes is the verdict, not the existence of the row.
+
+- Any fatal verdict → `status=void`; any suspect verdict → `status=suspect`; otherwise the caller's
+  status stands.
+- **`crash` outranks validity**: an already-`crash` row keeps `status=crash`, and its verdict is
+  still recorded in `validity`.
+- `bench.sh` exits **4** on a validity failure — distinct from **3** (crash/hang), so a caller can
+  tell *"the box broke"* from *"the numbers are not citable"*. 0 = clean.
+- Downstream refuses to launder a bad row: `promote.sh` will not promote a config whose supporting
+  rows are `void`/`suspect`, `run_experiment.sh` will not median over them, `aggregate.py` hides
+  them by default. Operator procedure when this fires: program.md → "Invalid runs".
+
+### Schema history — and why this section is normative
+
+This section documented a **16-column** row long after it had become **20** (`load_s`, `max_s`,
+`seed` were added to `bench.sh`, `bench_ds4.sh`, `bench_llamacpp.sh` and `aggregate.py` without a
+doc change), and it went to **23** on 20260819 with `req_counts`/`validity`/`knobs`. Four files
+hard-coded the header string and all four agreed with each other; the only disagreeing copy was the
+one humans and agents read. That is itself evidence for issue #1 §1 — **the schema changed and the
+reference did not follow**, silently, for months. The header now lives in one place; when it
+changes, this table changes in the same commit.
+
+Historical rows (313 across 15 campaigns as of 20260819) get `req_counts`/`validity`/`knobs`
+backfilled where a retained bundle allows it, but **historical `status` values are not rewritten** —
+several are already cited in logbooks, so they are adjudicated row by row (contract §7). Note that
+`keep` has never actually been written to a row (0/313; 295 `measured`, 12 `crash`, 6 `discard`):
+keep/discard adjudication has in practice lived in `logbook.md`, so read a `measured` row as "valid
+and unjudged", not as "kept".
 
 ## Standard test suite
 
@@ -152,9 +249,13 @@ per-candidate.
 - **Gate 3 — fast** (`bench.sh`): full `1,4,8,16,32` GuideLLM sweep in **both** throughput shapes —
   `chat(512/256)` (the tuning objective, median c16) **and** `coder(4096/1024)` (long-context
   characterization). Per-level isolation + watchdog (crash-safe); suite re-serves if a wedge tore
-  the container down.
+  the container down. **Validity is a precondition, not a post-check:** a tok/s number whose row
+  comes back `void` (or unadjudicated `suspect`) is not a Gate-3 result at all — see
+  [docs/validation.md](docs/validation.md) Gate 3 for the verdicts, the roofline, and how to apply
+  both by hand.
 
 Suite knobs: `FULL`, `LIMIT`, `LEVELS_SET`, `SHAPES`, `MAX_SECONDS` (defaults in the script header).
+Validity knobs: `AHL_MIN_DATA`, `AHL_MIN_SUCCESSFUL`, `AHL_MIN_MODEL_GB` (contract §3–4).
 
 ## Hardware notes
 
@@ -162,11 +263,16 @@ Suite knobs: `FULL`, `LIMIT`, `LEVELS_SET`, `SHAPES`, `MAX_SECONDS` (defaults in
   platform (e.g. `gb10-dgx-spark.md`). GB10 is the DGX Spark reference design with many OEM
   rebrands — research across all vendor names.
 - `results/<node_fp>/node_notes.md` — **this physical box's** narrative (firmware quirks, thermals).
+- `node_profile.json` carries `gpu.mem_bw_gbs` — the memory bandwidth the roofline check is derived
+  from (**273** on GB10/LPDDR5X). If the probe couldn't determine it the field is absent and the
+  `over_roofline` check is **skipped**; never hand-write a bandwidth number to make the check run.
 
 ## Variance
 
 Benchmarks are noisy. For keep/discard decisions, run **N=3** and take the **median**; don't act
-on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
+on a single run (lesson from `homelab-tooling`). Don't change N mid-run. The median is taken over
+**valid** rows only — `void` rows are not data and `suspect` rows are not citable, so N=3 means
+three rows that passed the invariants, not three rows that exist.
 
 ## Conventions
 
@@ -175,6 +281,12 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
 - During an autonomous tuning run, follow program.md — don't pause to ask.
 
 ## Pending follow-ups
+
+> **Triage against issue #1 §1 (measurement validity), 20260819.** The §1 work adds the validity
+> layer to the **throughput** path only (`results.tsv`, Gate 3). Checked item by item, it closes
+> **none** of the pre-existing entries below outright — it was a new capability, not a backlog
+> sweep — so nothing here is being ticked off on its account. Items it *touches without closing*
+> are annotated `§1:` inline; the items it *created* are at the end of the list.
 
 - [ ] **`promote.sh` version-derivation bug** — it sets the `VLLM-<minor>` name by grepping the
   *first* `vX.Y.Z` in the runbook text, which catches migration-comment lines (e.g. a baseline header
@@ -255,6 +367,8 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
   Cheap to close — `CONC` is already an env var, so `CONC=1`/`CONC=32` gsm8k runs on one serve in one
   session settle it; the only work is adding a `conc` column to `accuracy.tsv` (and backfilling the
   existing rows as 16).
+  **§1:** unchanged. The new columns landed on `results.tsv`; `accuracy.tsv` still has no `conc`
+  column and no validity column, so this stays fully open.
 - [ ] **`LIMIT=100` accuracy noise (±4–5 pts) is WIDER than the KEEP rule's ~1% tolerance.** At n=100,
   p≈0.9, binomial SE is ~4.3 pts. Measured spreads match: 35B mmlu 77.6→82.82 across 7 runs (5.2 pts),
   gemma-4 gsm8k 68→73, Qwen3-8B gsm8k 87→92. So an in-loop quality comparison at LIMIT=100 cannot
@@ -266,6 +380,10 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
   NOT capture the launcher's `DSPARK`/`NP`/`CTX` settings. Two genuinely different configs can share a
   hash, which silently breaks keep/discard provenance for ds4 and llama.cpp. Fold the launcher's
   effective flags into the hash for host backends.
+  **§1: partially mitigated, NOT closed.** The new `knobs` column records the *bench-time* knob set
+  (levels/max_s/seed/prompt/output/…), which removes one class of invisible difference — but it does
+  not record the launcher's `DSPARK`/`NP`/`CTX`, and `config_hash` is still computed from the
+  `.smoke-runbook.sh` stub. Two host-backend configs can still collide on the hash.
 - [ ] **Build a small PRIVATE held-out eval** (tier 4) — authored by us, never published; the only
   fully-uncontaminated signal for promotion decisions.
 - [x] **eval.sh pins greedy for eval** — done: `GREEDY=1` (default) sends
@@ -286,9 +404,66 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
   non-interactively) and recorded as such in the protocol. User's call: add a sudoers rule for
   just these two, or keep manual.
 
+*Created by the §1 validity work (20260819):*
+
+- [ ] **Adjudicate the 313 historical rows.** Contract §7 backfills `req_counts`/`validity`/`knobs`
+  from the 693 retained `level_c*.json` bundles but **deliberately does not rewrite historical
+  `status` values** — several are already cited in logbooks and in promotion decisions, so flipping
+  one to `void` silently invalidates a published claim. The backfill produces an audit listing which
+  published numbers the invariants now dispute; someone has to walk that list row by row, decide,
+  and record the decision in the relevant `logbook.md`. Until then a historical row's `validity`
+  column is *information*, and its `status` is *history*.
+- [ ] **`gpu.mem_bw_gbs` is absent from the existing node profile** (`gb10-1988a9714b4e`, probed
+  2026-06-13), so the `over_roofline` check is **skipped on this node** until the box is re-probed
+  (or the field is added by hand from the platform doc: 273 GB/s for GB10/LPDDR5X). The check is
+  the only invariant that would have refuted the 449,358 tok/s row from first principles, so a node
+  running without it is running with the weakest of the four detectors disabled.
+- [ ] **Gate 2 has no validity layer at all.** The contract covers throughput rows only. Of the
+  three defects that motivated it, the mmlu-on-spec-decode NaN run is a *Gate-2* failure and is
+  caught by none of these verdicts — it was fixed by a specific branch-order fix (20260817), not by
+  a general invariant. `accuracy.tsv` records `scores` with no denominator: nothing says how many
+  requests errored, how many produced empty output, or what fraction of the task set actually
+  scored. The exact analogue of `req_counts`/`validity` for lm-eval rows is missing, and the same
+  class of "plausible number over a degraded subset" is still possible on the quality gate.
+- [ ] **`keep` has never been written to a `results.tsv` row** (0 of 313; 295 `measured`, 12
+  `crash`, 6 `discard`). Keep/discard adjudication lives in `logbook.md` prose, so no tool can
+  answer "which rows support this promotion?" from the journal alone — `promote.sh` can only check
+  that supporting rows are not `void`/`suspect`, not that they were ever affirmatively kept. Either
+  wire `STATUS=keep` into `run_experiment.sh`'s decision, or drop `keep` from the documented
+  vocabulary and say plainly that the row-level statuses are validity states, not verdicts.
+
 ---
 
 ## Lab notes & observations (living — keep updated)
+
+**MEASUREMENT VALIDITY — the failure mode of this codebase is a plausible number, not a crash (20260819)**
+- Three separate defects in ONE session each wrote `status=measured` and **none of them errored**:
+  (1) the coder shape starved at `MAX_SECONDS=180` and reported c32 = **256.19 tok/s computed from
+  2 completed requests**, with a non-monotonic curve (c8 70.88 > c16 68.88); (2) MTP n=4 killed the
+  server mid-stage and a handful of instant failures against the dead endpoint became
+  **`tps_c16` = 449,358** and **1,992.87**; (3) `suite.sh` ran loglikelihood `mmlu` on a spec-decode
+  config — **56,168 requests returning `400 NaN`** for 1h15m with the progress bar advancing
+  normally, and it would have reported a score over whatever subset happened not to NaN.
+- **Two of the three were caught only because a human eyeballed the shape of the numbers.** The
+  third was caught by an odd request count on a progress bar. That is not a control; that is luck,
+  and it does not scale to 313 rows across 15 campaigns.
+- The common structure: every failing component **kept running and kept producing output**.
+  GuideLLM averages `successful` only and silently drops in-flight requests; lm-eval retries a 400
+  and continues; a dead endpoint returns fast, and fast looks like throughput. Each layer degraded
+  gracefully into a number, and a number is exactly what the journal accepts.
+- The fix is not more care. It is **invariants that run on every row**: minimum successful count per
+  level, a physical roofline (449,358 tok/s **at c16** on a 273 GB/s box implies 16×273/449,358 =
+  0.0097 GB of weight traffic per token, i.e. a **9.7 MB model** — refutable from first principles
+  without knowing which model was served), monotonicity, error rate. Plus
+  the counts written INTO the committed row (`req_counts`), because the bundle that proves a number
+  is gitignored and the number is not.
+- **Generalize it:** any metric derived from "the mean of the requests that finished" is a lie
+  whenever the interesting failure is *not finishing*. Before trusting a mean, ask what got
+  excluded from it. The corollary for tooling: when a component fails, prefer that it stop rather
+  than continue at reduced fidelity, and when it can't stop, make the fidelity a recorded column.
+- Rules now: [docs/validity-contract.md](docs/validity-contract.md) (binding), the Results-model
+  section above (schema + vocabulary), [docs/validation.md](docs/validation.md) (Gate 3 by hand),
+  program.md → "Invalid runs" (what an operator does about it).
 
 **Hardware — GB10 (node #1) — UNIFIED MEMORY CAVEATS (expect odd results)**
 - sm_121 (Blackwell), aarch64, ~121.6 GiB **unified** LPDDR5X (~273 GB/s); driver 580.159.03, CUDA 13.0.
@@ -331,6 +506,9 @@ on a single run (lesson from `homelab-tooling`). Don't change N mid-run.
   check the successful/incomplete counts in the level json**:
   `jq '.benchmarks[0].metrics.request_concurrency | {ok:.successful.count, inc:.incomplete.count}'`.
   Rule of thumb: want ≥20 successful per level; slow dense models need `MAX_SECONDS>=600` for coder.
+  **This check is now automated** — that ≥20 rule of thumb is the `low_sample` verdict and the
+  counts land in the row's `req_counts` column (Results model above). Run the `jq` by hand only when
+  you are looking at a historical row whose bundle predates the columns.
 
 **llama.cpp host backend — GB10 lessons (FF711 campaign, 20260809)**
 - **`CTX = CTX_PER_SLOT * NP` in the launcher is a trap.** Raising `NP` alone silently doubles total
