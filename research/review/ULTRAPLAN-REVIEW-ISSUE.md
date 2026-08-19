@@ -259,6 +259,71 @@ concurrency-of-short-sequences pattern that `chat` approximates only accidentall
 
 ---
 
+## 10. Power draw is an unused, near-perfect health signal — and the current wedge detector can miss the failure we actually had (added 2026-08-19)
+
+### 10a. The data separates cleanly
+
+Across every run recorded on this node, GPU power at the moment of a stall versus during healthy
+benchmarking:
+
+| state | n | power draw |
+|---|---|---|
+| healthy bench | 216 | 32–50 W (p25 35, median 36, p75 39) |
+| **wedged** (engine alive, throughput 0) | 9 | **18–30 W** |
+| dead container | 2 | ~3.7 W |
+
+**Zero overlap** — wedged max 30 W, healthy min 32 W, across 225 observations. Upstream #43885
+reports the same signature independently on different hardware and a different model (19 W wedged
+vs 36 W healthy at the same reported utilisation).
+
+**GPU utilisation is actively misleading here**: it stays pinned near 96% on a stuck kernel doing no
+work. Power is the honest signal, because a GPU executing real work draws current and a GPU spinning
+on a stalled stream does not.
+
+### 10b. We already collect it and never use it
+
+`metrics_sampler.sh` samples power/temp/util every 5 s into `gpu_metrics.csv` for every shape sweep.
+It is recorded for post-hoc thermal analysis and **never read by any decision path.**
+
+Meanwhile `bench.sh`'s stall-watchdog detects a wedge by grepping the container log:
+
+```
+docker logs --since 25s | grep 'generation throughput' | tail -1
+  | grep -qE 'generation throughput: 0\.0.*Running: [1-9]'
+```
+
+Two problems with that as the sole detector:
+
+1. **It cannot fire when logging stops.** Our first GB10 wedge (2026-06-13) produced **no logs for
+   ~29 minutes**. With no matching line the grep finds nothing and the counter never advances — the
+   detector is blind to the most severe form of the failure it exists to catch.
+2. **It is coupled to vLLM's log format.** A wording change upstream silently disables the watchdog,
+   with no test asserting it still matches.
+
+### 10c. Power as a validity cross-check, not just a liveness check
+
+This connects back to §1. A throughput figure implies a physical power draw; when the two disagree,
+the *measurement* is wrong. The crashed MTP n=4 rows that wrote **449,358** and **1,992 tok/s** were
+sampled at ~3.7 W — a number that cannot coexist with real generation. A row asserting record
+throughput while the GPU drew idle power is refutable without any domain knowledge at all.
+
+### Proposals
+
+- **Trip the watchdog on the physical signal**: sustained power below a calibrated floor while
+  requests are in flight, OR the existing log condition — not the log condition alone.
+- **Record power statistics per row** (min / median at minimum) rather than the current single
+  `thermal=72C/40W` spot sample in the notes field, so the health of a measurement is auditable
+  after the fact.
+- **Add power to the validity gate**: reject or flag a row whose reported tok/s is inconsistent with
+  the power drawn while producing it.
+- **Calibrate the floor per model/node** rather than hardcoding 32 W — a 3B model at c1 legitimately
+  draws less than a 27B at c32. The separation above holds for this node and these model sizes; the
+  *method* generalises, the threshold does not.
+- Capture power alongside the py-spy stack in the #43885 forensics protocol, so an upstream report
+  carries physical evidence as well as a Python stack.
+
+---
+
 ## Suggested review output
 
 1. A severity-ranked defect list for the measurement pipeline (§1) with proposed invariants.
