@@ -10,6 +10,11 @@
 # so every request injects temperature via GuideLLM extras (TEMP, default 0). This also
 # de-noises the A/B: all ds4 rows are greedy unless TEMP is overridden.
 #
+# On a crash the sweep STOPS: remaining shapes are not benched against a wedged engine (that
+# would write a citable `measured` row after the box broke). Forensics land in the bundle's
+# engine_crash.log; the engine process itself is LEFT RUNNING for the operator unless
+# AHL_KILL_ON_CRASH=1 (see the crash block near the end — this script does not own the process).
+#
 # VALIDITY (docs/validity-contract.md): the row carries req_counts/validity/knobs and the
 # status is downgraded to `suspect`/`void` when the invariants fail; exit 4 = "the numbers are
 # not citable", exit 3 = "the box broke" (a crash outranks a validity verdict). The verdict
@@ -26,6 +31,7 @@
 #      TEMP (0), AHL_HOST/AHL_PORT (127.0.0.1:8000), DS4_DIR (~/code/ds4), NOTES (extra note text).
 #      Validity thresholds (AHL_MIN_DATA / AHL_MIN_SUCCESSFUL / AHL_MIN_MODEL_GB) are read by the
 #      library, not here.
+#      AHL_KILL_ON_CRASH (0) / AHL_KILL_WAIT (15) — opt-in teardown of a wedged engine process.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -64,6 +70,7 @@ NODE_FP="$(find "$REPO_ROOT/results" -maxdepth 2 -name node_profile.json -printf
 COMMIT="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo nogit)"
 DS4_SHA="$(git -C "$DS4_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 BACKEND="ds4@${DS4_SHA}"
+ENGINE="${BACKEND%%@*}"   # `ds4` / `llamacpp` — used by the crash path
 SCRIPT_REL="launchers/DS4-antirez_DeepSeek-V4-Flash_q2-imatrix.sh"
 
 # config_hash: hash the RUNNING server's actual cmdline (captures flags incl. --dspark/--batched-session)
@@ -101,6 +108,28 @@ mkdir -p "$OUT_DIR/data"
 [ -f "$TSV" ] || printf '%s\n' "$AHL_RESULTS_HEADER" > "$TSV"
 
 peak_gb() { awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}END{printf "%.1f",(t-a)/1048576}' /proc/meminfo; }
+
+crash_forensics() {  # <bundle> <level>: snapshot the engine BEFORE anyone tears it down.
+  # The host-process analogue of bench.sh's `docker logs -> vllm_crash.log`. A host engine's stdout
+  # belongs to the operator's launcher, not to this script, so capture what /proc and the driver
+  # still know: whether the pid is alive, what state it is in (D = stuck in a driver ioctl,
+  # R = spinning), and the GB10 wedge signature from the lab notes / vLLM #43885 (~96% util at
+  # 15-30 W, against 33-44 W healthy). This is the artefact that turns a wedge into evidence.
+  local bundle="$1" level="${2:-?}" f="$1/engine_crash.log"
+  {
+    echo "== $ENGINE wedge @ c$level — $(date -u +%Y-%m-%dT%H:%M:%SZ) =="
+    echo "pid=$SRV_PID alive=$([ -d "/proc/$SRV_PID" ] && echo yes || echo no)"
+    echo "cmdline: $SRV_CMD"
+    echo "-- /proc/$SRV_PID/status --"
+    sed -n '1,12p' "/proc/$SRV_PID/status" 2>/dev/null || echo "(pid gone)"
+    echo "-- nvidia-smi --"
+    nvidia-smi --query-gpu=utilization.gpu,power.draw,temperature.gpu,clocks.sm --format=csv 2>&1 \
+      || echo "(nvidia-smi unavailable)"
+    echo "-- tail of level_c$level.log --"
+    tail -n 40 "$bundle/level_c$level.log" 2>/dev/null || echo "(no level log)"
+  } >"$f" 2>&1
+  echo "   saved engine forensics -> $f" >&2
+}
 
 run_level() {  # <bundle> <level> <data>: sets TPS_OUT; returns 0 ok / 3 crash
   local bundle="$1" level="$2" data="$3" json="$1/level_c$2.json"; TPS_OUT="hang"
@@ -141,7 +170,7 @@ for shape in "${SHAPES[@]}"; do
   knobs+=",ds4_env=${SRV_ENV:-none}"
 
   echo "== ds4 $TAG: $shape (p$prompt/o$output) @ c${LEVELS[*]} (max_s=$MAX_SECONDS, seed=$SEED, temp=$TEMP) ==" >&2
-  tps=(na na na na na); status="measured"; peak=0
+  tps=(na na na na na); status="measured"; peak=0; crash_level=""
   ran_levels=()                      # the levels actually ATTEMPTED — the validity input
   for level in "${LEVELS[@]}"; do
     idx="$(col_index "$level")"; [ "$idx" -ge 0 ] || continue
@@ -150,7 +179,7 @@ for shape in "${SHAPES[@]}"; do
       ran_levels+=("$level")
       echo "   c$level = $TPS_OUT tok/s" >&2
     else
-      tps[idx]="hang"; status="crash"
+      tps[idx]="hang"; status="crash"; crash_level="$level"
       ran_levels+=("$level")   # a hung level WAS run: its missing json is itself a verdict
       echo "   c$level = CRASH/hang (see $bundle/level_c$level.log)" >&2
       break
@@ -184,7 +213,42 @@ for shape in "${SHAPES[@]}"; do
     "$run_id" "$COMMIT" "$NODE_FP" "$ORG/$NAME" "$shape_tag" "$BACKEND" "$CONFIG_HASH" "$SCRIPT_REL" \
     "na" "$MAX_SECONDS" "$SEED" "${tps[0]}" "${tps[1]}" "${tps[2]}" "${tps[3]}" "${tps[4]}" \
     "$peak" "$req_counts" "$validity" "$knobs" \
-    "$status" "cfg=$TAG temp=$TEMP${NOTES:+ $NOTES}" "$data_rel" >> "$TSV"
+    "$status" "cfg=$TAG temp=$TEMP${crash_level:+ hang@c$crash_level}${NOTES:+ $NOTES}" "$data_rel" >> "$TSV"
   echo "row appended: $TSV ($run_id, $status, validity=$validity, req=$req_counts)" >&2
+
+  # ── Crash: stop the sweep here (contract §5; bench.sh:236-244 does the same across shapes) ──
+  # Without this the next shape would be benched against the just-wedged engine and its row would
+  # be written `status=measured validity=ok` — a citable number produced after the box broke. On
+  # this node that is not a corner case: the lab notes record 10 wedge events across four vLLM
+  # versions, firing at concurrency 1 as readily as at 32. Completed shapes and levels are kept.
+  if [ "$status" = crash ]; then
+    crash_forensics "$bundle" "$crash_level"
+    # Teardown, host-process edition. bench.sh runs `adapter down` because IT owns the container it
+    # benched; this bencher does NOT own the engine. The operator started it from launchers/, it is
+    # often the box's serving process (`homelab up` puts ds4 on :8000), and a restart costs minutes
+    # of GGUF I/O. The evidence is also weaker than bench.sh's: there is no log watchdog here, so a
+    # guidellm/uv failure or a LEVEL_TIMEOUT trip reaches this branch with a HEALTHY server behind
+    # it. So the default is deliberate, not an omission: preserve forensics, tell the operator
+    # exactly what to do, and leave the process alone. AHL_KILL_ON_CRASH=1 opts an unattended run
+    # into releasing the GPU itself.
+    if [ ! -d "/proc/$SRV_PID" ]; then
+      echo "   $ENGINE (pid $SRV_PID) is already gone — nothing to tear down" >&2
+    elif [ "${AHL_KILL_ON_CRASH:-0}" = 1 ]; then
+      echo "   AHL_KILL_ON_CRASH=1 — stopping $ENGINE (pid $SRV_PID) to release the GPU" >&2
+      kill "$SRV_PID" 2>/dev/null || true
+      for _ in $(seq 1 "${AHL_KILL_WAIT:-15}"); do [ -d "/proc/$SRV_PID" ] || break; sleep 1; done
+      if [ -d "/proc/$SRV_PID" ]; then
+        echo "   pid $SRV_PID survived SIGTERM — sending SIGKILL" >&2
+        kill -9 "$SRV_PID" 2>/dev/null || true
+      fi
+      echo "   $ENGINE stopped — relaunch it from launchers/ before the next bench" >&2
+    else
+      echo "   !! $ENGINE (pid $SRV_PID) LEFT RUNNING — it may be wedged and holding the GPU." >&2
+      echo "      Read $bundle/engine_crash.log, then 'kill $SRV_PID' and relaunch from launchers/." >&2
+      echo "      AHL_KILL_ON_CRASH=1 makes an unattended run do that teardown automatically." >&2
+    fi
+    echo "stopping remaining shapes — engine wedged at c$crash_level (completed rows are kept)" >&2
+    break
+  fi
 done
 exit "$rc_all"
