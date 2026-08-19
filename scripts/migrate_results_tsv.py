@@ -92,6 +92,10 @@ except ImportError as exc:  # pragma: no cover
         "deliberately does not re-implement them." % exc
     )
 
+# Reporting order for the knob fill-rate table. The library takes knobs as kwargs and
+# preserves their order, so this is a local presentation concern, not part of the schema.
+KNOB_ORDER = ("levels", "max_s", "seed", "prompt", "output", "stall", "ltimeout", "gllm")
+
 SHAPE_RE = re.compile(r"\((\d+)\s*/\s*(\d+)\)")
 
 
@@ -127,7 +131,7 @@ def load_mem_bw(repo: Path, node_fp: str, cache={}):
 def _tps_levels(cols):
     """Levels whose tps column carries a value."""
     base = V.LEGACY_COLS.index("tps_c1")
-    return {lvl for i, lvl in enumerate(V.LEVELS) if cols[base + i] != V.NA}
+    return {lvl for i, lvl in enumerate(V.LEVEL_COLUMNS) if cols[base + i] != V.NA}
 
 
 def _bundle_levels(bundle_dir: Path):
@@ -148,7 +152,7 @@ def _row_verdict(levels, mem_bw):
     if mem_bw is not None:
         # bytes_per_token is unknown for historical rows -> the library's
         # AHL_MIN_MODEL_GB fallback yields the loose-but-sound bound of §4.
-        ceiling_fn = lambda lvl: V.roofline_ceiling(lvl, mem_bw)  # noqa: E731
+        ceiling_fn = lambda lvl: V.ceiling(lvl, mem_bw)  # noqa: E731
     return V.verdicts(levels, ceiling_fn=ceiling_fn)
 
 
@@ -164,9 +168,21 @@ def migrate_row(cols, bundle_root: Path, repo: Path, stats: Counter):
     run = sorted(tlv | blv)
 
     parsed = OrderedDict()
+    metas = OrderedDict()
     for lvl in run:
         path = None if bundle is None else bundle / ("level_c%d.json" % lvl)
-        parsed[lvl] = V.parse_level_json(str(path)) if path is not None else None
+        if path is None:
+            parsed[lvl] = None
+            continue
+        try:
+            parsed[lvl] = V.parse_level_json(str(path))
+        except V.LevelParseError:
+            # Level was run (journal cell or sibling bundle file) but its json is gone or
+            # corrupt: the contract's `no_data`, recorded as `c<N>:na` rather than a zero.
+            parsed[lvl] = V.LevelCounts(missing=True)
+        meta = V.level_meta(str(path))
+        if meta:
+            metas[lvl] = meta
 
     have_bundle = any(d is not None for d in parsed.values())
     if have_bundle:
@@ -180,10 +196,10 @@ def migrate_row(cols, bundle_root: Path, repo: Path, stats: Counter):
         stats["backfill_na"] += 1
     validity = "+".join(vtoks)
     stats["verdict:" + validity] += 1
-    stats["severity:" + V.severity(vtoks)] += 1
+    stats["severity:" + V.status_floor(vtoks)] += 1
 
     # ---- knobs -----------------------------------------------------------
-    first = next((d for d in parsed.values() if d is not None), None)
+    first = next(iter(metas.values()), None)
 
     def col_or_bundle(colname, key):
         v = get(colname)
@@ -201,7 +217,7 @@ def migrate_row(cols, bundle_root: Path, repo: Path, stats: Counter):
         prompt, output = first.get("prompt_tokens"), first.get("output_tokens")
 
     knobs = {
-        "levels": ",".join(str(x) for x in run) if run else None,
+        "levels": sorted(run) if run else None,
         "max_s": col_or_bundle("max_s", "max_seconds"),
         "seed": col_or_bundle("seed", "seed"),
         "prompt": prompt,
@@ -213,7 +229,7 @@ def migrate_row(cols, bundle_root: Path, repo: Path, stats: Counter):
     for k, v in knobs.items():
         if v is not None:
             stats["knob:" + k] += 1
-    knobs_s = V.format_knobs(knobs)
+    knobs_s = V.format_knobs(**knobs)
 
     idx = V.LEGACY_COLS.index("peak_gb")
     return cols[: idx + 1] + [req_counts, validity, knobs_s] + cols[idx + 1:]
@@ -380,7 +396,7 @@ def main(argv=None):
     for k, v in sorted((k[9:], v) for k, v in total.items() if k.startswith("severity:")):
         print("   %-28s %4d" % (k, v))
     print("knob fill rate (of %d rows):" % total["rows"])
-    for k in V.KNOB_ORDER:
+    for k in KNOB_ORDER:
         n = total["knob:" + k]
         print("   %-10s %4d  %5.1f%%" % (k, n, 100.0 * n / max(total["rows"], 1)))
 

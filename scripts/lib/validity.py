@@ -39,7 +39,7 @@ from typing import Callable, Iterable, Mapping, Optional, Sequence
 
 __all__ = [
     "RESULTS_COLS", "LEGACY_COLS", "NEW_COLS", "RESULTS_HEADER", "LEGACY_HEADER",
-    "LEVEL_COLUMNS", "level_col_index",
+    "LEVEL_COLUMNS", "level_col_index", "level_meta",
     "LevelCounts", "LevelParseError", "parse_level_json", "scan_bundle",
     "verdicts", "format_validity", "parse_validity", "parse_validity_pairs",
     "split_verdict", "verdict_base", "verdict_level", "tag_verdict",
@@ -333,6 +333,45 @@ def _cell_published(value) -> bool:
         return False
     s = str(value).strip().lower()
     return s not in ("", NA, "none", "null")
+
+
+
+def level_meta(path) -> dict:
+    """Run metadata recorded alongside the counts in one level bundle.
+
+    The knobs a run was executed with are journalled by GuideLLM itself, so the historical
+    `knobs` column can be reconstructed from a retained bundle rather than guessed. Returns
+    {} for anything unreadable -- callers treat a missing knob as `na`, never as a default.
+
+    Paths (GuideLLM 0.6.0): `.args.max_seconds`, `.args.random_seed`, `.metadata.guidellm_version`,
+    and prompt/output token targets parsed out of the `.args.data` synthetic spec string.
+    """
+    try:
+        with Path(path).open("r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(doc, Mapping):
+        return {}
+    args = doc.get("args") if isinstance(doc.get("args"), Mapping) else {}
+    meta = doc.get("metadata") if isinstance(doc.get("metadata"), Mapping) else {}
+
+    out = {
+        "max_seconds": args.get("max_seconds"),
+        "seed": args.get("random_seed"),
+        "guidellm_version": meta.get("guidellm_version"),
+        "prompt_tokens": None,
+        "output_tokens": None,
+    }
+    data = args.get("data")
+    if isinstance(data, (list, tuple)) and data:
+        data = data[0]
+    if isinstance(data, str):
+        for field in ("prompt_tokens", "output_tokens"):
+            m = re.search(r"(?:^|,)%s=(\d+)" % field, data)
+            if m:
+                out[field] = int(m.group(1))
+    return {k: v for k, v in out.items() if v is not None}
 
 
 def scan_bundle(bundle_dir, levels: Iterable, tps: Optional[Mapping] = None,
