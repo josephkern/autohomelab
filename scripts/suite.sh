@@ -21,6 +21,11 @@
 # Serves once, runs everything against the live endpoint, tears down. Appends results.tsv +
 # accuracy.tsv rows and writes a SUITE-<cfg>.md summary. Crash-safe: bench.sh's watchdog +
 # per-level isolation; evals/benches re-serve if a wedge tore the container down.
+#
+# The report carries an explicit SUITE VERDICT and the Gate-3 rows' `status`/`validity`/`req_counts`
+# (docs/validity-contract.md). A Gate-3 measurement-validity failure is a FAIL — never a pass with a
+# plausible number attached — whether it arrives as bench.sh exit 4 or as a `void`/`suspect` row.
+# Exit: 0 all gates pass · 1 other gate failure · 3 Gate-3 crash/hang · 4 Gate-3 numbers not citable.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -98,19 +103,46 @@ else
   ensure_up && "$SCRIPT_DIR/eval.sh" "$RUNBOOK" resistant || res=error; log "Gate 2 resistant: $res"
 fi
 
-# Gate 3 — throughput, full curve, both shapes (deployed config; one bench.sh call)
-bench=ok
+# Gate 3 — throughput, full curve, both shapes (deployed config; one bench.sh call per shape)
+#
+# bench.sh exit codes are DISTINCT and must stay distinct here (docs/validity-contract.md §5):
+#   0  ok
+#   3  crash/hang — the box broke; bench.sh saved the engine log and tore the container down
+#   4  validity failure — the run completed and the row WAS written, but the numbers are not
+#      citable (too few completed requests, over the roofline, ...). This is the failure mode that
+#      used to be invisible: a plausible number with `status=measured`. It is a Gate-3 FAILURE and
+#      is reported as such — never folded into "crash" and never reported as a pass.
+# `ensure_up` failing is its own case (nothing was measured at all).
+bench=ok; BENCH_DETAIL=""
+BENCH_SINCE="$(date -u +%Y%m%d-%H%M%S)"   # rows are run_id=<YYYYmmdd-HHMMSS>-<shape>; used to
+                                          # report THIS session's rows, not a stale row for the cfg
+_rank(){ case "$1" in ok) echo 0 ;; error|serve_fail) echo 1 ;; invalid) echo 2 ;; crash) echo 3 ;; *) echo 1 ;; esac; }
 # Per-shape stage time — one bench.sh call per shape so coder gets its own (longer) budget.
 for _shape in $SHAPES; do
   case "$_shape" in
     coder) _ms="$MAX_SECONDS_CODER" ;;
     *)     _ms="$MAX_SECONDS" ;;
   esac
-  ensure_up && MAX_SECONDS="$_ms" STATUS=measured NOTES="suite full-sweep" \
-    "$SCRIPT_DIR/bench.sh" "$RUNBOOK" "$_shape" || bench=crash
-  log "Gate 3 throughput [$_shape @ ${_ms}s/level]: $bench"
+  _rc=0
+  if ensure_up; then
+    MAX_SECONDS="$_ms" STATUS=measured NOTES="suite full-sweep" \
+      "$SCRIPT_DIR/bench.sh" "$RUNBOOK" "$_shape" || _rc=$?
+  else
+    _rc=70
+  fi
+  case "$_rc" in
+    0)  _v=ok ;;
+    3)  _v=crash ;;
+    4)  _v=invalid ;;
+    70) _v=serve_fail ;;
+    *)  _v=error ;;
+  esac
+  [ "$_v" = invalid ] && log "!! Gate 3 [$_shape]: MEASUREMENT INVALID (bench.sh exit 4) — row written, NOT citable"
+  BENCH_DETAIL="${BENCH_DETAIL:+$BENCH_DETAIL }$_shape=$_v"
+  [ "$(_rank "$_v")" -gt "$(_rank "$bench")" ] && bench="$_v"
+  log "Gate 3 throughput [$_shape @ ${_ms}s/level]: $_v"
 done
-log "Gate 3 throughput ($SHAPES): $bench"
+log "Gate 3 throughput ($SHAPES): $bench [$BENCH_DETAIL]"
 "$SCRIPT_DIR/serve.sh" down >/dev/null 2>&1 || true
 
 # Gate 2 (generative, thinking-OFF) — reasoning models only: separate serve with enable_thinking=false.
@@ -125,36 +157,77 @@ if [ "$REASONING" = 1 ]; then
 fi
 
 # ── Summary report ────────────────────────────────────────────────────────────
-python3 - "$OUT_DIR" "$CFG" "$REPORT" "$DATE" "$smoke" "$gen" "$res" "$bench" "${LIMIT:-FULL}" "$(realpath --relative-to="$REPO_ROOT" "$RUNBOOK")" <<'PY'
+python3 - "$OUT_DIR" "$CFG" "$REPORT" "$DATE" "$smoke" "$gen" "$res" "$bench" "${LIMIT:-FULL}" \
+        "$(realpath --relative-to="$REPO_ROOT" "$RUNBOOK")" "$BENCH_DETAIL" "$BENCH_SINCE" <<'PY'
 import sys, csv, os
-out_dir, cfg, report, date, smoke, gen, res, bench, lim, rb = sys.argv[1:11]
+out_dir, cfg, report, date, smoke, gen, res, bench, lim, rb, bench_detail, since = sys.argv[1:13]
+# Validity vocabulary — docs/validity-contract.md §3/§6. `status` is the adjudicated verdict,
+# `validity` the evidence; a row is judged on the worse of the two so a bench that recorded a
+# verdict without downgrading its status cannot be reported as a pass.
+FATAL = {'no_data', 'over_roofline'}
+def classify(r):
+    st = (r.get('status') or '').strip().lower()
+    if st in ('void', 'suspect', 'crash'): return st
+    toks = [t for t in (r.get('validity') or '').replace('+', ' ').split() if t and t not in ('ok','na')]
+    if any(t in FATAL for t in toks): return 'void'
+    if toks: return 'suspect'
+    return 'valid'
 def rows(p):
     try: return list(csv.DictReader(open(p), delimiter='\t'))
     except FileNotFoundError: return []
-# latest throughput row per shape for this cfg
-tps={}
+# Throughput rows for this cfg. Prefer rows written by THIS suite run (run_id >= since); a stale row
+# from an earlier session must not be presented as this run's Gate-3 evidence.
+tps, stale = {}, {}
 for r in rows(os.path.join(out_dir,'results.tsv')):
-    if r.get('config_hash')==cfg:
-        tps[r.get('shape','?')]=r
+    if r.get('config_hash')!=cfg: continue
+    (tps if (r.get('run_id','') >= since) else stale)[r.get('shape','?')]=r
+for shape,r in stale.items():
+    tps.setdefault(shape, dict(r, _stale='1'))
 # latest accuracy row per (suite, tasks, think) for this cfg — keep think-on/off rows distinct
 acc={}
 for r in rows(os.path.join(out_dir,'accuracy.tsv')):
     if r.get('config_hash')==cfg:
         acc[(r.get('suite','?'), r.get('tasks',''), r.get('think','on'))]=r
+
+bad_rows = {s: classify(r) for s,r in tps.items() if classify(r)!='valid'}
+gate3_pass = (bench=='ok') and not bad_rows
+gate1_pass = (smoke=='PASS')
+gate2_pass = (gen=='ok' and res=='ok')
+verdict = 'PASS' if (gate1_pass and gate2_pass and gate3_pass) else 'FAIL'
+why=[]
+if not gate1_pass: why.append('Gate 1 smoke')
+if not gate2_pass: why.append(f'Gate 2 quality (general={gen}, resistant={res})')
+if not gate3_pass:
+    detail = bench if bench!='ok' else 'row validity'
+    if bad_rows: detail += ' — ' + ', '.join(f'{s}:{v}' for s,v in sorted(bad_rows.items()))
+    why.append(f'Gate 3 throughput ({detail})')
+
 L=[]
 L.append(f"# Standard suite — {rb}")
 L.append(f"- date: {date}    config_hash: {cfg}    eval cap: {lim}")
+L.append(f"- **SUITE VERDICT: {verdict}**" + (f" — failed: {'; '.join(why)}" if why else ""))
 L.append(f"- **Gate 1 functional (smoke): {smoke}**")
 L.append(f"- **Gate 2 quality:** general={gen}, resistant={res}")
 for key,r in sorted(acc.items()):
     L.append(f"    - {r.get('suite','?')} [{r.get('tasks','')}] limit={r.get('limit','')} think={r.get('think','on')}: `{r.get('scores','')}`")
-L.append(f"- **Gate 3 throughput ({bench}):** full sweep, tok/s")
+L.append(f"- **Gate 3 throughput: {'PASS' if gate3_pass else 'FAIL'}** (bench {bench}; {bench_detail or 'na'}) — full sweep, tok/s")
 if tps:
     L.append("")
-    L.append("| shape | c1 | c4 | c8 | c16 | c32 |")
-    L.append("|---|---|---|---|---|---|")
+    L.append("| shape | c1 | c4 | c8 | c16 | c32 | status | validity | req_counts |")
+    L.append("|---|---|---|---|---|---|---|---|---|")
     for shape,r in sorted(tps.items()):
-        L.append(f"| {shape} | {r.get('tps_c1','')} | {r.get('tps_c4','')} | {r.get('tps_c8','')} | {r.get('tps_c16','')} | {r.get('tps_c32','')} |")
+        v = classify(r)
+        mark = '' if v=='valid' else ' ⚠'
+        label = shape + mark + (' _(stale — not from this run)_' if r.get('_stale') else '')
+        L.append(f"| {label} | {r.get('tps_c1','')} | {r.get('tps_c4','')} | {r.get('tps_c8','')} | "
+                 f"{r.get('tps_c16','')} | {r.get('tps_c32','')} | {r.get('status','na')} | "
+                 f"{r.get('validity','na')} | {r.get('req_counts','na')} |")
+if bad_rows:
+    L.append("")
+    L.append("**Gate 3 FAILURE** (docs/validity-contract.md): the row(s) above marked ⚠ are `void` (not data), "
+             "`suspect` (not citable) or `crash` (engine wedge). These numbers must NOT be quoted, compared, "
+             "or used to promote — re-bench with a per-level stage budget that drains enough requests "
+             '(AGENTS.md: "MAX_SECONDS=180 is NOT universal"; want >=20 successful per level).')
 L.append("")
 L.append("Compare quality to the model card's recovery reference; throughput objective = median c16 (chat).")
 open(report,'w').write("\n".join(L)+"\n")
@@ -162,3 +235,16 @@ print(report)
 PY
 log "=== SUITE DONE — report: $(realpath --relative-to="$REPO_ROOT" "$REPORT") ==="
 cat "$REPORT" >&2
+
+# Exit code: 0 all gates pass · 3 Gate-3 crash/hang (the box broke) · 4 Gate-3 measurement invalid
+# (the run finished but its numbers are not citable) · 1 any other gate failure.
+rc_suite=0
+case "$bench" in
+  crash)   rc_suite=3 ;;
+  invalid) rc_suite=4 ;;
+esac
+if [ "$smoke" != PASS ] || [ "$gen" != ok ] || [ "$res" != ok ] || [ "$bench" = error ] || [ "$bench" = serve_fail ]; then
+  [ "$rc_suite" = 3 ] || rc_suite=1
+fi
+grep -q '^- \*\*SUITE VERDICT: PASS\*\*' "$REPORT" || { [ "$rc_suite" != 0 ] || rc_suite=4; }
+exit "$rc_suite"
