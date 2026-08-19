@@ -7,7 +7,9 @@
     "compute_capability": "12.1",
     "memory_kind": "unified",
     "gpu_memory_mb": null,
-    "effective_mem_mb": 124546
+    "effective_mem_mb": 124546,
+    "mem_bw_gbs": 273,
+    "mem_bw_source": "platform-table:scripts/probe.sh mem_bw_for_gpu() - NVIDIA GB10 spec (128 GB LPDDR5X, 256-bit @ 8533 MT/s), see docs/hardware/gb10-dgx-spark.md. HAND-ADDED 2026-08-19 for the validity-contract section 4 roofline check; NOT measured, and NOT produced by the 2026-06-13 probe run recorded in probed_at. Independently corroborated in-lab at 255 GB/s = 93% of peak (dense Q5_K_M 27B decode, 21.18 GB/token x 12.03 tok/s, llama.cpp FF711 campaign 20260809)."
   },
   "arch": "aarch64",
   "system_ram_mb": 124546,
