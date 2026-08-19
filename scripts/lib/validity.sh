@@ -118,3 +118,18 @@ ahl_split_verdict() {
   [ -n "$tok" ] || { echo "ahl_split_verdict: usage: ahl_split_verdict <token>" >&2; return 2; }
   _ahl_py split "$tok"
 }
+
+# ── Direct execution ──────────────────────────────────────────────────────────
+# The shim is normally SOURCED (callers want the functions and $AHL_RESULTS_HEADER).
+# When run as a program, answer the few things a non-bash caller needs, so the 23-column
+# header still has exactly one definition (contract §1) no matter who is asking.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  case "${1:-}" in
+    header|--header|columns) printf '%s\n' "$AHL_RESULTS_HEADER" ;;
+    validity)  shift; ahl_validity "$@" ;;
+    counts)    shift; ahl_level_counts "$@" ;;
+    knobs)     shift; ahl_knobs "$@" ;;
+    split)     shift; ahl_split_verdict "$@" ;;
+    *) echo "usage: validity.sh {header|validity|counts|knobs|split} [args...]" >&2; exit 2 ;;
+  esac
+fi

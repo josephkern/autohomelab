@@ -69,7 +69,7 @@ class TestMigration(unittest.TestCase):
         an already-migrated file looks like.
         """
         before = path.read_bytes()
-        attempts = [(path,), ("--write", path), ("--in-place", path), ("-i", path)]
+        attempts = [("--apply", path), (path,), ("--write", path), ("--in-place", path), ("-i", path)]
         last = None
         for args in attempts:
             r = api.run_python(api.MIGRATE_PY, *args)

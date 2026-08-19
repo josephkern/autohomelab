@@ -229,7 +229,7 @@ def migrate_row(cols, bundle_root: Path, repo: Path, stats: Counter):
     for k, v in knobs.items():
         if v is not None:
             stats["knob:" + k] += 1
-    knobs_s = V.format_knobs(**knobs)
+    knobs_s = V.format_knobs(knobs)
 
     idx = V.LEGACY_COLS.index("peak_gb")
     return cols[: idx + 1] + [req_counts, validity, knobs_s] + cols[idx + 1:]
@@ -334,7 +334,12 @@ def _strip_new(cols, path):
 # --------------------------------------------------------------------------
 
 def report(res: FileResult, repo: Path, verbose: bool):
-    rel = res.path.relative_to(repo)
+    try:
+        rel = res.path.relative_to(repo)
+    except ValueError:
+        # An explicitly-named journal can live outside the repo (a copy under audit, or a
+        # temp fixture). Report it by its absolute path rather than dying on the label.
+        rel = res.path
     s = res.stats
     if res.state == "already-migrated" and not s:
         print("  [skip] %-78s %3d rows  already at 23 columns" % (rel, res.rows))
@@ -352,6 +357,10 @@ def report(res: FileResult, repo: Path, verbose: bool):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("paths", nargs="*", metavar="results.tsv",
+                    help="migrate exactly these journals (default: every one under --repo)")
+    ap.add_argument("--write", "--in-place", "-i", dest="apply", action="store_true",
+                    help="alias for --apply")
     ap.add_argument("--apply", action="store_true",
                     help="actually write the files (default is a dry run)")
     ap.add_argument("--recompute", action="store_true",
@@ -368,9 +377,17 @@ def main(argv=None):
 
     repo = args.repo.resolve()
     bundle_root = args.bundle_root.resolve()
-    paths = sorted(repo.glob("results/*/*/*/results.tsv"))
-    if not paths:
-        sys.exit("no results/*/*/*/results.tsv under %s" % repo)
+    if args.paths:
+        # Explicit journals: migrate exactly these. Used to migrate one campaign in
+        # isolation, and by the acceptance suite against a temp fixture.
+        paths = [Path(x).resolve() for x in args.paths]
+        missing = [str(x) for x in paths if not x.is_file()]
+        if missing:
+            sys.exit("not a file: %s" % ", ".join(missing))
+    else:
+        paths = sorted(repo.glob("results/*/*/*/results.tsv"))
+        if not paths:
+            sys.exit("no results/*/*/*/results.tsv under %s" % repo)
 
     print("migrate_results_tsv: %d journals under %s" % (len(paths), repo))
     print("bundles read (read-only) from %s" % bundle_root)
@@ -409,7 +426,11 @@ def main(argv=None):
         tmp = r.path.with_suffix(".tsv.tmp")
         tmp.write_text(r.text)
         os.replace(tmp, r.path)
-        print("  wrote %s" % r.path.relative_to(repo))
+        try:
+            label = r.path.relative_to(repo)
+        except ValueError:
+            label = r.path
+        print("  wrote %s" % label)
     print("wrote %d files." % len(to_write))
     return 0
 

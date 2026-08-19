@@ -80,6 +80,21 @@ def load_validity(env: dict[str, str] | None = None):
 
 def require_validity(test: unittest.TestCase, env: dict[str, str] | None = None):
     mod = load_validity(env)
+    if env:
+        # The library reads AHL_* at CALL time (so `AHL_MIN_SUCCESSFUL=40 scripts/bench.sh`
+        # works), not at import time. Keep the override in place for the duration of the
+        # test rather than only across the import.
+        saved = {k: os.environ.get(k) for k in env}
+        os.environ.update(env)
+
+        def _restore():
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+        test.addCleanup(_restore)
     if mod is None:
         test.skipTest(
             f"not implemented yet: {VALIDITY_PY.relative_to(REPO_ROOT)} "
@@ -125,13 +140,30 @@ class Verdict:
         self.req_counts = _pick(raw, "req_counts", "request_counts", "req_counts_str", "counts")
 
     @property
-    def tokens(self) -> set[str]:
+    def tagged(self) -> set[str]:
+        """Verdict tokens exactly as emitted, e.g. {"no_data@c32"} (contract v1.1 §3)."""
         v = self.validity
         if v is None:
             return set()
         if isinstance(v, (list, tuple, set)):
-            return {str(t) for t in v}
-        return {t for t in str(v).split("+") if t}
+            raw = {str(t) for t in v}
+        else:
+            raw = {t for t in str(v).split("+") if t}
+        return raw
+
+    @property
+    def tokens(self) -> set[str]:
+        """Tagged tokens PLUS their bare base names.
+
+        v1.1 tags a token with the level it refers to (`low_sample@c1`) so a thin c1
+        sentinel cannot condemn a campaign's c16 objective. Tests that assert on the rule
+        ("this is low_sample") stay valid; tests that assert on the level use `.tagged`.
+        """
+        out = set()
+        for t in self.tagged:
+            out.add(t)
+            out.add(t.split("@", 1)[0])
+        return out
 
     def __repr__(self):  # shows up in assertion failure messages
         return (f"Verdict(validity={self.validity!r}, status={self.status!r}, "

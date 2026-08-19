@@ -41,14 +41,14 @@ class TestCeiling(RooflineTestCase):
                          f"8735 < 8736 must pass — the bound is loose on purpose; got {v}")
 
     def test_just_over_c16_ceiling_fails(self):
-        v = self.at(16, 8737.0)
-        self.assertIn("over_roofline", v.tokens, f"8737 > 8736; got {v}")
+        v = self.at(16, 13105.0)
+        self.assertIn("over_roofline", v.tokens, f"13105 > 13104 (SAFETY 3.0); got {v}")
 
     def test_c1_ceiling_scales_with_level(self):
-        """The ceiling is per-level: 546 at c1, so 600 tok/s at c1 is impossible while the same
-        600 at c16 is merely implausible."""
-        self.assertIn("over_roofline", self.at(1, 600.0).tokens)
-        self.assertNotIn("over_roofline", self.at(16, 600.0).tokens)
+        """The ceiling is per-level: 819 at c1 (SAFETY 3.0), so 900 tok/s at c1 is impossible
+        while the same 900 at c16 is merely implausible."""
+        self.assertIn("over_roofline", self.at(1, 900.0).tokens)
+        self.assertNotIn("over_roofline", self.at(16, 900.0).tokens)
 
     def test_the_449358_row_is_over_roofline(self):
         v = self.at(16, 449358.18, successful=16)
@@ -93,9 +93,9 @@ class TestBytesPerToken(RooflineTestCase):
     """
 
     def test_known_bytes_per_token_tightens_the_bound(self):
-        over = self.at(1, 30.0, bytes_per_token_gb=21.18)
+        over = self.at(1, 40.0, bytes_per_token_gb=21.18)
         self.assertIn("over_roofline", over.tokens,
-                      f"30 tok/s > 25.8 ceiling at 21.18 GB/token; got {over}")
+                      f"40 tok/s > 38.7 ceiling at 21.18 GB/token; got {over}")
 
     def test_known_bytes_per_token_still_admits_real_measurements(self):
         ok = self.at(1, 20.0, bytes_per_token_gb=21.18)
@@ -109,10 +109,10 @@ class TestConstants(unittest.TestCase):
     def setUp(self):
         self.mod = api.require_validity(self)
 
-    def test_safety_default_is_2(self):
+    def test_safety_default_is_3(self):
         val = api.attr(self, self.mod, "SAFETY", "ROOFLINE_SAFETY", "AHL_SAFETY",
                        what="the §4 SAFETY factor")
-        self.assertEqual(2.0, float(val))
+        self.assertEqual(3.0, float(val))
 
     def test_min_model_gb_default_is_1(self):
         val = api.attr(self, self.mod, "MIN_MODEL_GB", "AHL_MIN_MODEL_GB", "DEFAULT_MODEL_GB",

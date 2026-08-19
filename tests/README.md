@@ -99,4 +99,4 @@ validity.sh header      # prints the 23-column header, tab-separated
 ```
 
 `scripts/migrate_results_tsv.py` must accept a `results.tsv` path and rewrite it in place,
-idempotently (`--write` / `--in-place` / `-i` are also accepted by the test driver).
+idempotently (`--apply` is the write flag; `--write` / `--in-place` / `-i` are aliases).

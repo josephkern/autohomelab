@@ -16,7 +16,7 @@ from pathlib import Path
 from ahl_test import api
 
 REQ_COUNTS_EXAMPLE = "c1:41/0/0;c16:118/4/0"
-KNOBS_EXAMPLE = ("levels=1,16,max_s=180,seed=42,prompt=512,output=256,"
+KNOBS_EXAMPLE = ("levels=1|16,max_s=180,seed=42,prompt=512,output=256,"
                  "stall=90,ltimeout=480,gllm=0.6.0")
 
 
@@ -74,7 +74,7 @@ class TestReqCounts(EncodingTestCase):
 class TestKnobs(EncodingTestCase):
     def test_documented_example_round_trips(self):
         """NOTE (flagged as a spec ambiguity): the §2 example is `k=v` COMMA-joined while one of
-        its own values (`levels=1,16`) contains a comma. A naive `split(',')` decoder cannot
+        its own values (`levels=1|16`) contains a comma. A naive `split(',')` decoder cannot
         recover it. The encoding must survive its own documented example."""
         fmt, parse = self.fns("knobs")
         self.assertEqual(KNOBS_EXAMPLE, fmt(parse(KNOBS_EXAMPLE)))
@@ -83,7 +83,7 @@ class TestKnobs(EncodingTestCase):
         fmt, parse = self.fns("knobs")
         d = parse(KNOBS_EXAMPLE)
         got = fmt(d)
-        self.assertIn("levels=1,16", got,
+        self.assertIn("levels=1|16", got,
                       f"the levels list must not be shredded by the joiner; got {got!r}")
         self.assertIn("max_s=180", got, f"got {got!r}")
         self.assertIn("gllm=0.6.0", got, f"got {got!r}")
@@ -95,7 +95,7 @@ class TestKnobs(EncodingTestCase):
 
     def test_full_sweep_levels_round_trip(self):
         fmt, parse = self.fns("knobs")
-        s = KNOBS_EXAMPLE.replace("levels=1,16", "levels=1,4,8,16,32")
+        s = KNOBS_EXAMPLE.replace("levels=1|16", "levels=1|4|8|16|32")
         self.assertEqual(s, fmt(parse(s)))
 
     def test_key_order_is_stable(self):

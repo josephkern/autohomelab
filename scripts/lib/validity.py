@@ -40,6 +40,8 @@ from typing import Callable, Iterable, Mapping, Optional, Sequence
 __all__ = [
     "RESULTS_COLS", "LEGACY_COLS", "NEW_COLS", "RESULTS_HEADER", "LEGACY_HEADER",
     "LEVEL_COLUMNS", "level_col_index", "level_meta",
+    "assess_bundle", "BundleAssessment", "COLUMNS", "STATUSES", "SAFETY",
+    "EXIT_OK", "EXIT_CRASH", "EXIT_INVALID",
     "LevelCounts", "LevelParseError", "parse_level_json", "scan_bundle",
     "verdicts", "format_validity", "parse_validity", "parse_validity_pairs",
     "split_verdict", "verdict_base", "verdict_level", "tag_verdict",
@@ -678,11 +680,17 @@ def _knob_value(v) -> str:
     return s if s else NA
 
 
-def format_knobs(**kw) -> str:
+def format_knobs(knobs=None, **kw) -> str:
     """`k=v` comma-joined, in the order the kwargs were given. Empty -> `na`.
     List values join with `|` (`levels=1|16`); commas inside a value are rewritten to `|`
     so split(",") is always safe. Tabs/newlines are stripped so a value can never break
     the TSV."""
+    if knobs is not None:
+        # Callers hand this a mapping (the migration, the audit, the test suite) as often as
+        # kwargs; accept either rather than making every consumer spread a dict it already has.
+        merged = dict(knobs)
+        merged.update(kw)
+        kw = merged
     parts = []
     for k, v in kw.items():
         if not _KNOB_KEY.match(k):
@@ -786,6 +794,72 @@ def _cmd_split(args) -> int:
     base, lvl = split_verdict(args.token)
     print("%s\t%s" % (base, NA if lvl is None else lvl))
     return 0
+
+
+
+# ── Public composite entry point ──────────────────────────────────────────────
+# A2/A5 (via the shim), A7's five near-duplicate row classifiers and the acceptance suite
+# all want the same thing: "given a bundle and the levels that ran, tell me the verdict,
+# the counts, and the status this row should carry". Expose it once rather than five times.
+EXIT_OK = 0
+EXIT_CRASH = 3        # the box broke
+EXIT_INVALID = 4      # the row is written but not citable (contract §5)
+
+# Public aliases. The names on the right are canonical; these are the shorter spellings
+# consumers reach for first.
+COLUMNS = RESULTS_COLS
+STATUSES = STATUS_VOCAB
+SAFETY = AHL_ROOFLINE_SAFETY
+
+
+@dataclass(frozen=True)
+class BundleAssessment:
+    """What one benchmark row's evidence says about itself."""
+    validity: str          # `+`-joined verdict tokens, or `ok`/`na`
+    req_counts: str        # `c1:41/0/0;c16:118/4/0`, or `na`
+    status_floor: str      # ok | suspect | void
+    status: str            # the status the row should carry, after §5 precedence
+    levels: dict           # level -> LevelCounts, for callers that want the detail
+
+    @property
+    def verdicts(self) -> list:
+        return parse_validity(self.validity)
+
+
+def assess_bundle(bundle_dir, levels, tps=None, node_profile=None, status=None,
+                  bytes_per_token_gb=None) -> BundleAssessment:
+    """Assess one run's bundle end to end (contract §3/§4/§5).
+
+    `levels` is the list of levels that were RUN — authoritative over whatever files happen
+    to be in the directory, so a stale level_c8.json from a previous shape is ignored and a
+    level whose json vanished is still judged (`no_data`).
+
+    `node_profile` may be a path or an already-loaded mapping; without a readable
+    `gpu.mem_bw_gbs` the roofline check is skipped, never guessed.
+    """
+    # discover=False: the caller's run-level list is authoritative (contract v1.1 §3), so a
+    # stale level_c8.json from a previous shape in the same bundle dir is never scored.
+    # The audit/migration path opts into discovery deliberately; a live bench never should.
+    scanned = scan_bundle(bundle_dir, levels, tps, discover=False)
+    mem_bw = None
+    if node_profile is not None:
+        if isinstance(node_profile, Mapping):
+            gpu = node_profile.get("gpu")
+            raw = gpu.get("mem_bw_gbs") if isinstance(gpu, Mapping) else None
+            mem_bw = _finite(raw) if raw is not None else None
+        else:
+            mem_bw = read_mem_bw(node_profile)
+    ceiling_fn = make_ceiling_fn(mem_bw, bytes_per_token_gb) if mem_bw else None
+
+    verds = verdicts(scanned, ceiling_fn)
+    floor = status_floor(verds)
+    return BundleAssessment(
+        validity=format_validity(verds),
+        req_counts=format_req_counts(scanned),
+        status_floor=floor,
+        status=apply_status(status, floor),
+        levels=dict(scanned),
+    )
 
 
 def main(argv: Optional[Sequence] = None) -> int:

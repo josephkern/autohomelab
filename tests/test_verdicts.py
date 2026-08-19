@@ -112,9 +112,9 @@ class TestSampleCountBoundaries(VerdictTestCase):
 
     def test_thresholds_are_env_overridable(self):
         """§3 names AHL_MIN_DATA / AHL_MIN_SUCCESSFUL, so they must be readable from the env."""
-        mod = api.load_validity({"AHL_MIN_DATA": "10", "AHL_MIN_SUCCESSFUL": "10"})
-        if mod is None:
-            self.skipTest("scripts/lib/validity.py not implemented yet")
+        # require_validity keeps the override in os.environ for the whole test: the library
+        # reads AHL_* at call time, not at import time.
+        mod = api.require_validity(self, {"AHL_MIN_DATA": "10", "AHL_MIN_SUCCESSFUL": "10"})
         b = self.bundle({1: self.healthy(), 16: api.level_json(8, 0, 0, 200.0, 16)}, "envcase")
         v = api.assess(self, mod, b, [1, 16], node_profile=GB10)
         self.assertIn("no_data", v.tokens,
