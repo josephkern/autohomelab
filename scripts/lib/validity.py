@@ -40,7 +40,7 @@ from typing import Callable, Iterable, Mapping, Optional, Sequence
 __all__ = [
     "RESULTS_COLS", "LEGACY_COLS", "NEW_COLS", "RESULTS_HEADER", "LEGACY_HEADER",
     "LEVEL_COLUMNS", "level_col_index", "level_meta",
-    "assess_bundle", "BundleAssessment", "COLUMNS", "STATUSES", "SAFETY",
+    "assess_bundle", "BundleAssessment", "COLUMNS", "LEVELS", "STATUSES", "SAFETY",
     "EXIT_OK", "EXIT_CRASH", "EXIT_INVALID",
     "LevelCounts", "LevelParseError", "parse_level_json", "scan_bundle",
     "verdicts", "format_validity", "parse_validity", "parse_validity_pairs",
@@ -808,6 +808,7 @@ EXIT_INVALID = 4      # the row is written but not citable (contract §5)
 # Public aliases. The names on the right are canonical; these are the shorter spellings
 # consumers reach for first.
 COLUMNS = RESULTS_COLS
+LEVELS = LEVEL_COLUMNS      # the five fixed concurrency levels
 STATUSES = STATUS_VOCAB
 SAFETY = AHL_ROOFLINE_SAFETY
 

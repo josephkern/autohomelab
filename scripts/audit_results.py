@@ -52,6 +52,78 @@ except ImportError as exc:  # pragma: no cover
         "See docs/validity-contract.md §1 and the API block at the top of this file."
     )
 
+
+# ── Adapter onto scripts/lib/validity.py ──────────────────────────────────────
+# This audit was written against a sketch of the library's API; the shipped library uses
+# different spellings and a list-of-LevelCounts is keyed by level rather than ordered.
+# These wrappers translate — they contain NO rules, which all still live in the library.
+class _Stats:
+    """One level's evidence: counts from the library plus the run metadata it journalled."""
+
+    def __init__(self, level, counts, meta=None):
+        self.level = int(level)
+        self._c = counts
+        m = meta or {}
+        self.max_seconds = m.get("max_seconds")
+        self.seed = m.get("seed")
+        self.guidellm_version = m.get("guidellm_version")
+        self.data_spec = (m.get("prompt_tokens"), m.get("output_tokens"))
+
+    successful = property(lambda self: self._c.ok)
+    incomplete = property(lambda self: self._c.incomplete)
+    errored = property(lambda self: self._c.errored)
+    tps = property(lambda self: self._c.tps)
+    missing = property(lambda self: self._c.missing)
+    counts = property(lambda self: self._c)
+
+
+def _level_stats_from_json(path, level):
+    try:
+        return _Stats(level, validity.parse_level_json(str(path)), validity.level_meta(str(path)))
+    except validity.LevelParseError:
+        return _missing_level(level, str(path))
+
+
+def _missing_level(level, _path="na"):
+    return _Stats(level, validity.LevelCounts(missing=True))
+
+
+def _by_level(stats):
+    return {s.level: s.counts for s in stats}
+
+
+def _verdicts(stats, mem_bw_gbs=None):
+    fn = validity.make_ceiling_fn(mem_bw_gbs) if mem_bw_gbs else None
+    return validity.verdicts(_by_level(stats), fn)
+
+
+def _severity(toks):
+    """`ok` | `suspect` | `void` — the library's status floor is the severity."""
+    return validity.status_floor(toks)
+
+
+def _status_for(toks, current):
+    return validity.apply_status(current, validity.status_floor(toks))
+
+
+def _req_counts(stats):
+    return validity.format_req_counts(_by_level(stats))
+
+
+def _knobs(stats):
+    """Reconstruct the knob set from whatever the bundles journalled."""
+    first = next((s for s in stats if not s.missing), None)
+    if first is None:
+        return validity.NA
+    prompt, output = first.data_spec
+    return validity.format_knobs({
+        "levels": sorted(s.level for s in stats),
+        "max_s": first.max_seconds, "seed": first.seed,
+        "prompt": prompt, "output": output,
+        "stall": None, "ltimeout": None, "gllm": first.guidellm_version,
+    })
+
+
 LEVEL_COLS = {lvl: f"tps_c{lvl}" for lvl in validity.LEVELS}
 PROMOTED_FROM = re.compile(r"promoted from\s+(\S+?\.sh)", re.IGNORECASE)
 
@@ -111,9 +183,9 @@ def audit_row(row: dict, data_root: Path, mem_bw: float | None) -> dict:
     for lvl in run_levels:
         p = (bundle / f"level_c{lvl}.json") if bundle else None
         if p and p.exists():
-            stats.append(validity.level_stats_from_json(p, lvl))
+            stats.append(_level_stats_from_json(p, lvl))
         else:
-            stats.append(validity.missing_level(lvl, str(p) if p else "na"))
+            stats.append(_missing_level(lvl, str(p) if p else "na"))
 
     auditable = bool(bundle and bundle.is_dir() and bundle_levels)
     if not auditable:
@@ -121,11 +193,11 @@ def audit_row(row: dict, data_root: Path, mem_bw: float | None) -> dict:
         rc = "na"
         kb = "na"
     else:
-        toks = validity.verdicts(stats, mem_bw_gbs=mem_bw)
-        sev = validity.severity(toks)
-        new_status = validity.status_for(toks, (row.get("status") or "").strip())
-        rc = validity.req_counts(stats)
-        kb = validity.knobs(stats)
+        toks = _verdicts(stats, mem_bw_gbs=mem_bw)
+        sev = _severity(toks)
+        new_status = _status_for(toks, (row.get("status") or "").strip())
+        rc = _req_counts(stats)
+        kb = _knobs(stats)
 
     return {
         "run_id": row.get("run_id", "na"),
@@ -187,7 +259,7 @@ def campaign_of(a: dict) -> str:
 def bucket(a: dict) -> str:
     if not a["auditable"]:
         return "unauditable"
-    return {"fatal": "void", "suspect": "suspect", "ok": "ok"}[a["severity"]]
+    return {"fatal": "void", "void": "void", "suspect": "suspect", "ok": "ok"}[a["severity"]]
 
 
 def summarise(audits: list[dict], finals: list[dict], mem_bw, out) -> None:
