@@ -34,7 +34,11 @@ req_counts  validity  knobs  status  notes  data
 
 - **`req_counts`** — per-level request outcome as **`ok/incomplete/errored`** (that order),
   semicolon-joined, run levels only: `c1:41/0/0;c16:118/4/0`. A level that ran but produced no
-  parseable JSON renders `c16:na`. `na` for the whole field when no bundle survives.
+  parseable JSON renders `c16:na`. The whole field is `na` only when the row has no bundle
+  path at all (`data=na`). **A bundle directory that survives but retains no `level_c*.json`
+  is NOT the same case**: those rows render `c1:na` and score `no_data`, which is fatal and
+  therefore stricter than `na`. Of the 6 unauditable rows, 1 is `data=na` and 5 are
+  retained-but-empty directories, so only 1 row carries `validity=na`.
 - **`validity`** — `ok`, or a `+`-joined list of verdict tokens (§3).
 - **`knobs`** — effective knob set, `k=v` comma-joined:
   `levels=1|16,max_s=180,seed=42,prompt=512,output=256,stall=90,ltimeout=480,gllm=0.6.0`.
