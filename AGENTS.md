@@ -205,18 +205,52 @@ journal, not only in the gitignored bundle. What changes is the verdict, not the
   on crash; crash wins if both occur; 0 = clean. **Exit 4 means "the row is written but not
   citable — continue", never "abort"**: a caller that treats it as a fatal error loses the rest of
   the sweep and the evidence it was about to record.
-- Downstream refuses to launder a bad row: `promote.sh` will not promote a config whose supporting
-  rows are void/suspect/crash (override: `AHL_PROMOTE_OVERRIDE`, below), `run_experiment.sh` will
-  not median over them and publishes `cite=ok|partial|insufficient|no_valid_data` on its `MEDIAN`
-  line, `aggregate.py` hides them by default (`--include-void`, `--include-suspect`, `--validity
+- Downstream refuses to launder a bad row. **One classifier answers "may this row be cited?" for
+  every consumer: `scripts/citability.py`** (`classify_row`, built on `lib/validity.py`'s
+  `verdict_base`/`parse_validity_pairs`). It previously existed as five hand-copied `def classify`
+  bodies inside shell heredocs, and all five shared the same three bugs — they matched
+  level-TAGGED tokens against a bare `{'no_data','over_roofline'}` set (so **no fatal row ever
+  graded `void`**; 15 committed rows were mislabelled), they dropped `na` alongside `ok` (so an
+  unevaluable row read as citable), and `crash` reached "citable" whenever `validity` was `ok`/`na`.
+  Consumers now: `promote.sh` gates the promotion (below), `run_experiment.sh` will not median over
+  non-citable rows and publishes `cite=ok|partial|insufficient|no_valid_data|error` plus
+  `otherlvl=` on its `MEDIAN` line, `aggregate.py`/`tune_status.py` hide void **and** suspect **and
+  crash** by default (`--include-void`, `--include-suspect`, `--include-crash`, `--validity
   <token>` to look anyway). Operator procedure: program.md → "Invalid runs".
+- **`promote.sh` gates the OBJECTIVE, not every row that shares the config_hash.** A promotion
+  cites one number — chat-shape median c16 — and contract §3 v1.1 says consumers gate on the level
+  they cite. So the supporting rows split: **objective rows** (chat, c16 actually run) must include
+  at least one citable at c16, and any objective row that is *fatal* at c16 (`no_data@c16`,
+  `over_roofline@c16`) or a `crash` blocks absolutely; **every other row** (other shape, or one
+  that never ran c16) is reported on stderr and written into the promoted artifact's header, but
+  does not block. Blocking on all of them refused 16 of 92 config groups — 12 of those over rows
+  the promotion never quotes, typically a starved *coder* full-sweep beside four clean chat rows —
+  and a gate that wrong is a gate operators switch off. Knobs: `AHL_PROMOTE_SHAPE` (default
+  `chat`), `AHL_PROMOTE_LEVEL` (default `16`, or `none` for a row-wide gate). If a config never ran
+  the objective level the gate falls back to the highest level it did run, and says so — the ds4 /
+  llama.cpp launchers bench c1 only.
 - **`AHL_PROMOTE_OVERRIDE` is a justification, not a flag** — `promote.sh` rejects `1`/`yes`/`force`
   and anything under 12 characters, and writes the text permanently into the promoted `_final.sh`,
-  where it is greppable. Overriding is a human act that leaves a signature; there is deliberately no
-  equivalent in `run_experiment.sh`, because a tuning loop must not self-authorize.
+  where it is greppable (`grep -l AHL_PROMOTION_OVERRIDE runbooks/*/*/*_final.sh`). Overriding is a
+  human act that leaves a signature; there is deliberately no equivalent in `run_experiment.sh`,
+  because a tuning loop must not self-authorize. **The signature is a COMMENT, never an
+  assignment**: `_final.sh` is `source`d by serve.sh/bench.sh, and the old
+  `AHL_PROMOTION_OVERRIDE="<operator text>"` line executed any `$(...)` in the justification at
+  *serve* time (verified, not theoretical — same for `$USER` and the free-text result note).
+- **Exit-code precedence, repo-wide: `3` (crash) > `4` (not citable) > `1` (gate failure) > `0`.**
+  Codes latch upward and are never overwritten, so a smoke failure cannot mask a Gate-3 row that is
+  not data. `suite.sh` and `validate.sh` both used to report the quieter `1` in that case.
+  `run_experiment.sh`'s `1` means strictly *pre-measurement* (serve/smoke): a failure of the median
+  summarizer itself now exits **4** with `cite=error`, because the bench rows were written and
+  saying "1" told the caller nothing had been measured.
 - **`tests/run.sh`** is the acceptance suite for this layer (121 tests, stdlib only, no GPU or
   network). Run it with `AHL_TEST_STRICT=1` — a SKIP means "this contract rule was not checked",
-  not "it passed".
+  not "it passed". **`scripts/citability_selftest.sh`** is its REACHABILITY companion (68 checks):
+  it runs the real `promote.sh`/`run_experiment*.sh`/`suite.sh`/`validate.sh` inside a throwaway
+  repo whose `serve.sh`/`smoke.sh`/`eval.sh`/`bench*.sh` are stubs returning scripted exit codes,
+  and asserts on which branch actually executed — because the scar in this repo (see the
+  reasoning × spec-decode bug) is a *correct condition in an unreachable branch*, which no
+  assertion about the condition can catch. Also hermetic: no docker, server, GPU or lm-eval.
 
 ### Schema history — and why this section is normative
 

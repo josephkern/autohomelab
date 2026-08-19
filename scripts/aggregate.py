@@ -2,7 +2,8 @@
 """Concatenate every results.tsv into one cross-hardware comparison table.
 
     uv run scripts/aggregate.py [--status keep] [--shape chat] [--csv] [--wide]
-                                [--include-void] [--include-suspect] [--validity low_sample]
+                                [--include-void] [--include-suspect] [--include-crash]
+                                [--validity low_sample]
 
 Every row already carries node_fp / model / shape / backend, so a plain concat yields a
 self-describing table comparing the same model across nodes, or configs on one node.
@@ -12,11 +13,13 @@ Validity (docs/validity-contract.md):
   The schema lives in ONE place — `RESULTS_COLS` is imported from scripts/lib/validity.py.
   Both schemas are read: 23-column migrated rows and any 20-column legacy row still around.
   A missing column reads as `na` rather than raising.
-  Per contract §5 the default view is *citable data only*: `void` (not data) and `suspect`
-  (non-citable) rows are held back, and a one-line summary of what was held back and why is
-  always printed to stderr. `--include-void` / `--include-suspect` bring them back, visibly
-  marked in the `!` column (`x` = void, `?` = suspect). `--validity <token>` filters on a
-  verdict token for auditing and implies both escape hatches, as does an explicit `--status`.
+  Per contract §5 the default view is *citable data only*: `void` (not data), `suspect`
+  (non-citable) and `crash` (the engine wedged — "non-valid for EVERY consumer", §5 v1.1) rows
+  are held back, and a one-line summary of what was held back and why is always printed to
+  stderr. `--include-void` / `--include-suspect` / `--include-crash` bring them back, visibly
+  marked in the `!` column (`x` = void, `?` = suspect, `c` = crash). `--validity <token>`
+  filters on a verdict token for auditing and implies all three escape hatches, as does an
+  explicit `--status`.
   results/aggregate.tsv is written to match the view exactly — it is never a wider set than
   what was printed, so nothing silently leaks into a downstream consumer of the file.
 """
@@ -34,10 +37,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lib.validity import RESULTS_COLS  # noqa: E402  single source of truth for the schema
 
+from citability import (  # noqa: E402  one row classifier, shared by every consumer
+    CRASH,
+    SUSPECT,
+    VALID,
+    VOID,
+    classify_row,
+)
+
 NA = "na"
-# Statuses whose numbers must not appear in a comparison table (contract §5/§6).
-VOID = "void"
-SUSPECT = "suspect"
 
 
 def results_root() -> Path:
@@ -69,31 +77,31 @@ def load_rows(root: Path | None = None) -> list[dict]:
 
 
 def citability(row: dict) -> str:
-    """`ok` | `suspect` | `void` — whether this row's numbers may be cited.
+    """`ok` | `suspect` | `void` | `crash` — whether this row's numbers may be cited.
 
-    Contract §5 downgrades `status` to void/suspect, so status is the primary signal. The
-    one exception the contract leaves open is a `crash` row: it *keeps* status=crash and
-    records its verdict in `validity`, so a crashed run carrying a fatal verdict (the
-    449,358 tok/s case) would otherwise sail through a status-only filter. Any row with a
-    recorded verdict other than `ok` is therefore treated as at least suspect. This needs
-    no severity table, so it cannot drift out of sync with the library.
+    Delegates to `citability.classify_row` (row-wide: a comparison table shows every level, so
+    there is no single cited level to scope to). Two contract rules this used to get wrong:
+
+    * **`validity=na` is not `ok`** (§3: "rules could not be evaluated — never `ok`"). The old
+      test `verdict not in (NA, "ok")` dropped them together, so an unevaluable row was shown
+      as citable data. One such row exists in the committed corpus.
+    * **`crash` is non-valid for EVERY consumer** (§5 v1.1). A crash row whose `validity` was
+      `na` or `ok` — `20260613-105041` is exactly that — appeared unmarked in this default
+      "citable data only" view.
     """
-    status = row.get("status", NA)
-    if status == VOID:
-        return VOID
-    if status == SUSPECT:
-        return SUSPECT
-    verdict = row.get("validity", NA)
-    if verdict not in (NA, "ok"):
-        return SUSPECT
-    return "ok"
+    cite = classify_row(row)
+    return "ok" if cite == VALID else cite
 
 
 def verdict_tokens(row: dict) -> list[str]:
-    """The `+`-joined verdict tokens of a row (empty for `ok`/`na`)."""
+    """The `+`-joined verdict tokens of a row. `ok` has none; `na` reports itself, because
+    "the rules could not be evaluated" is a reason a row was held back and the stderr summary
+    would otherwise say `no verdict tokens` about it (contract §3)."""
     verdict = row.get("validity", NA)
-    if verdict in (NA, "ok"):
+    if verdict == "ok":
         return []
+    if verdict in (NA, ""):
+        return [NA]
     return [t for t in verdict.split("+") if t]
 
 
@@ -140,9 +148,11 @@ def main() -> None:
                     help="also show status=void rows (contract: not data, must not be cited)")
     ap.add_argument("--include-suspect", action="store_true",
                     help="also show status=suspect rows (measured, but invariants question them)")
+    ap.add_argument("--include-crash", action="store_true",
+                    help="also show status=crash rows (contract §5: non-valid for every consumer)")
     ap.add_argument("--validity", metavar="TOKEN",
                     help="only rows whose validity carries TOKEN (e.g. low_sample); "
-                         "implies --include-void --include-suspect")
+                         "implies --include-void --include-suspect --include-crash")
     args = ap.parse_args()
 
     # An explicit --status/--validity names the population being audited, so it implies the
@@ -150,6 +160,7 @@ def main() -> None:
     named = bool(args.status) or bool(args.validity)
     include_void = args.include_void or named
     include_suspect = args.include_suspect or named
+    include_crash = args.include_crash or named
 
     rows = load_rows()
     total = len(rows)
@@ -163,24 +174,23 @@ def main() -> None:
 
     # Validity filter — the point of the default view: a non-citable number never appears
     # silently in a comparison table.
+    shown_when = {VOID: include_void, SUSPECT: include_suspect, CRASH: include_crash}
     kept, hidden = [], []
     for r in rows:
         cite = citability(r)
-        if cite == VOID and not include_void:
-            hidden.append((r, cite))
-        elif cite == SUSPECT and not include_suspect:
+        if cite != "ok" and not shown_when.get(cite, False):
             hidden.append((r, cite))
         else:
             kept.append(r)
     rows = kept
 
-    n_void = sum(1 for _, c in hidden if c == VOID)
-    n_suspect = len(hidden) - n_void
+    n = Counter(c for _, c in hidden)
     why = Counter(t for r, _ in hidden for t in verdict_tokens(r))
-    reasons = ", ".join(f"{t}x{n}" for t, n in sorted(why.items())) or "no verdict tokens"
+    reasons = ", ".join(f"{t}x{k}" for t, k in sorted(why.items())) or "no verdict tokens"
     summary = (f"validity: {total} rows read, {len(rows)} shown, {len(hidden)} held back "
-               f"({n_void} void, {n_suspect} suspect; {reasons})"
-               + ("" if not hidden else " -- --include-void/--include-suspect to show"))
+               f"({n[VOID]} void, {n[SUSPECT]} suspect, {n[CRASH]} crash; {reasons})"
+               + ("" if not hidden
+                  else " -- --include-void/--include-suspect/--include-crash to show"))
     print(summary, file=sys.stderr)
 
     if not rows:
@@ -202,11 +212,11 @@ def main() -> None:
     view = ["!", "node_fp", "model", "shape", "config_hash", "status", "validity",
             "min_ok" if compact else "req_counts",
             "tps_c1", "tps_c4", "tps_c8", "tps_c16", "tps_c32"]
-    mark = {VOID: "x", SUSPECT: "?", "ok": " "}
+    mark = {VOID: "x", SUSPECT: "?", CRASH: "c", "ok": " "}
     table = [view]
     for r in rows:
         cells = dict(r)
-        cells["!"] = mark[citability(r)]
+        cells["!"] = mark.get(citability(r), "?")
         cells["min_ok"] = min_ok(r)
         if compact:
             # keep the table inside a terminal: the long GGUF model names run to 79 chars
@@ -221,7 +231,7 @@ def main() -> None:
         widths = [max(len(str(row[i])) for row in table) for i in range(len(view))]
         for row in table:
             print("  ".join(str(c).ljust(widths[i]) for i, c in enumerate(row)))
-    legend = "! x=void ?=suspect" + ("" if not compact else
+    legend = "! x=void ?=suspect c=crash" + ("" if not compact else
                                      " | min_ok = fewest successful requests of any run level"
                                      " (! = a level errored or starved); --wide for req_counts")
     print(f"\n{legend}", file=sys.stderr)

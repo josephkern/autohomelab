@@ -5,14 +5,29 @@
 # scripts/promote.sh. Throughput is characterized separately (run_experiment.sh / full sweep).
 #
 # Gate 3 is not RUN here, but it is CHECKED: the report reads back the results.tsv rows for this
-# config and reports their measurement validity (docs/validity-contract.md §5/§6). A config whose
-# throughput rows are `void`/`suspect` is not validated — "see results.tsv" was how an uncitable
-# number reached promotion in the first place.
+# config and reports their measurement validity (docs/validity-contract.md §3/§5/§6). A config whose
+# throughput rows are not citable is not validated — "see results.tsv" was how an uncitable number
+# reached promotion in the first place. The check is THE SAME CALL promote.sh makes
+# (`scripts/citability.py gate`), scoped to the objective it will cite (chat c16 by default), so
+# this report can never disagree with the gate it is supposed to predict.
 #
-# Exit: 0 all checked gates pass · 1 smoke (Gate 1) failed · 4 Gate-3 rows are not citable.
+# Exit codes follow the repo-wide precedence 3 (crash) > 4 (not citable) > 1 (gate failure) > 0.
+# A failed smoke no longer HIDES a non-citable Gate 3: both are reported and 4 wins.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Charter rule 4: prefer uv; citability.py is stdlib-only so python3 is a correct fallback.
+ahl_py() {
+  if [ -n "${AHL_PYTHON:-}" ]; then
+    # shellcheck disable=SC2086
+    $AHL_PYTHON "$@"
+  elif command -v uv >/dev/null 2>&1; then
+    uv run --project "$REPO_ROOT" --quiet python "$@"
+  else
+    python3 "$@"
+  fi
+}
 RUNBOOK="${1:?usage: validate.sh <runbook.sh> [general|coder|auto]}"
 SUITE="${2:-auto}"
 [ -f "$RUNBOOK" ] || { echo "not found: $RUNBOOK" >&2; exit 1; }
@@ -47,47 +62,22 @@ SCORES=""
 "$SCRIPT_DIR/serve.sh" down >/dev/null 2>&1 || true
 
 # ── Gate 3 read-back: are this config's existing throughput rows citable? ──────
-# Prints line 1 = verdict token (ok|invalid|missing), lines 2.. = detail.
+# citability.py gate prints line 1 = ok|blocked, line 2 = summary, then detail + the id lines.
 set +e
-G3="$(python3 - "$OUT_DIR/results.tsv" "$CFG" <<'PY'
-import sys, csv
-tsv, cfg = sys.argv[1:3]
-FATAL = {'no_data', 'over_roofline'}          # docs/validity-contract.md §3
-def classify(r):
-    st = (r.get('status') or '').strip().lower()
-    if st in ('void', 'suspect', 'crash'): return st
-    toks = [t for t in (r.get('validity') or '').replace('+', ' ').split() if t and t not in ('ok','na')]
-    if any(t in FATAL for t in toks): return 'void'
-    if toks: return 'suspect'
-    return 'valid'
-try:
-    rows = [r for r in csv.DictReader(open(tsv), delimiter='\t') if r.get('config_hash') == cfg]
-except FileNotFoundError:
-    rows = []
-if not rows:
-    print('missing'); print('no results.tsv throughput rows for config_hash %s — Gate 3 has not been run' % cfg)
-    sys.exit(0)
-cls = [(r, classify(r)) for r in rows]
-n = {k: sum(1 for _, c in cls if c == k) for k in ('valid','suspect','void','crash')}
-head = 'rows=%d valid=%d suspect=%d void=%d crash=%d' % (len(rows), n['valid'], n['suspect'], n['void'], n['crash'])
-bad = [(r, c) for r, c in cls if c in ('void','suspect')]
-print('invalid' if (bad or not n['valid']) else 'ok')
-print(head)
-for r, c in bad:
-    print('  %s %s -> %s (validity=%s req_counts=%s)' % (
-        r.get('run_id','?'), r.get('shape','?'), c, r.get('validity','na'), r.get('req_counts','na')))
-if not n['valid'] and not bad:
-    print('  no VALID row — only crash rows')
-PY
-)"
+G3="$(ahl_py "$SCRIPT_DIR/citability.py" gate \
+        --tsv "$OUT_DIR/results.tsv" --cfg "$CFG" \
+        --shape "${AHL_PROMOTE_SHAPE-chat}" --level "${AHL_PROMOTE_LEVEL-16}")"
 set -e
-G3_VERDICT="$(printf '%s\n' "$G3" | head -1)"
-G3_DETAIL="$(printf '%s\n' "$G3" | tail -n +2)"
-case "$G3_VERDICT" in
-  ok)      G3_LABEL="PASS (rows citable)" ;;
-  invalid) G3_LABEL="FAIL — rows are void/suspect/crash, NOT citable" ;;
-  *)       G3_LABEL="NOT RUN (promote.sh will refuse until a valid throughput row exists)" ;;
-esac
+G3_RAW="$(printf '%s\n' "$G3" | head -1)"
+G3_DETAIL="$(printf '%s\n' "$G3" | tail -n +2 | grep -v '^ids=' | grep -v '^warnids=' || true)"
+# "no rows at all" is NOT the same failure as "the rows are bad": Gate 3 simply has not been run.
+if [ "$G3_RAW" = ok ]; then
+  G3_VERDICT=ok;      G3_LABEL="PASS (the objective's rows are citable)"
+elif printf '%s\n' "$G3_DETAIL" | grep -q 'NO benchmark rows\|no results.tsv'; then
+  G3_VERDICT=missing; G3_LABEL="NOT RUN (promote.sh will refuse until a valid throughput row exists)"
+else
+  G3_VERDICT=invalid; G3_LABEL="FAIL — the objective's rows are void/suspect/crash, NOT citable"
+fi
 
 VERDICT=PASS
 [ "$smoke_status" = PASS ] || VERDICT=FAIL
@@ -115,6 +105,12 @@ VERDICT=PASS
 } > "$REPORT"
 
 echo >&2; echo ">> verdict=$VERDICT smoke=$smoke_status gate3=$G3_VERDICT scores=$SCORES  report -> $(realpath --relative-to="$REPO_ROOT" "$REPORT")" >&2
-[ "$smoke_status" = PASS ] || exit 1
-[ "$G3_VERDICT" = invalid ] && exit 4
-exit 0
+
+# Exit-code precedence, repo-wide (docs/validity-contract.md §5): 3 crash > 4 not citable >
+# 1 gate failure > 0. `exit 1` used to come FIRST, so a config that failed smoke AND had
+# uncitable throughput rows reported only the smoke failure — the louder signal masked the
+# quieter, more corrosive one. 4 now wins, and both are in the report either way.
+rc=0
+[ "$smoke_status" = PASS ] || rc=1
+[ "$G3_VERDICT" = invalid ] && rc=4
+exit "$rc"
