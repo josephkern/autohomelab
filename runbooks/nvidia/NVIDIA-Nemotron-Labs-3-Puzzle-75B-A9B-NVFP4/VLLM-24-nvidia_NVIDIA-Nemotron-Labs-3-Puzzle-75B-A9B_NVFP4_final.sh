@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # FINAL (campaign-selected) — promoted from runbooks/nvidia/NVIDIA-Nemotron-Labs-3-Puzzle-75B-A9B-NVFP4/20260709_mtp-n1_tuned.sh on 2026-07-09.
 # Result: MTP n=1 winner: chat c16 154.3->173.1 (+12%), c1 20.4->29.5 (+45%), coder c32 70.7->114.1 (+61%); 90-93%/77% accept c1/c16; quality lossless (mmlu 83.67); smoke 4/4. enforce-eager MEMORY-MANDATORY on GB10 (else ~160GB compile spike OOMs; user declined swap).
+#
+# CORRECTION 20260819 (measurement-validity audit, issue #1 §1): the **coder c32 +61%** in the
+# Result line above is NOT citable. Both operands are `status=void` rows (20260709-090400-coder
+# / 20260709-055023-coder), each starved at c1 and carrying survivorship at c32 — 114.06/70.69
+# reproduces the quoted figure exactly. The chat c16 (+12%) and c1 (+45%) gains that selected
+# this config are UNAFFECTED and rest on valid rows. See
+# research/review/AUDIT-measurement-validity.md.
 # Canonical config to serve. The *_tuned.sh experiment artifacts are kept intact as record.
 # TUNED VARIANT (mtp-n1) — base: runbooks/nvidia/NVIDIA-Nemotron-Labs-3-Puzzle-75B-A9B-NVFP4/baseline.sh
 # Deltas vs base: + `--speculative-config '{"method":"mtp","num_speculative_tokens":1}'` (native MTP, n=1).

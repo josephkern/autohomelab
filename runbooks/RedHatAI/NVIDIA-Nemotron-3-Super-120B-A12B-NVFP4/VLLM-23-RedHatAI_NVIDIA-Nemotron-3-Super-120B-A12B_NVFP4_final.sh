@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # FINAL (campaign-selected) — promoted from runbooks/RedHatAI/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/20260616_mtp-n1_tuned.sh on 2026-06-17.
 # Result: MTP spec-decode winner. chat c16=93.7/c32=120.5 (+24% vs baseline 75.5); coder c16=53.2/c32=22.2 (+43% vs baseline). smoke PASS; generative quality held greedy-lossless (gsm8k 59.4, mmlu_pro 74.2). Caveat: loglikelihood mmlu unavailable under spec-decode (NaN prompt_logprobs); use generative quality gate. Finalize coder c1 hang was a one-off GB10 transient (re-run clean).
+#
+# CORRECTION 20260819 (measurement-validity audit, issue #1 §1): the **coder** figures in the
+# Result line above are NOT citable. Both operands are `status=void` rows whose c32 level was
+# averaged over 4 and 1 completed requests respectively (20260617-035335-coder /
+# 20260615-180752-coder; 53.23/37.26 reproduces the quoted +43% exactly). The chat c16/c32
+# ranking that selected this config is UNAFFECTED and rests on valid rows. The coder numbers
+# should be re-measured with a stage budget that drains enough requests before being quoted
+# again. See research/review/AUDIT-measurement-validity.md.
 # Canonical config to serve. The *_tuned.sh experiment artifacts are kept intact as record.
 # TUNED VARIANT (mtp-n1) — base: runbooks/RedHatAI/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/baseline.sh
 # Deltas vs base: + `--speculative-config '{"method":"mtp","num_speculative_tokens":1}'` (enable native MTP).
