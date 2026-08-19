@@ -54,8 +54,8 @@ VLLM_ENTRYPOINT_SERVE=true   # image ENTRYPOINT already runs `vllm serve`
 VLLM_FLAGS=(
   # --- performance (tuned by the loop) ---
   --tensor-parallel-size 1
-  --gpu-memory-utilization 0.5
-  --max-model-len 8192
+  --gpu-memory-utilization 0.6
+  --max-model-len 262144
   --speculative-config '{"method":"mtp","num_speculative_tokens":3}'
   # --- functional (serving features; CONFIRMED against the model card; smoke.sh validates) ---
   --override-generation-config '{"temperature":1.0,"top_p":0.95,"top_k":20}'   # model-recommended THINKING-mode sampling (generation_config.json + card)
@@ -78,3 +78,23 @@ AHL_THINK_OFF_KWARGS='{"enable_thinking": false}'
 #   - This repo ships model_mtp.safetensors, so --speculative-config '{"method":"mtp",...}' is
 #     available. The Inferact campaign's answer was n=3 (+43.8% c16); re-verify rather than assume,
 #     since the optimum is checkpoint-dependent.
+
+# ── SERVING PROFILE CHANGE 20260819 (post-promotion, user directive) ──────────────────────────
+# --gpu-memory-utilization 0.5 -> 0.6 and --max-model-len 8192 -> 262144 (model native).
+#
+# WHY: the deployment is one long-context orchestrator (>66k) fanning out to short-context
+# subagents. --max-model-len is a CEILING, not a reservation — vLLM allocates KV per token as
+# sequences grow — so raising it costs nothing for short sequences and simply permits the
+# orchestrator to grow. util 0.6 buys pool headroom for the fan-out.
+#
+# CAPACITY (from the engine-reported 283,989 tokens at util 0.5, measured 20260819):
+#   util 0.5 -> ~283,900 live tokens      util 0.6 -> ~377,300 live tokens
+#   a 128k orchestrator at util 0.6 leaves room for ~30 concurrent 8k subagents
+#   at 256k context: 1 session at util 0.5, still only 1 at util 0.6 (2 needs util ~0.76)
+#
+# ⚠ NOT RE-VALIDATED AT THESE SETTINGS. All three gates were passed at util 0.5 / ctx 8192
+# (SUITE-de23b412.md). This file therefore no longer matches the configuration that was gated.
+# Known risks: (1) our single util 0.6 datapoint (Inferact, 20260816) cost 12.2 GB of shared pool
+# for -0.6% c16 — on unified memory that pressure lands on the OS, not just the GPU; (2) no smoke,
+# eval or bench has been run at ctx 262144. Re-run `scripts/suite.sh` on this file before treating
+# it as gate-validated again.
