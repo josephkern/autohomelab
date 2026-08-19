@@ -18,13 +18,39 @@
 # launcher's NP must cover the highest level in LEVELS_SET. This script warns when it can detect a
 # mismatch from the server cmdline.
 #
+# VALIDITY (docs/validity-contract.md): the row carries req_counts/validity/knobs and the status
+# is downgraded to `suspect`/`void` when the invariants fail; exit 4 = "the numbers are not
+# citable", exit 3 = "the box broke" (a crash outranks a validity verdict). The verdict rules live
+# ONLY in scripts/lib/validity.py behind the scripts/lib/validity.sh shim — nothing here
+# re-implements them. This is the gate the FF711 coder sweep needed: 180 s at 4096/1024 on a
+# ~20 tok/s dense model drained 2–5 requests per level and produced a curve (c1 27.57 -> c4 121.23
+# -> c8 47.72) that looked like a measurement, was written `measured`, and was caught only by a
+# human reading successful-counts out of the bundle afterwards.
+#
+# `knobs` is where a host-process backend earns its provenance: config_hash is computed from the
+# runbook stub, which carries no launcher settings, so two llama.cpp configs differing in NP/CTX/
+# quant/spec share a hash (AGENTS.md follow-up). The knob string below is read off the RUNNING
+# server's cmdline, including the derived ctx_per_slot that makes the `CTX = CTX_PER_SLOT * NP`
+# trap visible in the journal instead of only in the launcher.
+#
 # Env: TAG (required, lands in notes), LEVELS_SET (default 1,16), MAX_SECONDS (180), SEED (42),
 #      TEMP (0 — pinned greedy so A/Bs are de-noised; llama.cpp's own default is the model's),
 #      AHL_HOST/AHL_PORT (127.0.0.1:8000), LCPP_DIR (~/code/llama.cpp), NOTES (extra note text).
+#      Validity thresholds (AHL_MIN_DATA / AHL_MIN_SUCCESSFUL / AHL_MIN_MODEL_GB) are read by the
+#      library, not here.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 [ -f "$REPO_ROOT/.env" ] && set -a && source "$REPO_ROOT/.env" && set +a
+# Validity library (docs/validity-contract.md §1 — the ONLY implementation of the rules):
+#   $AHL_RESULTS_HEADER                              the 23-column header string
+#   ahl_validity <bundle_dir> <levels_csv> <tps_csv> stdout "<req_counts>\t<validity>";
+#                                                    exit 0=ok 1=suspect 2=fatal.
+#   levels_csv/tps_csv are PARALLEL over the levels actually attempted (a hung level appears with
+#   tps `hang` and no json). Sourced, so it may read REPO_ROOT/NODE_FP from this scope.
+[ -f "$SCRIPT_DIR/lib/validity.sh" ] || { echo "missing scripts/lib/validity.sh — see docs/validity-contract.md" >&2; exit 1; }
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/validity.sh"
 
 TAG="${TAG:?set TAG=<config-slug> (e.g. q5km-mtp, q5km-regular, np16)}"
 STUB="${1:?usage: TAG=<slug> bench_llamacpp.sh <runbook-stub.sh> [shape ...]}"; shift || true
@@ -71,11 +97,28 @@ if [ -n "$NP" ] && [ "$NP" -lt "$MAXLVL" ]; then
   echo "         levels above $NP measure queue latency, not engine throughput." >&2
 fi
 
+# ── Effective launcher knobs (the `knobs` column) ─────────────────────────────
+# Same grep-off-the-cmdline style as CONFIG_HASH/NP above, recorded in plain text so a row is
+# readable without re-deriving anything. config_hash says "different"; these say "different HOW".
+SRV_CTX="$(printf '%s' "$SRV_CMD" | grep -oP '(?<=-c )\d+|(?<=--ctx-size )\d+' | head -1 || true)"
+SRV_NGL="$(printf '%s' "$SRV_CMD" | grep -oP '(?<=-ngl )\d+|(?<=--n-gpu-layers )\d+' | head -1 || true)"
+SRV_FA="$(printf '%s' "$SRV_CMD" | grep -oP '(?<=-fa )\S+|(?<=--flash-attn )\S+' | head -1 || true)"
+SRV_SPEC="$(printf '%s' "$SRV_CMD" | grep -oP '(?<=--spec-type )\S+' | head -1 || true)"
+SRV_DRAFT="$(printf '%s' "$SRV_CMD" | grep -oP '(?<=--spec-draft-n-max )\d+' | head -1 || true)"
+# CTX is TOTAL across slots — the per-slot figure is the number that actually sizes KV, and the
+# `CTX = CTX_PER_SLOT * NP` coupling is a documented foot-gun (raising NP alone doubles KV and
+# swapped this box). Derive it so the journal shows it without re-reading the launcher.
+SRV_CTX_PER_SLOT=na
+if [ -n "$SRV_CTX" ] && [ -n "$NP" ] && [ "$NP" -gt 0 ]; then SRV_CTX_PER_SLOT=$(( SRV_CTX / NP )); fi
+if printf '%s' "$SRV_CMD" | grep -q 'enable_thinking'; then SRV_THINK="off"; else SRV_THINK="on"; fi
+
+# GuideLLM version comes from the lockfile (charter: pinned) — no network, no venv resolution.
+GLLM_VER="$(awk '/^name = "guidellm"$/{f=1} f && /^version = /{gsub(/"/,"",$3); print $3; exit}' "$REPO_ROOT/uv.lock" 2>/dev/null || true)"
+
 OUT_DIR="$REPO_ROOT/results/$NODE_FP/$ORG/$NAME"
 TSV="$OUT_DIR/results.tsv"
 mkdir -p "$OUT_DIR/data"
-HEADER=$'run_id\tcommit\tnode_fp\tmodel\tshape\tbackend\tconfig_hash\tscript\tload_s\tmax_s\tseed\ttps_c1\ttps_c4\ttps_c8\ttps_c16\ttps_c32\tpeak_gb\tstatus\tnotes\tdata'
-[ -f "$TSV" ] || printf '%s\n' "$HEADER" > "$TSV"
+[ -f "$TSV" ] || printf '%s\n' "$AHL_RESULTS_HEADER" > "$TSV"
 
 peak_gb() { awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}END{printf "%.1f",(t-a)/1048576}' /proc/meminfo; }
 
@@ -94,6 +137,7 @@ run_level() {  # <bundle> <level> <data>: sets TPS_OUT; returns 0 ok / 3 crash
   return 0
 }
 
+rc_all=0
 for shape in "${SHAPES[@]}"; do
   case "$shape" in
     chat)  prompt=512;  output=256 ;;
@@ -107,24 +151,56 @@ for shape in "${SHAPES[@]}"; do
   data="prompt_tokens=${prompt},prompt_tokens_stdev=$((prompt/4)),prompt_tokens_min=$((prompt/2)),prompt_tokens_max=$((prompt*2)),"
   data+="output_tokens=${output},output_tokens_stdev=$((output/4)),output_tokens_min=$((output/4)),output_tokens_max=$((output*2))"
 
+  # Effective knob set for THIS row: contract-order base knobs, then the llama.cpp launcher's own.
+  # stall=na — a host process has no docker-log watchdog, so bench.sh's STALL_SECS has no analogue.
+  knobs="levels=${LEVELS_SET:-1,16},max_s=$MAX_SECONDS,seed=$SEED,prompt=$prompt,output=$output"
+  knobs+=",temp=$TEMP,stall=na,ltimeout=$LEVEL_TIMEOUT,gllm=${GLLM_VER:-na}"
+  knobs+=",quant=$QUANT,np=${NP:-na},ctx=${SRV_CTX:-na},ctx_per_slot=$SRV_CTX_PER_SLOT"
+  knobs+=",ngl=${SRV_NGL:-na},fa=${SRV_FA:-na},spec=${SRV_SPEC:-off},draft=${SRV_DRAFT:-na},think=$SRV_THINK"
+
   echo "== llamacpp $TAG: $shape (p$prompt/o$output) @ c${LEVELS[*]} (max_s=$MAX_SECONDS, seed=$SEED, temp=$TEMP) ==" >&2
   echo "   gguf: $QUANT${NP:+  np=$NP}" >&2
   tps=(na na na na na); status="measured"; peak=0
+  ran_levels=(); ran_tps=()          # parallel arrays over ATTEMPTED levels — the validity input
   for level in "${LEVELS[@]}"; do
     idx="$(col_index "$level")"; [ "$idx" -ge 0 ] || continue
     if run_level "$bundle" "$level" "$data"; then
       tps[idx]="$TPS_OUT"
+      ran_levels+=("$level"); ran_tps+=("$TPS_OUT")
       echo "   c$level = $TPS_OUT tok/s" >&2
     else
       tps[idx]="hang"; status="crash"
+      ran_levels+=("$level"); ran_tps+=("hang")   # a hung level WAS run: its missing json is a verdict
       echo "   c$level = CRASH/hang (see $bundle/level_c$level.log)" >&2
       break
     fi
     p="$(peak_gb)"; awk -v a="$p" -v b="$peak" 'BEGIN{exit !(a>b)}' && peak="$p"
   done
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+
+  # Validity: rules live in the library. We consume the verdict, we do not classify it.
+  set +e
+  v_out="$(ahl_validity "$bundle" "$(IFS=,; echo "${ran_levels[*]-}")" "$(IFS=,; echo "${ran_tps[*]-}")")"
+  v_rc=$?
+  set -e
+  case "$v_out" in
+    *$'\t'*) req_counts="${v_out%%$'\t'*}"; validity="${v_out#*$'\t'}" ;;
+    *)       req_counts="na"; validity="${v_out:-na}" ;;
+  esac
+  : "${req_counts:=na}"; : "${validity:=na}"     # contract: a column value is never empty
+  case "$v_rc" in
+    0) ;;
+    1) [ "$status" = crash ] || status="suspect" ;;   # suspect verdict(s)
+    *) [ "$status" = crash ] || status="void" ;;      # fatal verdict(s), or the library itself failed
+  esac
+  if [ "$status" = crash ]; then rc_all=3                       # the box broke: outranks validity
+  elif [ "$v_rc" -ne 0 ] && [ "$rc_all" -eq 0 ]; then rc_all=4  # numbers are not citable
+  fi
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$run_id" "$COMMIT" "$NODE_FP" "$ORG/$NAME" "$shape_tag" "$BACKEND" "$CONFIG_HASH" "$SCRIPT_REL" \
     "na" "$MAX_SECONDS" "$SEED" "${tps[0]}" "${tps[1]}" "${tps[2]}" "${tps[3]}" "${tps[4]}" \
-    "$peak" "$status" "cfg=$TAG quant=$QUANT${NP:+ np=$NP} temp=$TEMP${NOTES:+ $NOTES}" "$data_rel" >> "$TSV"
-  echo "row appended: $TSV ($run_id, $status)" >&2
+    "$peak" "$req_counts" "$validity" "$knobs" \
+    "$status" "cfg=$TAG quant=$QUANT${NP:+ np=$NP} temp=$TEMP${NOTES:+ $NOTES}" "$data_rel" >> "$TSV"
+  echo "row appended: $TSV ($run_id, $status, validity=$validity, req=$req_counts)" >&2
 done
+exit "$rc_all"
