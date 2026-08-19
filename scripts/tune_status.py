@@ -2,17 +2,20 @@
 """Leaderboard for the tuning loop: median tok/s per config, ranked, current best marked.
 
     uv run scripts/tune_status.py [--model RedHatAI/Qwen3-8B-NVFP4] [--shape chat] [--node <fp>]
-                                  [--include-void] [--include-suspect]
+                                  [--include-void] [--include-suspect] [--include-crash]
 
 Groups results.tsv rows by (config_hash, shape), takes the median c16 (objective) + c1 across that
 config's benches, ranks by median c16 desc, and marks the leader ★. This is how keep/discard is
 decided: a candidate is a "keep" only if its median c16 beats the current best beyond noise.
 
-Validity (docs/validity-contract.md §5): a median must never be taken over `void` or `suspect`
-rows. They are excluded from every median here and counted in the `void`/`susp` columns instead,
-so a config whose benches were all thrown out still shows up — with n=0 — rather than vanishing.
-`--include-void` / `--include-suspect` fold them back in and mark the row `!`. Rows are read via
-aggregate.py, which owns the schema-tolerant reader (23-column and 20-column legacy alike).
+Validity (docs/validity-contract.md §5): a median must never be taken over `void`, `suspect` or
+`crash` rows — crash is "non-valid for EVERY consumer" (§5 v1.1), and a crash row still carries
+real tok/s numbers in the levels that completed before the wedge, so it was leaking into medians
+whenever its `validity` happened to be `ok` or `na`. All three are excluded and counted in the
+`void`/`susp`/`crash` columns instead, so a config whose benches were all thrown out still shows
+up — with n=0 — rather than vanishing. `--include-void` / `--include-suspect` / `--include-crash`
+fold them back in and mark the row `!`. Rows are classified by `scripts/citability.py` (via
+aggregate.py), which also owns the schema-tolerant reader (23-column and 20-column legacy alike).
 """
 from __future__ import annotations
 
@@ -41,6 +44,8 @@ def main() -> None:
                     help="include status=void rows in the medians (contract: not data)")
     ap.add_argument("--include-suspect", action="store_true",
                     help="include status=suspect rows in the medians (contract: non-citable)")
+    ap.add_argument("--include-crash", action="store_true",
+                    help="include status=crash rows in the medians (contract §5: non-valid)")
     args = ap.parse_args()
 
     rows = load_rows()
@@ -58,15 +63,18 @@ def main() -> None:
             continue
         g = groups[(r["config_hash"], r["shape"], r.get("max_s", "na"))]
         g["script"] = r["script"]
-        if r["status"] == "crash":
-            g["crash"] += 1
 
+        # ONE classification decides both the count and the exclusion. `crash` used to be counted
+        # from `status` here and then classified separately, so a crash row with validity `ok`/`na`
+        # was counted in the crash column AND folded into the median.
         cite = citability(r)
+        include = {"void": args.include_void, "suspect": args.include_suspect,
+                   "crash": args.include_crash}
         if cite != "ok":
-            g[{"void": "void", "suspect": "susp"}[cite]] += 1
+            g[{"void": "void", "suspect": "susp", "crash": "crash"}[cite]] += 1
             flagged += 1
             why.update(verdict_tokens(r))
-            if not (args.include_void if cite == "void" else args.include_suspect):
+            if not include.get(cite, False):
                 hidden += 1
                 continue  # never let a non-citable number into a median
 
@@ -89,18 +97,19 @@ def main() -> None:
 
     print(f"{'':2}{'config':9} {'shape':16} {'max_s':>5} {'c1':>7} {'c16*':>7} {'c32':>7} "
           f"{'n':>3} {'crash':>5} {'void':>4} {'susp':>4}  script")
-    folded = args.include_void or args.include_suspect
+    folded = args.include_void or args.include_suspect or args.include_crash
     for i, (_, cfg, shape, max_s, c1, c16, c32, n, crash, void, susp, script) in enumerate(table):
         star = "★" if i == 0 and c16 is not None else " "
-        flag = "!" if folded and (void or susp) else " "
+        flag = "!" if folded and (void or susp or crash) else " "
         print(f"{star}{flag}{cfg:9} {shape:16} {str(max_s):>5} {str(c1):>7} {str(c16):>7} "
               f"{str(c32):>7} {n:>3} {crash:>5} {void:>4} {susp:>4}  {script}")
     print("\n★ = current best by median c16 (the tuning objective). "
           "n = benches contributing to the medians"
-          + (" (void/suspect FOLDED IN, rows marked !)." if folded else "; void/susp are excluded."))
+          + (" (void/suspect/crash FOLDED IN, rows marked !)." if folded
+             else "; void/susp/crash are excluded."))
     reasons = ", ".join(f"{t}x{n}" for t, n in sorted(why.items())) or "none"
     print(f"validity: {flagged} flagged row(s) [{reasons}], {hidden} excluded from the medians"
-          + ("." if folded else "; --include-void/--include-suspect to fold them in."),
+          + ("." if folded else "; --include-void/--include-suspect/--include-crash to fold them in."),
           file=sys.stderr)
 
 

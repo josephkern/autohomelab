@@ -25,11 +25,26 @@
 # The report carries an explicit SUITE VERDICT and the Gate-3 rows' `status`/`validity`/`req_counts`
 # (docs/validity-contract.md). A Gate-3 measurement-validity failure is a FAIL — never a pass with a
 # plausible number attached — whether it arrives as bench.sh exit 4 or as a `void`/`suspect` row.
-# Exit: 0 all gates pass · 1 other gate failure · 3 Gate-3 crash/hang · 4 Gate-3 numbers not citable.
+# Exit, in the repo-wide precedence 3 > 4 > 1 > 0: 3 Gate-3 crash/hang · 4 Gate-3 numbers not
+# citable · 1 any other gate failure · 0 all gates pass. A gate-1/2 failure never MASKS a
+# non-citable Gate 3 — the codes latch upward, they do not overwrite.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ADAPTER="$REPO_ROOT/backends/vllm/adapter.sh"
+
+# Charter rule 4: python via uv when available; citability.py is stdlib-only so python3 is a
+# correct fallback.
+ahl_py() {
+  if [ -n "${AHL_PYTHON:-}" ]; then
+    # shellcheck disable=SC2086
+    $AHL_PYTHON "$@"
+  elif command -v uv >/dev/null 2>&1; then
+    uv run --project "$REPO_ROOT" --quiet python "$@"
+  else
+    python3 "$@"
+  fi
+}
 
 RUNBOOK="${1:?usage: suite.sh <runbook.sh>}"
 [ -f "$RUNBOOK" ] || { echo "not found: $RUNBOOK" >&2; exit 1; }
@@ -157,21 +172,22 @@ if [ "$REASONING" = 1 ]; then
 fi
 
 # ── Summary report ────────────────────────────────────────────────────────────
-python3 - "$OUT_DIR" "$CFG" "$REPORT" "$DATE" "$smoke" "$gen" "$res" "$bench" "${LIMIT:-FULL}" \
-        "$(realpath --relative-to="$REPO_ROOT" "$RUNBOOK")" "$BENCH_DETAIL" "$BENCH_SINCE" <<'PY'
+ahl_py - "$OUT_DIR" "$CFG" "$REPORT" "$DATE" "$smoke" "$gen" "$res" "$bench" "${LIMIT:-FULL}" \
+        "$(realpath --relative-to="$REPO_ROOT" "$RUNBOOK")" "$BENCH_DETAIL" "$BENCH_SINCE" \
+        "$SCRIPT_DIR" <<'PY'
 import sys, csv, os
-out_dir, cfg, report, date, smoke, gen, res, bench, lim, rb, bench_detail, since = sys.argv[1:13]
-# Validity vocabulary — docs/validity-contract.md §3/§6. `status` is the adjudicated verdict,
-# `validity` the evidence; a row is judged on the worse of the two so a bench that recorded a
-# verdict without downgrading its status cannot be reported as a pass.
-FATAL = {'no_data', 'over_roofline'}
+out_dir, cfg, report, date, smoke, gen, res, bench, lim, rb, bench_detail, since, scripts_dir = sys.argv[1:14]
+sys.path.insert(0, scripts_dir)   # this heredoc runs as `python -`, so scripts/ must be added
+# Row citability — docs/validity-contract.md §3/§5/§6. ONE implementation, in
+# scripts/citability.py, shared with promote.sh / validate.sh / run_experiment*.sh. The copy that
+# used to live here had all three of the family's defects: it tested level-TAGGED tokens against a
+# bare {'no_data','over_roofline'} set (so no fatal row ever graded `void`), it dropped `na`
+# alongside `ok` (so an unevaluable row read as citable), and `crash` reached `valid` whenever the
+# status column had been left alone. suite.sh judges rows ROW-WIDE (level=None): it is a
+# characterization report over the full 1..32 sweep, not a claim about one level.
+from citability import classify_row, VALID
 def classify(r):
-    st = (r.get('status') or '').strip().lower()
-    if st in ('void', 'suspect', 'crash'): return st
-    toks = [t for t in (r.get('validity') or '').replace('+', ' ').split() if t and t not in ('ok','na')]
-    if any(t in FATAL for t in toks): return 'void'
-    if toks: return 'suspect'
-    return 'valid'
+    return classify_row(r)
 def rows(p):
     try: return list(csv.DictReader(open(p), delimiter='\t'))
     except FileNotFoundError: return []
@@ -189,7 +205,7 @@ for r in rows(os.path.join(out_dir,'accuracy.tsv')):
     if r.get('config_hash')==cfg:
         acc[(r.get('suite','?'), r.get('tasks',''), r.get('think','on'))]=r
 
-bad_rows = {s: classify(r) for s,r in tps.items() if classify(r)!='valid'}
+bad_rows = {s: classify(r) for s,r in tps.items() if classify(r)!=VALID}
 gate3_pass = (bench=='ok') and not bad_rows
 gate1_pass = (smoke=='PASS')
 gate2_pass = (gen=='ok' and res=='ok')
@@ -217,7 +233,7 @@ if tps:
     L.append("|---|---|---|---|---|---|---|---|---|")
     for shape,r in sorted(tps.items()):
         v = classify(r)
-        mark = '' if v=='valid' else ' ⚠'
+        mark = '' if v==VALID else ' ⚠'
         label = shape + mark + (' _(stale — not from this run)_' if r.get('_stale') else '')
         L.append(f"| {label} | {r.get('tps_c1','')} | {r.get('tps_c4','')} | {r.get('tps_c8','')} | "
                  f"{r.get('tps_c16','')} | {r.get('tps_c32','')} | {r.get('status','na')} | "
@@ -236,15 +252,28 @@ PY
 log "=== SUITE DONE — report: $(realpath --relative-to="$REPO_ROOT" "$REPORT") ==="
 cat "$REPORT" >&2
 
-# Exit code: 0 all gates pass · 3 Gate-3 crash/hang (the box broke) · 4 Gate-3 measurement invalid
-# (the run finished but its numbers are not citable) · 1 any other gate failure.
+# ── Exit code — the repo-wide precedence, LATCHED (docs/validity-contract.md §5) ──
+#   3 (crash: the box broke) > 4 (the row is written but not citable) > 1 (a gate failed) > 0
+# This used to protect only rc 3: `[ "$rc_suite" = 3 ] || rc_suite=1` DOWNGRADED a Gate-3 exit 4
+# to 1 whenever any other gate also failed, so "the throughput numbers are not data" was reported
+# to the caller as an ordinary gate failure — the quieter, more corrosive signal lost to the
+# louder one. `latch` can only ever move the code UP the precedence, so no later branch can undo
+# an earlier verdict, whatever order the branches run in.
+_prec(){ case "$1" in 3) echo 3 ;; 4) echo 2 ;; 0) echo 0 ;; *) echo 1 ;; esac; }
 rc_suite=0
+latch(){ [ "$(_prec "$1")" -gt "$(_prec "$rc_suite")" ] && rc_suite="$1"; return 0; }
+
 case "$bench" in
-  crash)   rc_suite=3 ;;
-  invalid) rc_suite=4 ;;
+  crash)   latch 3 ;;
+  invalid) latch 4 ;;
 esac
 if [ "$smoke" != PASS ] || [ "$gen" != ok ] || [ "$res" != ok ] || [ "$bench" = error ] || [ "$bench" = serve_fail ]; then
-  [ "$rc_suite" = 3 ] || rc_suite=1
+  latch 1
 fi
-grep -q '^- \*\*SUITE VERDICT: PASS\*\*' "$REPORT" || { [ "$rc_suite" != 0 ] || rc_suite=4; }
+# Backstop: the report is the artifact humans read, so a FAIL verdict there must never leave a 0
+# exit behind. It only fires when nothing else latched — a verdict already on the ladder is more
+# specific than "the report says FAIL", and this must never PROMOTE a 1 into a 4.
+if ! grep -q '^- \*\*SUITE VERDICT: PASS\*\*' "$REPORT"; then
+  [ "$rc_suite" = 0 ] && latch 4
+fi
 exit "$rc_suite"
