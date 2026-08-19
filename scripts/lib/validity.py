@@ -8,6 +8,17 @@ run_experiment.sh all consume the schema and the verdicts from here.
 Stdlib only, on purpose: this module must be importable and runnable in any context that can
 run python, including from inside a bash shim during a benchmark.
 
+Amendment batch 1 (orchestrator, 2026-08-19) is folded in:
+  1. low_sample is a TOKENS-generated rule, not a request-count rule (A9: request count does
+     not correlate with reproducibility; CV is 0.39% at n<10 vs 0.56% at 20<=n<50).
+  2. new `survivorship` verdict — GuideLLM's successful.mean silently drops the slow half.
+  3. per-level verdict tokens carry their level: `low_sample@c1`, `no_data@c32`.
+  4. hung levels are SCORED, not skipped; a level is "run" if the journal published a cell
+     OR a bundle file exists.
+  5. `nonmonotonic` is ADJACENT-ONLY.
+  6. knobs list values join with `|`, never a comma.
+  7. AHL_ROOFLINE_SAFETY 2.0 -> 3.0 (MTP accepted length reaches 2.69 on this node).
+
 CLI:
     python3 scripts/lib/validity.py check --bundle DIR --levels 1,16 \
         --tps 41.2,na,na,151.5,na [--node-profile P] [--model-gb G]
@@ -30,13 +41,16 @@ __all__ = [
     "RESULTS_COLS", "LEGACY_COLS", "NEW_COLS", "RESULTS_HEADER", "LEGACY_HEADER",
     "LEVEL_COLUMNS", "level_col_index",
     "LevelCounts", "LevelParseError", "parse_level_json", "scan_bundle",
-    "verdicts", "format_validity", "parse_validity", "status_floor", "apply_status",
+    "verdicts", "format_validity", "parse_validity", "parse_validity_pairs",
+    "split_verdict", "verdict_base", "verdict_level", "tag_verdict",
+    "status_floor", "apply_status",
     "format_req_counts", "parse_req_counts", "format_knobs", "parse_knobs",
-    "ceiling", "make_ceiling_fn", "read_mem_bw", "parse_tps",
-    "AHL_MIN_DATA", "AHL_MIN_SUCCESSFUL", "AHL_DROP_TOL", "AHL_ERR_TOL",
+    "ceiling", "make_ceiling_fn", "read_mem_bw", "parse_tps", "min_requests_for_level",
+    "AHL_MIN_DATA", "AHL_MIN_SUCCESSFUL", "AHL_MIN_TOKENS", "AHL_DROP_TOL", "AHL_ERR_TOL",
     "AHL_ROOFLINE_SAFETY", "AHL_MIN_MODEL_GB",
     "V_OK", "V_NO_DATA", "V_LOW_SAMPLE", "V_OVER_ROOFLINE", "V_NONMONOTONIC", "V_ERRORED",
-    "VERDICT_ORDER", "FATAL_VERDICTS", "SUSPECT_VERDICTS",
+    "V_SURVIVORSHIP",
+    "VERDICT_ORDER", "FATAL_VERDICTS", "SUSPECT_VERDICTS", "ROW_WIDE_VERDICTS",
     "STATUS_MEASURED", "STATUS_KEEP", "STATUS_DISCARD", "STATUS_CRASH",
     "STATUS_SUSPECT", "STATUS_VOID", "STATUS_VOCAB",
     "NA",
@@ -48,15 +62,20 @@ NA = "na"
 # Tunable constants (contract sections 3 and 4). Overridable two ways, in order:
 #   1. the environment variable of the same name
 #   2. reassigning the module attribute (tests, callers)
-# Reads happen at CALL time, so exporting AHL_MIN_SUCCESSFUL=40 before invoking
+# Reads happen at CALL time, so exporting AHL_MIN_TOKENS=4096 before invoking
 # bench.sh changes the verdicts for that run.
 # ---------------------------------------------------------------------------
-AHL_MIN_DATA = 5            # successful < this  -> no_data     (fatal)
-AHL_MIN_SUCCESSFUL = 20     # successful < this  -> low_sample  (suspect)
-AHL_DROP_TOL = 0.10         # higher level > this fraction below a lower one -> nonmonotonic
+AHL_MIN_DATA = 5            # successful < this -> no_data (fatal). MUST NOT MOVE: this is
+                            # what catches contract section 0 defect (a), the 2-request level.
+AHL_MIN_TOKENS = 2048       # successful * mean_output_tokens < this -> low_sample
+AHL_MIN_SUCCESSFUL = 20     # request-count CEILING of the low_sample floor; the effective
+                            # floor is max(AHL_MIN_DATA, min(AHL_MIN_SUCCESSFUL, 4*level))
+AHL_DROP_TOL = 0.10         # an ADJACENT higher level this far below its predecessor -> nonmonotonic
 AHL_ERR_TOL = 0.10          # errored / (successful+errored) > this -> errored
-AHL_ROOFLINE_SAFETY = 2.0   # SAFETY multiplier on the bandwidth roofline
-AHL_MIN_MODEL_GB = 1.0      # fallback bytes-per-token (GB) when the model size is unknown
+AHL_ROOFLINE_SAFETY = 3.0   # SAFETY multiplier on the bandwidth roofline
+AHL_MIN_MODEL_GB = 1.0      # fallback bytes-per-token (GB) when the model size is unknown.
+                            # Stays 1.0: deriving bytes/token from checkpoint size voids
+                            # healthy rows (MoE active experts, vision towers) -- A5/A6.
 
 
 def _cfg(name: str, cast):
@@ -114,14 +133,16 @@ V_LOW_SAMPLE = "low_sample"
 V_OVER_ROOFLINE = "over_roofline"
 V_NONMONOTONIC = "nonmonotonic"
 V_ERRORED = "errored"
+V_SURVIVORSHIP = "survivorship"
 
-# Emission order == the order of the contract's section 3 table, so that
-# `low_sample+nonmonotonic` in the contract's own example is exactly what we print.
+# Emission order: the contract's section 3 table, with `survivorship` appended.
 VERDICT_ORDER: tuple[str, ...] = (
-    V_NO_DATA, V_LOW_SAMPLE, V_OVER_ROOFLINE, V_NONMONOTONIC, V_ERRORED,
+    V_NO_DATA, V_LOW_SAMPLE, V_OVER_ROOFLINE, V_NONMONOTONIC, V_ERRORED, V_SURVIVORSHIP,
 )
 FATAL_VERDICTS = frozenset({V_NO_DATA, V_OVER_ROOFLINE})
-SUSPECT_VERDICTS = frozenset({V_LOW_SAMPLE, V_NONMONOTONIC, V_ERRORED})
+SUSPECT_VERDICTS = frozenset({V_LOW_SAMPLE, V_NONMONOTONIC, V_ERRORED, V_SURVIVORSHIP})
+# Verdicts that describe the ROW, not one level -- these stay bare (untagged).
+ROW_WIDE_VERDICTS = frozenset({V_OK, V_NONMONOTONIC})
 
 STATUS_MEASURED = "measured"
 STATUS_KEEP = "keep"
@@ -132,6 +153,47 @@ STATUS_VOID = "void"
 STATUS_VOCAB = (
     STATUS_MEASURED, STATUS_KEEP, STATUS_DISCARD, STATUS_CRASH, STATUS_SUSPECT, STATUS_VOID,
 )
+
+# ---------------------------------------------------------------------------
+# Level-tagged verdict tokens (amendment 3):  low_sample@c1, no_data@c32
+# ---------------------------------------------------------------------------
+_TAGGED = re.compile(r"^([a-z_]+)@c(\d+)$")
+
+
+def tag_verdict(base: str, level=None) -> str:
+    """`low_sample` + level 1 -> `low_sample@c1`. Row-wide verdicts are never tagged."""
+    if level is None or base in ROW_WIDE_VERDICTS:
+        return base
+    return "%s@c%d" % (base, int(level))
+
+
+def split_verdict(token: str):
+    """`low_sample@c1` -> ("low_sample", 1); `nonmonotonic` -> ("nonmonotonic", None).
+
+    The one helper A4/A7 should use — do not hand-roll a splitter.
+    """
+    tok = (token or "").strip()
+    m = _TAGGED.match(tok)
+    if m:
+        return m.group(1), int(m.group(2))
+    return tok, None
+
+
+def verdict_base(token: str) -> str:
+    return split_verdict(token)[0]
+
+
+def verdict_level(token: str) -> Optional[int]:
+    return split_verdict(token)[1]
+
+
+def _verdict_sort_key(token: str):
+    base, lvl = split_verdict(token)
+    try:
+        rank = VERDICT_ORDER.index(base)
+    except ValueError:
+        rank = len(VERDICT_ORDER)
+    return (rank, -1 if lvl is None else lvl, base)
 
 
 # ---------------------------------------------------------------------------
@@ -147,13 +209,15 @@ class LevelCounts:
 
     `ok` / `incomplete` / `errored` are REQUEST counts read from
     `.benchmarks[0].metrics.request_concurrency.<kind>.count`.
-    `tps` is `.benchmarks[0].metrics.output_tokens_per_second.successful.mean`
-    (None when absent or non-finite).
+    `tps` is `.benchmarks[0].metrics.output_tokens_per_second.successful.mean`.
+    `out_tokens` is `.benchmarks[0].metrics.output_token_count.successful.mean` — the mean
+    output tokens per SUCCESSFUL request, which is what the token-budget low_sample rule
+    needs. Both are None when absent or non-finite.
 
-    `missing` is a 5th field WITH A DEFAULT, so the 4-positional construction named in the
-    API spec -- LevelCounts(41, 0, 0, 12.3) -- is unchanged. It marks a level that WAS run
-    but whose json is missing/unparseable, which the contract treats as `no_data` while
-    still distinguishing it from a genuine zero in `req_counts` (`c32:na`).
+    `missing` and `out_tokens` are trailing fields WITH DEFAULTS, so the 4-positional
+    construction named in the original API spec -- LevelCounts(41, 0, 0, 12.3) -- still
+    works. `missing` marks a level that WAS run but whose json is missing/unparseable: the
+    contract's `no_data`, distinguished from a genuine zero by `c<N>:na` in `req_counts`.
     """
 
     ok: int = 0
@@ -161,10 +225,18 @@ class LevelCounts:
     errored: int = 0
     tps: Optional[float] = None
     missing: bool = False
+    out_tokens: Optional[float] = None
 
     @property
     def total(self) -> int:
         return self.ok + self.incomplete + self.errored
+
+    @property
+    def token_budget(self) -> Optional[float]:
+        """successful * mean_output_tokens, or None when the mean is unknown."""
+        if self.out_tokens is None or not math.isfinite(self.out_tokens) or self.out_tokens <= 0:
+            return None
+        return self.ok * self.out_tokens
 
 
 def _finite(value) -> Optional[float]:
@@ -193,12 +265,27 @@ def _count(node: Mapping, kind: str, required: bool) -> int:
             "metrics.request_concurrency.%s.count not an int" % kind) from exc
 
 
+def _mean(metrics: Mapping, metric: str, kind: str = "successful") -> Optional[float]:
+    node = metrics.get(metric)
+    if not isinstance(node, Mapping):
+        return None
+    sub = node.get(kind)
+    if not isinstance(sub, Mapping):
+        return None
+    return _finite(sub.get("mean"))
+
+
 def parse_level_json(path) -> LevelCounts:
     """Read one GuideLLM per-level bundle. Raises LevelParseError if it is not usable.
 
     Field paths verified against all 693 retained bundles on node gb10-1988a9714b4e
-    (GuideLLM 0.6.0): every one has exactly one entry in `benchmarks[]` and all four
-    source fields present.
+    (GuideLLM 0.6.0): every one has exactly one entry in `benchmarks[]` and all of
+    request_concurrency.{successful,incomplete,errored}.count,
+    output_tokens_per_second.successful.mean and output_token_count.successful.mean present.
+
+    NOTE a trap for other readers: output_tokens_per_second.successful.`count` is a TOKEN
+    count (43055 on a 171-request level), not a request count. Request counts come only
+    from request_concurrency.
     """
     p = Path(path)
     try:
@@ -229,40 +316,69 @@ def parse_level_json(path) -> LevelCounts:
     incomplete = _count(rc, "incomplete", required=False)
     errored = _count(rc, "errored", required=False)
 
-    tps = None
-    otps = metrics.get("output_tokens_per_second")
-    if isinstance(otps, Mapping):
-        succ = otps.get("successful")
-        if isinstance(succ, Mapping):
-            tps = _finite(succ.get("mean"))
-
-    return LevelCounts(ok=ok, incomplete=incomplete, errored=errored, tps=tps)
+    return LevelCounts(
+        ok=ok, incomplete=incomplete, errored=errored,
+        tps=_mean(metrics, "output_tokens_per_second"),
+        out_tokens=_mean(metrics, "output_token_count"),
+    )
 
 
-def scan_bundle(bundle_dir, levels: Iterable,
-                tps: Optional[Mapping] = None) -> dict:
-    """Read `level_c<N>.json` for each RUN level.
+_LEVEL_FILE = re.compile(r"^level_c(\d+)\.json$")
 
-    A level whose json is absent or unparseable comes back as LevelCounts(missing=True) --
-    the contract's `no_data`. Levels NOT listed in `levels` are simply absent from the
-    result, so they are never mistaken for a zero.
 
-    `tps` optionally overrides the per-level tok/s with the value the caller is actually
-    writing into results.tsv (used only when that value is a finite number).
+def _cell_published(value) -> bool:
+    """Did the journal publish a cell for this level? `hang`/`crash` count as published
+    (amendment 4: hung levels are SCORED); `na`/empty/None do not."""
+    if value is None:
+        return False
+    s = str(value).strip().lower()
+    return s not in ("", NA, "none", "null")
+
+
+def scan_bundle(bundle_dir, levels: Iterable, tps: Optional[Mapping] = None,
+                discover: bool = True) -> dict:
+    """Read `level_c<N>.json` for every RUN level of one benchmark row.
+
+    Amendment 4 — a level counts as RUN if the journal published a cell for it OR a bundle
+    file exists for it (the union). So:
+      * a level that hung (cell `hang`, no json) IS scored, as `no_data@c<N>` — which is
+        what makes a crash row say WHICH level wedged;
+      * a level that was never attempted (cell `na`, no json) is dropped, never scored as
+        a zero;
+      * a bundle file present for a level the journal never mentions is picked up
+        (`discover=True`), which surfaces hand-corrected rows.
+    When `tps` is None the caller has supplied no journal information, so `levels` is taken
+    at face value and is authoritative (contract confirmation 8).
+
+    `tps` maps level -> the RAW results.tsv cell (float, or a string such as `151.5`,
+    `na`, `hang`). A numerically parseable cell also overrides the tok/s read from the
+    bundle, because the journal cell is what a reader will actually cite.
     """
     bundle = Path(bundle_dir)
+
+    on_disk: set = set()
+    if discover and bundle.is_dir():
+        for p in bundle.iterdir():
+            m = _LEVEL_FILE.match(p.name)
+            if m:
+                on_disk.add(int(m.group(1)))
+
+    candidates = set(int(x) for x in levels) | on_disk
     out: dict = {}
-    for raw in levels:
-        lvl = int(raw)
+    for lvl in sorted(candidates):
         try:
             counts = parse_level_json(bundle / ("level_c%d.json" % lvl))
         except LevelParseError:
             counts = LevelCounts(missing=True)
-        if tps is not None and lvl in tps:
-            override = _finite(tps[lvl])
+
+        if tps is not None:
+            published = _cell_published(tps.get(lvl))
+            if counts.missing and not published:
+                continue                      # never attempted -- not a zero, not scored
+            override = _finite(parse_tps(tps.get(lvl)))
             if override is not None:
                 counts = LevelCounts(counts.ok, counts.incomplete, counts.errored,
-                                     override, counts.missing)
+                                     override, counts.missing, counts.out_tokens)
         out[lvl] = counts
     return out
 
@@ -276,7 +392,8 @@ def ceiling(level, mem_bw_gbs, bytes_per_token_gb=None, safety=None) -> float:
     Returns +inf (i.e. the check can never trip) when `mem_bw_gbs` is missing or
     nonsensical -- never invent a bandwidth number (contract section 4).
     `bytes_per_token_gb` falls back to AHL_MIN_MODEL_GB when unknown, giving a loose but
-    sound bound. `safety` defaults to AHL_ROOFLINE_SAFETY (2.0).
+    sound bound. `safety` defaults to AHL_ROOFLINE_SAFETY (3.0 -- MTP accepted length
+    reaches 2.69 on this node, so 2.0 would fatally void a legitimate spec-decode config).
     """
     if safety is None:
         safety = _cfg("AHL_ROOFLINE_SAFETY", float)
@@ -322,63 +439,89 @@ def read_mem_bw(node_profile_path) -> Optional[float]:
 # ---------------------------------------------------------------------------
 # Section 3 -- verdicts
 # ---------------------------------------------------------------------------
+def min_requests_for_level(level) -> int:
+    """The request-count floor of the low_sample rule for one concurrency level:
+
+        max(AHL_MIN_DATA, min(AHL_MIN_SUCCESSFUL, 4 * level))
+
+    A c1 sentinel physically cannot produce 20 requests inside a 180 s stage, so a flat
+    floor of 20 declared 55% of this node's historical levels suspect. The token-budget
+    clause below is the primary precision test; this clause is the backstop.
+    """
+    min_data = _cfg("AHL_MIN_DATA", int)
+    cap = _cfg("AHL_MIN_SUCCESSFUL", int)
+    return max(min_data, min(cap, 4 * int(level)))
+
+
 def verdicts(levels: Mapping, ceiling_fn: Optional[Callable] = None) -> list:
     """The contract section 3 verdict tokens for one results.tsv row.
 
-    `levels` maps concurrency -> LevelCounts for the levels that were RUN. A key mapped to
-    None (or anything that is not a LevelCounts) is treated as UNRUN and skipped entirely:
-    an unrun level is never a zero. `ceiling_fn` is None when the roofline check must be
-    skipped (no mem_bw recorded for the node).
+    `levels` maps concurrency -> LevelCounts for the levels that were RUN (see scan_bundle
+    for what "run" means). A key mapped to None -- or to anything that is not a LevelCounts
+    -- is treated as UNRUN and skipped entirely: an unrun level is never a zero.
+    `ceiling_fn` is None when the roofline check must be skipped (no mem_bw for the node).
+
+    Per-level verdicts come back level-tagged (`low_sample@c1`); the row-wide
+    `nonmonotonic` stays bare. Use split_verdict() to take them apart.
     """
     min_data = _cfg("AHL_MIN_DATA", int)
-    min_ok = _cfg("AHL_MIN_SUCCESSFUL", int)
+    min_tokens = _cfg("AHL_MIN_TOKENS", float)
     drop_tol = _cfg("AHL_DROP_TOL", float)
     err_tol = _cfg("AHL_ERR_TOL", float)
 
     run = {int(k): v for k, v in (levels or {}).items() if isinstance(v, LevelCounts)}
-    found = set()
+    found: set = set()
 
     for lvl in sorted(run):
         c = run[lvl]
+
         # no_data and low_sample are mutually exclusive PER LEVEL -- report the more severe.
         if c.missing or c.ok < min_data:
-            found.add(V_NO_DATA)
-        elif c.ok < min_ok:
-            found.add(V_LOW_SAMPLE)
+            found.add(tag_verdict(V_NO_DATA, lvl))
+        else:
+            budget = c.token_budget
+            thin_tokens = budget is not None and budget < min_tokens
+            thin_requests = c.ok < min_requests_for_level(lvl)
+            if thin_tokens or thin_requests:
+                found.add(tag_verdict(V_LOW_SAMPLE, lvl))
 
         denom = c.ok + c.errored
         if denom > 0 and (c.errored / denom) > err_tol:
-            found.add(V_ERRORED)
+            found.add(tag_verdict(V_ERRORED, lvl))
+
+        # survivorship: GuideLLM's successful.mean drops the requests still in flight, and
+        # those are the SLOW ones -- so a level where at least as many requests were
+        # dropped as completed reports the mean of its faster half.
+        if not c.missing and c.incomplete >= c.ok:
+            found.add(tag_verdict(V_SURVIVORSHIP, lvl))
 
         if ceiling_fn is not None and c.tps is not None and not c.missing:
             cap = ceiling_fn(lvl)
             if cap is not None and math.isfinite(cap) and c.tps > cap:
-                found.add(V_OVER_ROOFLINE)
+                found.add(tag_verdict(V_OVER_ROOFLINE, lvl))
 
-    # nonmonotonic: ANY higher level more than AHL_DROP_TOL below ANY lower one.
+    # nonmonotonic (row-wide, ADJACENT-ONLY): each run level vs the previous run level.
+    # Pairwise-all would flag the gentle high-concurrency decay that is legitimate on a
+    # bandwidth-bound box.
     curve = [(lvl, run[lvl].tps) for lvl in sorted(run)
              if run[lvl].tps is not None and not run[lvl].missing]
-    for i, (_lo, t_lo) in enumerate(curve):
-        if t_lo is None or t_lo <= 0:
-            continue
-        if any(t_hi < t_lo * (1.0 - drop_tol) for _hi, t_hi in curve[i + 1:]):
+    for (_lo, t_lo), (_hi, t_hi) in zip(curve, curve[1:]):
+        if t_lo > 0 and t_hi < t_lo * (1.0 - drop_tol):
             found.add(V_NONMONOTONIC)
             break
 
-    out = [tok for tok in VERDICT_ORDER if tok in found]
-    return out or [V_OK]
+    return sorted(found, key=_verdict_sort_key) or [V_OK]
 
 
 def format_validity(verds: Iterable) -> str:
-    """`ok`, or the `+`-joined verdict tokens in contract order."""
+    """`ok`, or the `+`-joined verdict tokens in contract order then level order."""
     seen = {v for v in (verds or []) if v and v != V_OK}
-    ordered = [tok for tok in VERDICT_ORDER if tok in seen]
-    ordered.extend(sorted(seen - set(VERDICT_ORDER)))
-    return "+".join(ordered) if ordered else V_OK
+    return "+".join(sorted(seen, key=_verdict_sort_key)) if seen else V_OK
 
 
 def parse_validity(s: Optional[str]) -> list:
-    """Inverse of format_validity. `ok`/`na`/empty -> ["ok"]."""
+    """Inverse of format_validity, as raw (possibly level-tagged) tokens.
+    `ok`/`na`/empty -> ["ok"]."""
     if not s:
         return [V_OK]
     s = s.strip()
@@ -387,24 +530,32 @@ def parse_validity(s: Optional[str]) -> list:
     return [tok for tok in (p.strip() for p in s.split("+")) if tok]
 
 
+def parse_validity_pairs(s: Optional[str]) -> list:
+    """format_validity string -> [(base, level|None), ...]. For consumers that gate on the
+    level they actually cite, e.g. promote.sh ignoring `low_sample@c1` while honouring
+    `low_sample@c16`."""
+    return [split_verdict(tok) for tok in parse_validity(s)]
+
+
 # ---------------------------------------------------------------------------
 # Section 5 -- enforcement
 # ---------------------------------------------------------------------------
 def status_floor(verds: Iterable) -> str:
-    """`void` (any fatal verdict) / `suspect` (any suspect verdict) / `ok`."""
-    seen = set(verds or [])
-    if seen & FATAL_VERDICTS:
+    """`void` (any fatal verdict) / `suspect` (any suspect verdict) / `ok`.
+    Accepts level-tagged or bare tokens."""
+    bases = {verdict_base(v) for v in (verds or []) if v}
+    if bases & FATAL_VERDICTS:
         return "void"
-    if seen & SUSPECT_VERDICTS:
+    if bases & SUSPECT_VERDICTS:
         return "suspect"
     return "ok"
 
 
 def apply_status(current_status: Optional[str], floor: str) -> str:
     """Contract section 5 precedence. A crash ALWAYS wins: an already-`crash` row keeps
-    status=crash and records its verdict in `validity` instead. Otherwise a fatal floor
-    forces `void`, a suspect floor forces `suspect`, and an `ok` floor leaves the caller's
-    status untouched (`measured`, `keep`, `discard`, ...)."""
+    status=crash and records its verdict in `validity` instead (now level-tagged, so the
+    row says which level wedged). Otherwise a fatal floor forces `void`, a suspect floor
+    forces `suspect`, and an `ok` floor leaves the caller's status untouched."""
     cur = (current_status or "").strip() or STATUS_MEASURED
     if cur == STATUS_CRASH:
         return STATUS_CRASH
@@ -417,7 +568,8 @@ def apply_status(current_status: Optional[str], floor: str) -> str:
 
 # ---------------------------------------------------------------------------
 # Section 2 -- req_counts encoding: c1:41/0/0;c16:118/4/0
-# (`c<N>:na` = the level was run but its json is missing/unparseable)
+# Triple order is ok/incomplete/errored (confirmed). `c<N>:na` = the level was run but its
+# json is missing/unparseable.
 # ---------------------------------------------------------------------------
 _REQ_CHUNK = re.compile(r"^c(\d+):(?:na|(\d+)/(\d+)/(\d+))$")
 
@@ -433,8 +585,8 @@ def format_req_counts(levels: Mapping) -> str:
 
 
 def parse_req_counts(s: Optional[str]) -> dict:
-    """Inverse of format_req_counts. Counts round-trip exactly; `tps` is not carried by
-    the encoding and always comes back None."""
+    """Inverse of format_req_counts. Counts round-trip exactly; `tps` and `out_tokens` are
+    not carried by the encoding and always come back None."""
     out: dict = {}
     if s is None:
         return out
@@ -457,12 +609,14 @@ def parse_req_counts(s: Optional[str]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Section 2 -- knobs encoding: levels=1,16,max_s=180,seed=42,...
-# Values may themselves contain commas (`levels=1,16`), so the split is on a comma that
-# is FOLLOWED BY `key=`. That is the only unambiguous reading of the specified format.
+# Section 2 -- knobs encoding: levels=1|16,max_s=180,seed=42,...
+# Amendment 6: list values join with `|`, NEVER a comma, so no value can contain the pair
+# separator and a naive split(",") is always correct. The lookahead split below is kept as
+# belt-and-braces for hand-edited or legacy `levels=1,16` strings.
 # ---------------------------------------------------------------------------
 _KNOB_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\-]*$")
 _KNOB_SPLIT = re.compile(r",(?=[A-Za-z_][A-Za-z0-9_.\-]*=)")
+_LIST_SEP = "|"
 
 
 def _knob_value(v) -> str:
@@ -474,17 +628,22 @@ def _knob_value(v) -> str:
         s = repr(round(v, 6))
         if s.endswith(".0"):
             s = s[:-2]
-    elif isinstance(v, (list, tuple)):
-        s = ",".join(_knob_value(x) for x in v)
+    elif isinstance(v, (list, tuple, set, frozenset)):
+        items = sorted(v) if isinstance(v, (set, frozenset)) else list(v)
+        s = _LIST_SEP.join(_knob_value(x) for x in items)
     else:
         s = str(v)
     s = s.replace("\t", " ").replace("\r", " ").replace("\n", " ").strip()
+    # A comma inside a value would break the naive split(",") the format now guarantees.
+    s = s.replace(",", _LIST_SEP)
     return s if s else NA
 
 
 def format_knobs(**kw) -> str:
     """`k=v` comma-joined, in the order the kwargs were given. Empty -> `na`.
-    Tabs/newlines are stripped so a value can never break the TSV."""
+    List values join with `|` (`levels=1|16`); commas inside a value are rewritten to `|`
+    so split(",") is always safe. Tabs/newlines are stripped so a value can never break
+    the TSV."""
     parts = []
     for k, v in kw.items():
         if not _KNOB_KEY.match(k):
@@ -494,7 +653,9 @@ def format_knobs(**kw) -> str:
 
 
 def parse_knobs(s: Optional[str]) -> dict:
-    """Inverse of format_knobs. Values stay strings (`levels` keeps its embedded commas)."""
+    """Inverse of format_knobs. Values stay strings; a `|`-joined list stays joined (split
+    it yourself on `|` if you want the elements). The lookahead split also tolerates a
+    legacy `levels=1,16` written before amendment 6."""
     out: dict = {}
     if not s:
         return out
@@ -528,19 +689,19 @@ def parse_tps(value) -> Optional[float]:
 def _cmd_check(args) -> int:
     levels = [int(x) for x in str(args.levels).replace(" ", "").split(",") if x != ""]
 
-    tps_override: dict = {}
+    # Raw cells are kept as STRINGS: scan_bundle needs to tell `hang` (published -> the
+    # level was run and is scored) from `na` (never attempted -> dropped).
+    cells: dict = {}
     if args.tps:
-        cells = [c.strip() for c in str(args.tps).split(",")]
-        if len(cells) == len(levels) and len(cells) != len(LEVEL_COLUMNS):
-            # convenience form: one value per RUN level
-            for lvl, cell in zip(levels, cells):
-                tps_override[lvl] = parse_tps(cell)
+        raw = [c.strip() for c in str(args.tps).split(",")]
+        if len(raw) == len(levels) and len(raw) != len(LEVEL_COLUMNS):
+            for lvl, cell in zip(levels, raw):          # convenience: one per RUN level
+                cells[lvl] = cell
         else:
-            # documented form: the 5 fixed tps_c* cells, c1,c4,c8,c16,c32
-            for idx, cell in enumerate(cells[:len(LEVEL_COLUMNS)]):
-                tps_override[LEVEL_COLUMNS[idx]] = parse_tps(cell)
+            for idx, cell in enumerate(raw[:len(LEVEL_COLUMNS)]):   # the 5 fixed columns
+                cells[LEVEL_COLUMNS[idx]] = cell
 
-    counts = scan_bundle(args.bundle, levels, tps_override)
+    counts = scan_bundle(args.bundle, levels, cells if cells else None)
     cfn = make_ceiling_fn(read_mem_bw(args.node_profile), args.model_gb)
     verds = verdicts(counts, cfn)
     print(json.dumps({
@@ -582,6 +743,12 @@ def _cmd_knobs(args) -> int:
     return 0
 
 
+def _cmd_split(args) -> int:
+    base, lvl = split_verdict(args.token)
+    print("%s\t%s" % (base, NA if lvl is None else lvl))
+    return 0
+
+
 def main(argv: Optional[Sequence] = None) -> int:
     ap = argparse.ArgumentParser(
         prog="validity", description="measurement-validity rules (docs/validity-contract.md)")
@@ -608,6 +775,10 @@ def main(argv: Optional[Sequence] = None) -> int:
     k = sub.add_parser("knobs", help="normalize k=v pairs into the knobs string")
     k.add_argument("pairs", nargs="*")
     k.set_defaults(func=_cmd_knobs)
+
+    sp = sub.add_parser("split", help="split a verdict token into base + level")
+    sp.add_argument("token")
+    sp.set_defaults(func=_cmd_split)
 
     args = ap.parse_args(argv)
     return args.func(args)

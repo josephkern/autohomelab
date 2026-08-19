@@ -11,9 +11,14 @@
 #     ahl_level_counts "$bundle/level_c16.json"               # -> "118/4/0"; rc 1 if unparseable
 #     ahl_validity "$bundle" 1,16 "41.2,na,na,151.5,na" \
 #         --node-profile "$NP" --model-gb 6.5                 # -> "<validity>\t<req_counts>\t<floor>"
-#     ahl_knobs levels=1,16 max_s=180 seed=42                 # -> "levels=1,16,max_s=180,seed=42"
+#     ahl_knobs levels=1\|16 max_s=180 seed=42                # -> "levels=1|16,max_s=180,seed=42"
+#     ahl_split_verdict low_sample@c1                         # -> "low_sample<TAB>1"
 #
-# Extra (not part of the required API, but handy): $AHL_LEGACY_HEADER, $AHL_VALIDITY_PY.
+# Extra (not part of the required API, but handy): $AHL_LEGACY_HEADER, $AHL_VALIDITY_PY,
+# ahl_split_verdict.
+#
+# Verdict tokens are LEVEL-TAGGED (`low_sample@c1`, `no_data@c32`); the row-wide
+# `nonmonotonic` stays bare. Never split them by hand -- use ahl_split_verdict.
 #
 # Python interpreter: `uv run --project <repo>` per charter rule 4, falling back to a bare
 # python3 (validity.py is stdlib-only). Override wholesale with AHL_PYTHON="..." if needed.
@@ -98,8 +103,18 @@ _ahl_json3() {
 }
 
 # ahl_knobs k=v [k=v ...]
-#   Prints the normalized knobs string, e.g. "levels=1,16,max_s=180,seed=42".
-#   No pairs -> "na".
+#   Prints the normalized knobs string, e.g. "levels=1|16,max_s=180,seed=42".
+#   List values join with `|`, never a comma, so a naive split(",") on the result is
+#   always correct. Any comma inside a value is rewritten to `|`. No pairs -> "na".
 ahl_knobs() {
   _ahl_py knobs "$@"
+}
+
+# ahl_split_verdict <token>
+#   Splits one verdict token into "<base><TAB><level>"; <level> is `na` for the row-wide
+#   tokens (`ok`, `nonmonotonic`). e.g. `low_sample@c1` -> "low_sample<TAB>1".
+ahl_split_verdict() {
+  local tok="${1:-}"
+  [ -n "$tok" ] || { echo "ahl_split_verdict: usage: ahl_split_verdict <token>" >&2; return 2; }
+  _ahl_py split "$tok"
 }
