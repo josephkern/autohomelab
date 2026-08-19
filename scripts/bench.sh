@@ -23,6 +23,14 @@
 # verdict to `suspect`, and the run exits 4. Exit codes: 0 ok · 3 crash/hang · 4 validity failure.
 # A crash outranks a validity failure (3 wins), and a `crash` row keeps status=crash while still
 # recording its verdict in the `validity` column.
+#
+# FAIL CLOSED (contract v1.2 A6). If the library cannot be run, or answers with something this
+# script cannot read, the row is recorded `void` and the run exits 4 — never `ok`/0. The previous
+# behaviour defaulted the floor to `ok` on a library failure, so a `uv` hiccup wrote a fully
+# citable row; a check that degrades into a pass is worse than no check. Same rule, same wording
+# as bench_ds4.sh / bench_llamacpp.sh: "the library itself failed, so the row cannot be cited
+# either way". The node profile is passed on every call, without which §4's roofline — the only
+# invariant that catches a dead endpoint reporting 449,358 tok/s — is silently skipped.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -62,6 +70,8 @@ SCRIPT_REL="$(realpath --relative-to="$REPO_ROOT" "$RUNBOOK")"
 BACKEND="$("$ADAPTER" info)"
 OUT_DIR="$REPO_ROOT/results/$NODE_FP/$ORG/$NAME"
 TSV="$OUT_DIR/results.tsv"
+NODE_PROFILE="$REPO_ROOT/results/$NODE_FP/node_profile.json"   # §4 roofline input; see check_validity
+SCHEMA_MISMATCH=0     # set by emit_row if the journal is still on the pre-migration 20-column header
 # Contract §1: the header string exists in exactly one place — the library. Never re-declare it here.
 HEADER="${AHL_RESULTS_HEADER:?scripts/lib/validity.sh must set AHL_RESULTS_HEADER}"
 
@@ -87,10 +97,40 @@ GUIDELLM_VER="$(timeout 120 uv run --project "$REPO_ROOT" guidellm --version 2>/
 # fixed by the contract: the three validity columns sit after peak_gb and before the preserved
 # `status notes data` tail. Args are named below rather than used positionally in the printf, so
 # adding a column stays a two-line change instead of a 23-way miscount.
+# tsv_safe <value> [fallback]: contract §2 — "no value is ever empty (`na`), and none contains a
+# tab or newline". `knobs` is normalized by the library, but `notes` is assembled here out of
+# operator-supplied $NOTES and the thermal sidecar, so it is the one field that can still carry a
+# tab and shift every column to its right by one. A silently misaligned journal row is precisely
+# the class of defect this layer exists to stop, so squash separators rather than trusting input.
+tsv_safe() {
+  local s="${1-}" fallback="${2:-na}"
+  s="${s//$'\t'/ }"; s="${s//$'\n'/ }"; s="${s//$'\r'/ }"
+  s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"   # trim
+  printf '%s' "${s:-$fallback}"
+}
+
 emit_row() {
   local run_id="$1" shape_tag="$2" data_rel="$3" status="$4" notes="$5" peak="$6" \
         req_counts="$7" validity="$8" knobs="$9" t1="${10}" t4="${11}" t8="${12}" t16="${13}" t32="${14}"
+  # A pre-migration 20-column journal must never receive 23-column rows: csv.DictReader keys by
+  # header, so the extra fields would land under no column at all and `status`/`notes`/`data`
+  # would be read from tps cells. Refuse, and park the row beside the journal so the measurement
+  # is not lost while the operator runs scripts/migrate_results_tsv.py.
+  if [ -f "$TSV" ]; then
+    local have want
+    have="$(head -1 "$TSV" | awk -F'\t' '{print NF}')"
+    want="$(printf '%s' "$HEADER" | awk -F'\t' '{print NF}')"
+    if [ "$have" != "$want" ]; then
+      echo "  !! $TSV has a $have-column header; this row is $want columns (docs/validity-contract.md §2)" >&2
+      echo "     migrate it first:  uv run --project $REPO_ROOT python scripts/migrate_results_tsv.py" >&2
+      echo "     row parked -> ${TSV}.pending-migration" >&2
+      TSV="${TSV}.pending-migration"
+      [ -f "$TSV" ] || echo "$HEADER" > "$TSV"
+      SCHEMA_MISMATCH=1
+    fi
+  fi
   [ -f "$TSV" ] || echo "$HEADER" > "$TSV"
+  notes="$(tsv_safe "$notes")"; knobs="$(tsv_safe "$knobs")"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$run_id" "$COMMIT" "$NODE_FP" "$MODEL" "$shape_tag" "$BACKEND" "$CONFIG_HASH" "$SCRIPT_REL" \
     "${LOAD_S:-na}" "$MAX_SECONDS" "$SEED" \
@@ -103,10 +143,20 @@ emit_row() {
 # knobs_string <prompt> <output>: the RESOLVED knob set, not the defaults in this header. Motivating
 # defect: a baseline at MAX_SECONDS=600 and a finalize at the 180 default were indistinguishable in
 # the journal until someone compared curve shapes.
+#
+# The ENCODING is the library's (`ahl_knobs`), not this script's. Hand-formatting it here produced
+# `levels=1,16` — the comma form v1.1 withdrew precisely because the pair separator is also a
+# comma, so a naive split(",") read the levels list as the two pairs `levels=1` and `16`, silently
+# dropping every level after the first. The library joins list values with `|`. One encoder.
 knobs_string() {
-  printf 'levels=%s,max_s=%s,seed=%s,prompt=%s,output=%s,stall=%s,ltimeout=%s,gllm=%s' \
-    "$(IFS=,; echo "${LEVELS[*]}")" "$MAX_SECONDS" "$SEED" "$1" "$2" "$STALL_SECS" "$LEVEL_TIMEOUT" \
-    "$GUIDELLM_VER"
+  local s=""
+  s="$(ahl_knobs "levels=$(IFS=,; echo "${LEVELS[*]}")" "max_s=$MAX_SECONDS" "seed=$SEED" \
+                 "prompt=$1" "output=$2" "stall=$STALL_SECS" "ltimeout=$LEVEL_TIMEOUT" \
+                 "gllm=$GUIDELLM_VER" 2>/dev/null)" || s=""
+  # Losing the knob metadata must never abort a measurement, so degrade to the same encoding
+  # by hand (`|` between list items) rather than letting set -e kill the run.
+  [ -n "$s" ] || s="levels=$(IFS='|'; echo "${LEVELS[*]}"),max_s=$MAX_SECONDS,seed=$SEED,prompt=$1,output=$2,stall=$STALL_SECS,ltimeout=$LEVEL_TIMEOUT,gllm=$GUIDELLM_VER"
+  printf '%s' "$s"
 }
 
 # check_validity <bundle> <levels_csv> <tps_csv>
@@ -114,23 +164,40 @@ knobs_string() {
 #   any of them). Sets VALIDITY / REQ_COUNTS / STATUS_FLOOR (one of ok|suspect|void).
 #   <tps_csv> is positionally aligned with <levels_csv> and MAY contain the non-numeric literals
 #   `na` / `hang`; nothing here does arithmetic on it, so a hung level cannot blow up under set -e.
+#
+#   The library's contract is ONE tab-separated line on stdout: "<validity>\t<req_counts>\t<floor>".
+#   That is the only channel. (There was a second branch here reading AHL_VALIDITY/AHL_STATUS_FLOOR
+#   "globals the shim may set" — nothing in the repo has ever set them, and the two lines above the
+#   branch cleared them unconditionally, so it was dead on arrival while carrying a comment saying
+#   it was live. This repo has already paid 75 minutes of eval time for one correct-looking guard in
+#   an unreachable branch; a second one is not a style question. Deleted.)
+#
+#   FAIL CLOSED: rc != 0, no output, or an unreadable floor ⇒ no verdict was reached, so the row
+#   cannot be cited either way. `void` matches bench_ds4.sh / bench_llamacpp.sh exactly.
 check_validity() {
-  local bundle="$1" levels_csv="$2" tps_csv="$3" out rc=0
-  VALIDITY="na"; REQ_COUNTS="na"; STATUS_FLOOR="ok"
-  out="$bundle/.validity.out"
-  AHL_VALIDITY=""; AHL_REQ_COUNTS=""; AHL_STATUS_FLOOR=""
-  # Not a subshell: the shim may answer via globals. Its stdout is captured as a fallback so a
-  # print-only shim still works. A non-zero return is informational — the floor is authoritative.
-  ahl_validity "$bundle" "$levels_csv" "$tps_csv" >"$out" 2>"$bundle/.validity.err" || rc=$?
-  if [ -n "${AHL_VALIDITY:-}" ] || [ -n "${AHL_STATUS_FLOOR:-}" ]; then
-    VALIDITY="${AHL_VALIDITY:-na}"; REQ_COUNTS="${AHL_REQ_COUNTS:-na}"; STATUS_FLOOR="${AHL_STATUS_FLOOR:-ok}"
-  elif [ -s "$out" ]; then                       # fallback: "<validity>\t<req_counts>\t<floor>"
+  local bundle="$1" levels_csv="$2" tps_csv="$3" out err rc=0
+  # STATUS_FLOOR starts EMPTY, not `void`: the `*)` arm below is what turns an unreadable answer
+  # into `void` AND prints why. Pre-seeding it with a valid value would satisfy the case and skip
+  # the diagnostic — the same unreachable-branch shape this rewrite exists to remove.
+  VALIDITY="na"; REQ_COUNTS="na"; STATUS_FLOOR=""
+  # The bundle directory is EVIDENCE. Scratch files belong outside it, or every run mutates the
+  # very thing a later audit reads (and `.validity.err` from a failed run outlives its cause).
+  out="$(mktemp -t ahl-validity-out.XXXXXX)"; err="$(mktemp -t ahl-validity-err.XXXXXX)"
+  ahl_validity "$bundle" "$levels_csv" "$tps_csv" \
+      --node-profile "$NODE_PROFILE" >"$out" 2>"$err" || rc=$?
+  if [ "$rc" -eq 0 ] && [ -s "$out" ]; then
     IFS=$'\t' read -r VALIDITY REQ_COUNTS STATUS_FLOOR < "$out" || true
-    VALIDITY="${VALIDITY:-na}"; REQ_COUNTS="${REQ_COUNTS:-na}"; STATUS_FLOOR="${STATUS_FLOOR:-ok}"
-  else
-    echo "  !! validity: scripts/lib/validity.sh returned nothing (rc=$rc) — row recorded as validity=na" >&2
+    VALIDITY="${VALIDITY:-na}"; REQ_COUNTS="${REQ_COUNTS:-na}"; STATUS_FLOOR="${STATUS_FLOOR:-}"
   fi
-  case "$STATUS_FLOOR" in ok|suspect|void) ;; *) STATUS_FLOOR="ok" ;; esac
+  case "$STATUS_FLOOR" in
+    ok|suspect|void) ;;
+    *) STATUS_FLOOR="void"
+       echo "  !! validity: scripts/lib/validity.sh gave no usable verdict (rc=$rc) — row is NOT citable" >&2
+       sed -n '1,5p' "$err" | sed 's/^/     /' >&2 || true
+       echo "     recorded as status=void validity=${VALIDITY:-na}; re-run the check by hand:" >&2
+       echo "     scripts/lib/validity.sh validity '$bundle' '$levels_csv' '$tps_csv' --node-profile '$NODE_PROFILE'" >&2 ;;
+  esac
+  rm -f "$out" "$err"
 }
 
 watchdog() {  # watchdog <hit_file>
@@ -226,7 +293,7 @@ run_shape() {
     echo "  saved engine logs -> $(realpath --relative-to="$REPO_ROOT" "$bundle")/vllm_crash.log" >&2
     "$ADAPTER" down || true; return 3
   fi
-  [ "$invalid" = 1 ] && return 4
+  { [ "$invalid" = 1 ] || [ "$SCHEMA_MISMATCH" = 1 ]; } && return 4
   return 0
 }
 
@@ -243,5 +310,7 @@ for shape in "${SHAPES[@]}"; do
   esac
 done
 echo >&2; echo "row(s) -> $(realpath --relative-to="$REPO_ROOT" "$TSV")  (load ${LOAD_S}s)" >&2
+[ "$SCHEMA_MISMATCH" = 1 ] && { [ "$rc_all" -eq 3 ] || rc_all=4; \
+  echo "EXIT 4: the journal is pre-migration — rows were parked, not appended (see above)" >&2; }
 [ "$rc_all" -eq 4 ] && echo "EXIT 4: one or more rows failed the measurement-validity invariants — do not cite them" >&2
 exit $rc_all

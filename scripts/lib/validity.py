@@ -8,20 +8,37 @@ run_experiment.sh all consume the schema and the verdicts from here.
 Stdlib only, on purpose: this module must be importable and runnable in any context that can
 run python, including from inside a bash shim during a benchmark.
 
-Amendment batch 1 (orchestrator, 2026-08-19) is folded in:
-  1. low_sample is a TOKENS-generated rule, not a request-count rule (A9: request count does
-     not correlate with reproducibility; CV is 0.39% at n<10 vs 0.56% at 20<=n<50).
-  2. new `survivorship` verdict — GuideLLM's successful.mean silently drops the slow half.
-  3. per-level verdict tokens carry their level: `low_sample@c1`, `no_data@c32`.
-  4. hung levels are SCORED, not skipped; a level is "run" if the journal published a cell
+Contract v1.1 (amendment batch 1) is folded in:
+  1. per-level verdict tokens carry their level: `low_sample@c1`, `no_data@c32`.
+  2. hung levels are SCORED, not skipped; a level is "run" if the journal published a cell
      OR a bundle file exists.
-  5. `nonmonotonic` is ADJACENT-ONLY.
-  6. knobs list values join with `|`, never a comma.
-  7. AHL_ROOFLINE_SAFETY 2.0 -> 3.0 (MTP accepted length reaches 2.69 on this node).
+  3. `nonmonotonic` is ADJACENT-ONLY.
+  4. knobs list values join with `|`, never a comma.
+  5. AHL_ROOFLINE_SAFETY 2.0 -> 3.0 (MTP accepted length reaches 2.69 on this node).
+
+Contract v1.2 (2026-08-19, four independent verifiers) is folded in on top:
+  A1. the token-budget clause is GONE. `low_sample` is solely a request-count floor. The
+      clause fired alone on 3 of 693 bundles, all three the most reproducible bracket on
+      this node (CV 0.59-0.70%), and it APPROVED 10 of the 15 genuinely starved levels
+      because a coder completion carries ~1000 tokens (3 requests clear a 2048 budget).
+  A2. `survivorship` measures EXCESS discard: `incomplete > level` (subtract the
+      steady-state in-flight set) AND `incomplete/(ok+incomplete) > AHL_DISCARD_TOL`.
+      v1.1's `incomplete >= successful` was `successful <= level` in disguise and could
+      not fire below a 50% discard rate — the rule's own justification cites 32.4%.
+  A3. new FATAL `no_output`: successful > 0 but tok/s null / non-finite / <= 0. There was
+      a ceiling on throughput and no floor (NemotronH emits zero tokens under think-off).
+  A4. `errored` ESCALATES: > AHL_ERR_FATAL (50%) is fatal (`errored_fatal`), 10-50% stays
+      suspect. A dead endpoint (107,589 errors, 17 successes) used to score the same as a
+      level with 11% errors.
+  A5. `na` is NEVER `ok`. verdicts({}) -> `na`; parse_validity("na"/"") -> ["na"]; an
+      unevaluable bundle floors at `suspect`, never at `ok`.
+  A10. the CLI and assess_bundle are the SAME path: the caller's run-level list is
+      authoritative, and only the audit/migration path opts into discovery, explicitly.
+      `SAFETY` is resolved on attribute access, so the documented override path works.
 
 CLI:
     python3 scripts/lib/validity.py check --bundle DIR --levels 1,16 \
-        --tps 41.2,na,na,151.5,na [--node-profile P] [--model-gb G]
+        --tps 41.2,na,na,151.5,na [--node-profile P] [--model-gb G] [--discover]
 prints one JSON object: {"validity": ..., "req_counts": ..., "status_floor": ...}
 """
 
@@ -48,11 +65,12 @@ __all__ = [
     "status_floor", "apply_status",
     "format_req_counts", "parse_req_counts", "format_knobs", "parse_knobs",
     "ceiling", "make_ceiling_fn", "read_mem_bw", "parse_tps", "min_requests_for_level",
-    "AHL_MIN_DATA", "AHL_MIN_SUCCESSFUL", "AHL_MIN_TOKENS", "AHL_DROP_TOL", "AHL_ERR_TOL",
-    "AHL_ROOFLINE_SAFETY", "AHL_MIN_MODEL_GB",
-    "V_OK", "V_NO_DATA", "V_LOW_SAMPLE", "V_OVER_ROOFLINE", "V_NONMONOTONIC", "V_ERRORED",
-    "V_SURVIVORSHIP",
-    "VERDICT_ORDER", "FATAL_VERDICTS", "SUSPECT_VERDICTS", "ROW_WIDE_VERDICTS",
+    "AHL_MIN_DATA", "AHL_MIN_SUCCESSFUL", "AHL_DROP_TOL", "AHL_ERR_TOL", "AHL_ERR_FATAL",
+    "AHL_DISCARD_TOL", "AHL_ROOFLINE_SAFETY", "AHL_MIN_MODEL_GB",
+    "V_OK", "V_NA", "V_NO_DATA", "V_LOW_SAMPLE", "V_OVER_ROOFLINE", "V_NO_OUTPUT",
+    "V_NONMONOTONIC", "V_ERRORED", "V_ERRORED_FATAL", "V_SURVIVORSHIP",
+    "VERDICT_ORDER", "FATAL_VERDICTS", "SUSPECT_VERDICTS", "UNEVALUATED_VERDICTS",
+    "ROW_WIDE_VERDICTS",
     "STATUS_MEASURED", "STATUS_KEEP", "STATUS_DISCARD", "STATUS_CRASH",
     "STATUS_SUSPECT", "STATUS_VOID", "STATUS_VOCAB",
     "NA",
@@ -64,16 +82,20 @@ NA = "na"
 # Tunable constants (contract sections 3 and 4). Overridable two ways, in order:
 #   1. the environment variable of the same name
 #   2. reassigning the module attribute (tests, callers)
-# Reads happen at CALL time, so exporting AHL_MIN_TOKENS=4096 before invoking
+# Reads happen at CALL time, so exporting AHL_MIN_DATA=10 before invoking
 # bench.sh changes the verdicts for that run.
 # ---------------------------------------------------------------------------
 AHL_MIN_DATA = 5            # successful < this -> no_data (fatal). MUST NOT MOVE: this is
                             # what catches contract section 0 defect (a), the 2-request level.
-AHL_MIN_TOKENS = 2048       # successful * mean_output_tokens < this -> low_sample
 AHL_MIN_SUCCESSFUL = 20     # request-count CEILING of the low_sample floor; the effective
                             # floor is max(AHL_MIN_DATA, min(AHL_MIN_SUCCESSFUL, 4*level))
 AHL_DROP_TOL = 0.10         # an ADJACENT higher level this far below its predecessor -> nonmonotonic
-AHL_ERR_TOL = 0.10          # errored / (successful+errored) > this -> errored
+AHL_ERR_TOL = 0.10          # errored / (successful+errored) > this -> errored (suspect)
+AHL_ERR_FATAL = 0.50        # ... and > this -> errored_fatal (A4). A dead endpoint answers
+                            # every request instantly and mostly with an error.
+AHL_DISCARD_TOL = 0.30      # EXCESS discard fraction above which survivorship fires (A2),
+                            # measured only once `incomplete` exceeds the level's own
+                            # steady-state in-flight set.
 AHL_ROOFLINE_SAFETY = 3.0   # SAFETY multiplier on the bandwidth roofline
 AHL_MIN_MODEL_GB = 1.0      # fallback bytes-per-token (GB) when the model size is unknown.
                             # Stays 1.0: deriving bytes/token from checkpoint size voids
@@ -130,21 +152,29 @@ def level_col_index(level) -> int:
 # Section 3 verdict + section 6 status vocabularies
 # ---------------------------------------------------------------------------
 V_OK = "ok"
+V_NA = NA                   # "the rules could not be evaluated" -- A5: never `ok`.
 V_NO_DATA = "no_data"
 V_LOW_SAMPLE = "low_sample"
 V_OVER_ROOFLINE = "over_roofline"
+V_NO_OUTPUT = "no_output"       # A3: the FLOOR under the roofline's ceiling.
 V_NONMONOTONIC = "nonmonotonic"
 V_ERRORED = "errored"
+V_ERRORED_FATAL = "errored_fatal"   # A4: the >50% band of `errored`.
 V_SURVIVORSHIP = "survivorship"
 
-# Emission order: the contract's section 3 table, with `survivorship` appended.
+# Emission order: the contract's section 3 table, with the v1.1/v1.2 additions slotted in
+# beside the rule they escalate.
 VERDICT_ORDER: tuple[str, ...] = (
-    V_NO_DATA, V_LOW_SAMPLE, V_OVER_ROOFLINE, V_NONMONOTONIC, V_ERRORED, V_SURVIVORSHIP,
+    V_NO_DATA, V_LOW_SAMPLE, V_OVER_ROOFLINE, V_NO_OUTPUT, V_NONMONOTONIC,
+    V_ERRORED_FATAL, V_ERRORED, V_SURVIVORSHIP,
 )
-FATAL_VERDICTS = frozenset({V_NO_DATA, V_OVER_ROOFLINE})
+FATAL_VERDICTS = frozenset({V_NO_DATA, V_OVER_ROOFLINE, V_NO_OUTPUT, V_ERRORED_FATAL})
 SUSPECT_VERDICTS = frozenset({V_LOW_SAMPLE, V_NONMONOTONIC, V_ERRORED, V_SURVIVORSHIP})
+# `na` is neither: it is the ABSENCE of a verdict. It floors at `suspect` (A5) because an
+# unevaluable row is not citable, but it is not evidence of a defect the way the others are.
+UNEVALUATED_VERDICTS = frozenset({V_NA})
 # Verdicts that describe the ROW, not one level -- these stay bare (untagged).
-ROW_WIDE_VERDICTS = frozenset({V_OK, V_NONMONOTONIC})
+ROW_WIDE_VERDICTS = frozenset({V_OK, V_NA, V_NONMONOTONIC})
 
 STATUS_MEASURED = "measured"
 STATUS_KEEP = "keep"
@@ -213,8 +243,10 @@ class LevelCounts:
     `.benchmarks[0].metrics.request_concurrency.<kind>.count`.
     `tps` is `.benchmarks[0].metrics.output_tokens_per_second.successful.mean`.
     `out_tokens` is `.benchmarks[0].metrics.output_token_count.successful.mean` — the mean
-    output tokens per SUCCESSFUL request, which is what the token-budget low_sample rule
-    needs. Both are None when absent or non-finite.
+    output tokens per SUCCESSFUL request. Both are None when absent or non-finite. NOTE
+    (A1): `out_tokens`/`token_budget` no longer decide any verdict — the token-budget
+    clause of `low_sample` is deleted. They are kept because they are the evidence a reader
+    needs to interpret a thin level, and because the audit reports them.
 
     `missing` and `out_tokens` are trailing fields WITH DEFAULTS, so the 4-positional
     construction named in the original API spec -- LevelCounts(41, 0, 0, 12.3) -- still
@@ -235,7 +267,12 @@ class LevelCounts:
 
     @property
     def token_budget(self) -> Optional[float]:
-        """successful * mean_output_tokens, or None when the mean is unknown."""
+        """successful * mean_output_tokens, or None when the mean is unknown.
+
+        INFORMATIONAL ONLY since v1.2/A1 — no rule reads it. Do not resurrect it as a
+        threshold without re-running it over the corpus: its correlation with measured
+        reproducibility on this node is r = -0.006.
+        """
         if self.out_tokens is None or not math.isfinite(self.out_tokens) or self.out_tokens <= 0:
             return None
         return self.ok * self.out_tokens
@@ -377,7 +414,7 @@ def level_meta(path) -> dict:
 
 
 def scan_bundle(bundle_dir, levels: Iterable, tps: Optional[Mapping] = None,
-                discover: bool = True) -> dict:
+                discover: bool = False) -> dict:
     """Read `level_c<N>.json` for every RUN level of one benchmark row.
 
     Amendment 4 — a level counts as RUN if the journal published a cell for it OR a bundle
@@ -386,8 +423,10 @@ def scan_bundle(bundle_dir, levels: Iterable, tps: Optional[Mapping] = None,
         what makes a crash row say WHICH level wedged;
       * a level that was never attempted (cell `na`, no json) is dropped, never scored as
         a zero;
-      * a bundle file present for a level the journal never mentions is picked up
-        (`discover=True`), which surfaces hand-corrected rows.
+      * a bundle file present for a level the journal never mentions is picked up ONLY when
+        the caller passes `discover=True` — the audit/migration path, which reconstructs a
+        run-level list it does not own. A10: the default is now False everywhere, so the
+        caller's run-level list is authoritative on the executed path exactly as §3 says.
     When `tps` is None the caller has supplied no journal information, so `levels` is taken
     at face value and is authoritative (contract confirmation 8).
 
@@ -486,8 +525,8 @@ def min_requests_for_level(level) -> int:
         max(AHL_MIN_DATA, min(AHL_MIN_SUCCESSFUL, 4 * level))
 
     A c1 sentinel physically cannot produce 20 requests inside a 180 s stage, so a flat
-    floor of 20 declared 55% of this node's historical levels suspect. The token-budget
-    clause below is the primary precision test; this clause is the backstop.
+    floor of 20 declared 55% of this node's historical levels suspect. Since A1 deleted the
+    token-budget clause this IS the `low_sample` rule, not a backstop to it.
     """
     min_data = _cfg("AHL_MIN_DATA", int)
     cap = _cfg("AHL_MIN_SUCCESSFUL", int)
@@ -504,13 +543,19 @@ def verdicts(levels: Mapping, ceiling_fn: Optional[Callable] = None) -> list:
 
     Per-level verdicts come back level-tagged (`low_sample@c1`); the row-wide
     `nonmonotonic` stays bare. Use split_verdict() to take them apart.
+
+    A5: NO run levels at all -> `["na"]`, never `["ok"]`. "Nothing to check" and "everything
+    checked out" are opposite claims and the column has to be able to tell them apart.
     """
     min_data = _cfg("AHL_MIN_DATA", int)
-    min_tokens = _cfg("AHL_MIN_TOKENS", float)
     drop_tol = _cfg("AHL_DROP_TOL", float)
     err_tol = _cfg("AHL_ERR_TOL", float)
+    err_fatal = _cfg("AHL_ERR_FATAL", float)
+    discard_tol = _cfg("AHL_DISCARD_TOL", float)
 
     run = {int(k): v for k, v in (levels or {}).items() if isinstance(v, LevelCounts)}
+    if not run:
+        return [V_NA]
     found: set = set()
 
     for lvl in sorted(run):
@@ -519,22 +564,49 @@ def verdicts(levels: Mapping, ceiling_fn: Optional[Callable] = None) -> list:
         # no_data and low_sample are mutually exclusive PER LEVEL -- report the more severe.
         if c.missing or c.ok < min_data:
             found.add(tag_verdict(V_NO_DATA, lvl))
-        else:
-            budget = c.token_budget
-            thin_tokens = budget is not None and budget < min_tokens
-            thin_requests = c.ok < min_requests_for_level(lvl)
-            if thin_tokens or thin_requests:
-                found.add(tag_verdict(V_LOW_SAMPLE, lvl))
+        elif c.ok < min_requests_for_level(lvl):
+            found.add(tag_verdict(V_LOW_SAMPLE, lvl))
 
+        # A3 no_output: requests SUCCEEDED and produced no tokens. The roofline bounds this
+        # metric from above; nothing bounded it from below, so a serve emitting empty
+        # completions (NemotronH under think-off does exactly this) graded `ok` at 0 tok/s.
+        if not c.missing and c.ok > 0:
+            rate = _finite(c.tps)
+            if rate is None or rate <= 0:
+                found.add(tag_verdict(V_NO_OUTPUT, lvl))
+
+        # A4 errored: two bands. Above 50% the endpoint is not serving, it is refusing, and
+        # a mean over the survivors is not a measurement of anything.
         denom = c.ok + c.errored
-        if denom > 0 and (c.errored / denom) > err_tol:
-            found.add(tag_verdict(V_ERRORED, lvl))
+        if denom > 0:
+            err_rate = c.errored / denom
+            if err_rate > err_fatal:
+                found.add(tag_verdict(V_ERRORED_FATAL, lvl))
+            elif err_rate > err_tol:
+                found.add(tag_verdict(V_ERRORED, lvl))
 
-        # survivorship: GuideLLM's successful.mean drops the requests still in flight, and
-        # those are the SLOW ones -- so a level where at least as many requests were
-        # dropped as completed reports the mean of its faster half.
-        if not c.missing and c.incomplete >= c.ok:
-            found.add(tag_verdict(V_SURVIVORSHIP, lvl))
+        # A2 survivorship: GuideLLM's successful.mean drops the requests still in flight,
+        # and those are the SLOW ones -- so a level that discards a large share of its work
+        # reports the mean of its faster part. `incomplete > lvl` subtracts the
+        # steady-state in-flight set (the median `incomplete` across this corpus is exactly
+        # `level - 1`), so what is left is EXCESS discard rather than sample size in
+        # disguise. Never fires on an empty level: nothing was discarded there.
+        #
+        # MEASURED, and reported to the orchestrator (F3 sweep, 2026-08-19): across all 690
+        # parseable level jsons on this node `incomplete` NEVER exceeds `lvl` -- 88.8% sit
+        # at exactly lvl-1, 10.1% at lvl, 1.0% below; max ratio 1.000. That is structural,
+        # not luck: GuideLLM's in-flight set is bounded by the concurrency level, so
+        # `incomplete > lvl` cannot be true. AS WRITTEN THIS RULE FIRES ZERO TIMES ON THE
+        # CORPUS -- including on all 53 level-instances discarding >30% that it was
+        # introduced to catch (v1.1's form caught 20 of them). It is implemented exactly as
+        # adjudicated in contract v1.2 A2 and deliberately NOT quietly retuned, because the
+        # committed journal is being recomputed from these verdicts. Candidate repairs and
+        # their level-instance counts are in the F3 report: `incomplete >= lvl` -> 19, the
+        # discard fraction alone -> 53. Awaiting adjudication.
+        if not c.missing:
+            seen = c.ok + c.incomplete
+            if seen > 0 and c.incomplete > lvl and (c.incomplete / seen) > discard_tol:
+                found.add(tag_verdict(V_SURVIVORSHIP, lvl))
 
         if ceiling_fn is not None and c.tps is not None and not c.missing:
             cap = ceiling_fn(lvl)
@@ -555,18 +627,26 @@ def verdicts(levels: Mapping, ceiling_fn: Optional[Callable] = None) -> list:
 
 
 def format_validity(verds: Iterable) -> str:
-    """`ok`, or the `+`-joined verdict tokens in contract order then level order."""
+    """`ok`, or the `+`-joined verdict tokens in contract order then level order.
+    A bare `na` (nothing was evaluable) round-trips as `na`, not as `ok`."""
     seen = {v for v in (verds or []) if v and v != V_OK}
     return "+".join(sorted(seen, key=_verdict_sort_key)) if seen else V_OK
 
 
 def parse_validity(s: Optional[str]) -> list:
     """Inverse of format_validity, as raw (possibly level-tagged) tokens.
-    `ok`/`na`/empty -> ["ok"]."""
+
+    A5: `ok` -> ["ok"]; `na`, empty and None -> **["na"]**, never ["ok"]. §3 has said since
+    v1.1 that `na` means "could not be evaluated"; returning ["ok"] for it made every
+    consumer that parsed before checking wrong by construction — an unevaluable row read as
+    citable. Empty/None land on `na` for the same reason: a missing column is not a pass.
+    """
     if not s:
-        return [V_OK]
+        return [V_NA]
     s = s.strip()
-    if s in ("", NA, V_OK):
+    if s == "" or s.lower() == NA:
+        return [V_NA]
+    if s == V_OK:
         return [V_OK]
     return [tok for tok in (p.strip() for p in s.split("+")) if tok]
 
@@ -582,13 +662,25 @@ def parse_validity_pairs(s: Optional[str]) -> list:
 # Section 5 -- enforcement
 # ---------------------------------------------------------------------------
 def status_floor(verds: Iterable) -> str:
-    """`void` (any fatal verdict) / `suspect` (any suspect verdict) / `ok`.
-    Accepts level-tagged or bare tokens."""
-    bases = {verdict_base(v) for v in (verds or []) if v}
+    """`void` (any fatal verdict) / `suspect` (any suspect verdict, or `na`) / `ok`.
+    Accepts level-tagged or bare tokens.
+
+    A5: an UNEVALUATED row (`na`, or an empty token list) floors at `suspect`. It is not
+    `ok` — no invariant passed, none was run — and it is not `void` either, because nothing
+    was refuted. `suspect` is exactly the contract's "not citable without an adjudication".
+    """
+    toks = [v for v in (verds or []) if v]
+    if not toks:
+        return "suspect"
+    bases = {verdict_base(v) for v in toks}
     if bases & FATAL_VERDICTS:
         return "void"
     if bases & SUSPECT_VERDICTS:
         return "suspect"
+    if bases & UNEVALUATED_VERDICTS:
+        return "suspect"
+    if bases - {V_OK}:
+        return "suspect"        # an unrecognized token is never a pass
     return "ok"
 
 
@@ -748,13 +840,17 @@ def _cmd_check(args) -> int:
             for idx, cell in enumerate(raw[:len(LEVEL_COLUMNS)]):   # the 5 fixed columns
                 cells[LEVEL_COLUMNS[idx]] = cell
 
-    counts = scan_bundle(args.bundle, levels, cells if cells else None)
-    cfn = make_ceiling_fn(read_mem_bw(args.node_profile), args.model_gb)
-    verds = verdicts(counts, cfn)
+    # A10: ONE assessment path. This is what validity.sh -> bench.sh actually executes, so
+    # it must be the same function the acceptance suite exercises -- and it must default to
+    # discover=False, matching the contract's "the caller's run-level list is authoritative".
+    a = assess_bundle(args.bundle, levels, cells if cells else None,
+                      node_profile=(args.node_profile or None),
+                      bytes_per_token_gb=args.model_gb,
+                      discover=bool(args.discover))
     print(json.dumps({
-        "validity": format_validity(verds),
-        "req_counts": format_req_counts(counts),
-        "status_floor": status_floor(verds),
+        "validity": a.validity,
+        "req_counts": a.req_counts,
+        "status_floor": a.status_floor,
     }, separators=(",", ":")))
     return 0
 
@@ -810,7 +906,20 @@ EXIT_INVALID = 4      # the row is written but not citable (contract §5)
 COLUMNS = RESULTS_COLS
 LEVELS = LEVEL_COLUMNS      # the five fixed concurrency levels
 STATUSES = STATUS_VOCAB
-SAFETY = AHL_ROOFLINE_SAFETY
+
+
+def __getattr__(name: str):
+    """`SAFETY` is resolved on ACCESS, not bound at import (A10).
+
+    It used to be a plain `SAFETY = AHL_ROOFLINE_SAFETY` assignment, which froze the value
+    at import time: the documented override paths (env `AHL_ROOFLINE_SAFETY=…`, or
+    reassigning the module attribute) moved the constant the rules read and left the public
+    alias reporting the old number. A reader checking `validity.SAFETY` was told the
+    override had not taken effect when it had.
+    """
+    if name == "SAFETY":
+        return _cfg("AHL_ROOFLINE_SAFETY", float)
+    raise AttributeError("module %r has no attribute %r" % (__name__, name))
 
 
 @dataclass(frozen=True)
@@ -828,20 +937,25 @@ class BundleAssessment:
 
 
 def assess_bundle(bundle_dir, levels, tps=None, node_profile=None, status=None,
-                  bytes_per_token_gb=None) -> BundleAssessment:
-    """Assess one run's bundle end to end (contract §3/§4/§5).
+                  bytes_per_token_gb=None, discover: bool = False) -> BundleAssessment:
+    """Assess one run's bundle end to end (contract §3/§4/§5). THE entry point: the CLI
+    (`validity.py check`, which validity.sh and therefore bench.sh run) calls this same
+    function, so the tested path is the executed path (A10).
 
     `levels` is the list of levels that were RUN — authoritative over whatever files happen
     to be in the directory, so a stale level_c8.json from a previous shape is ignored and a
     level whose json vanished is still judged (`no_data`).
 
+    `discover=False` (the default, and what a live bench must use): score exactly the
+    caller's run levels. `discover=True` additionally scores any `level_c<N>.json` found on
+    disk — for the audit/migration path, which reconstructs a run-level list it does not
+    own. A10: these two used to give OPPOSITE verdicts on the same evidence, with the
+    comment here asserting the inverse of what the code did.
+
     `node_profile` may be a path or an already-loaded mapping; without a readable
     `gpu.mem_bw_gbs` the roofline check is skipped, never guessed.
     """
-    # discover=False: the caller's run-level list is authoritative (contract v1.1 §3), so a
-    # stale level_c8.json from a previous shape in the same bundle dir is never scored.
-    # The audit/migration path opts into discovery deliberately; a live bench never should.
-    scanned = scan_bundle(bundle_dir, levels, tps, discover=False)
+    scanned = scan_bundle(bundle_dir, levels, tps, discover=discover)
     mem_bw = None
     if node_profile is not None:
         if isinstance(node_profile, Mapping):
@@ -876,6 +990,9 @@ def main(argv: Optional[Sequence] = None) -> int:
     c.add_argument("--node-profile", default="", help="node_profile.json for gpu.mem_bw_gbs")
     c.add_argument("--model-gb", default=None, type=float,
                    help="active weight bytes per token, GB")
+    c.add_argument("--discover", action="store_true",
+                   help="ALSO score level_c<N>.json files the caller did not list "
+                        "(audit/migration only — a live bench must never pass this)")
     c.set_defaults(func=_cmd_check)
 
     h = sub.add_parser("header", help="print the results.tsv header")
