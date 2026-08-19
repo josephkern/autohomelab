@@ -239,3 +239,70 @@ control stack: `research/upstream/vllm-43885-gb10-wedge.md`.
 Winner unchanged: **`20260818_mtp-n3_tuned.sh`, chat c16 208.86** (+53.2% over baseline, +22.1% over
 the promoted Inferact final). Tune loop has one untested candidate left worth running
 (`--async-scheduling`); otherwise ready for program.md §3 finalize.
+
+## Session 2 — 20260818/19: wave 3, finalize, PROMOTE
+
+### Wave 3 — `--async-scheduling`: 209.18 vs 208.86 (+0.15%) → DISCARD
+
+The only candidate in the whole campaign motivated by a **measurement** rather than a flag list: a
+py-spy stack showed the engine core pegged at ~100% of one core inside spec-decode draft metadata
+construction, which `--async-scheduling` is documented to overlap with GPU execution. It bought
+nothing.
+
+**That negative is informative.** The CPU work is real (the stack proves it) but overlapping it does
+not help — so the engine loop is **not** the binding constraint; the GPU still is. Net: the original
+"not a bottleneck" call was right, the spin-wait reasoning behind it was wrong, and the corrected
+reasoning produced a candidate that was also flat. Both arguments were wrong in opposite directions
+and a 40-minute experiment settled it. **Measure before theorising about where time goes.**
+
+### Finalize — `FULL=1 scripts/suite.sh 20260818_mtp-n3_tuned.sh` (cfg `de23b412`)
+
+| gate | unsloth final | Inferact final | verdict |
+|---|---|---|---|
+| 1 works | **PASS** (4/4) | PASS | == |
+| 2 gsm8k FULL (think-off) | **95.98** | 95.45 | == (+0.53, ~1σ at n=1319) |
+| 2 mmlu_pro FULL (think-off) | **70.38** | 66.81 | **BETTER (+3.57, ~8σ at n=12032)** |
+| 3 chat c1 / c16 / c32 | 24.71 / **206.50** / **278.96** | 17.15 / 171.12 / 214.33 | +44.1% / +20.7% / +30.2% |
+| 3 coder c1 / c16 / c32 | 22.10 / **144.46** / **185.08** | 19.47 / 88.56 / 96.88 | +13.5% / **+63.1%** / **+91.0%** |
+
+Coder validity confirmed (12/37/60/79/96 successful, `max_s=600`). Chat finalize c16 206.50 vs the
+tune-loop median 208.86 — **no cross-session drift**, which matters on this box.
+
+**The mmlu_pro gap is real.** At n=12,032, p≈0.70, binomial SE ≈ 0.42 pts, so +3.57 is ~8σ. It is
+also internally consistent: unsloth read 70.43 at n=100 and 70.38 at FULL (0.05 apart). The lighter,
+FASTER checkpoint is also the MORE ACCURATE one on the harder benchmark — consistent with its mixed
+FP8+NVFP4 build holding sensitive layers at higher precision. Caveat: the two FULL numbers come from
+different sessions; sampling error is negligible at this n, but server-side nondeterminism is not
+formally excluded.
+
+### PROMOTED → `VLLM-27-unsloth_Qwen3.8-27B_NVFP4_final.sh`
+
+Faster than the previous champion at **every concurrency in both shapes**, most dramatically at
+long-context high concurrency (coder c32 nearly double), at equal-or-better quality.
+
+### CORRECTION to the Inferact logbook's deployment caveat
+
+That logbook records "MTP's benefit decays with concurrency and **inverts at c32**" (coder −5.0%) as
+a property of the promoted config. **That generalisation is wrong.** On this checkpoint MTP *helps*
+coder c32 by **+34.8%** over its own baseline (137.32 → 185.08). The inversion is a property of MTP
+**on a checkpoint whose kernel path saturates compute sooner**, not of MTP itself: a faster GEMM
+leaves headroom for speculation to keep paying as the batch fills. Read the Inferact caveat as
+checkpoint-specific.
+
+### Campaign scoreboard — 4 waves across 2 campaigns
+
+| lever | result |
+|---|---|
+| **MTP depth** | **+53.2%** — the entire campaign, both times |
+| checkpoint swap | +16.9% at baseline (not a tune-loop result) |
+| kv-cache fp8, prefix caching, util 0.6, batched tokens 16384, kda flashkda, `qwen3_5_mtp`, `max-num-scheduled-tokens`, DSpark, `--async-scheduling` | **0 for 9** — noise or breakage |
+
+Nine consecutive negative candidates across two checkpoints. On this model, MTP depth is the only
+knob that has ever moved the objective; the checkpoint choice is the only other lever, and it is a
+*procurement* decision, not a tuning one.
+
+## Status: CAMPAIGN CLOSED
+
+Promoted artifact: `runbooks/unsloth/Qwen3.8-27B-NVFP4/VLLM-27-unsloth_Qwen3.8-27B_NVFP4_final.sh`.
+Both Qwen3.8-27B campaigns complete. Net gain over the original Inferact baseline: **chat c16
+116.63 → 206.50 (+77.1%)**, quality equal-or-better on every measured task.

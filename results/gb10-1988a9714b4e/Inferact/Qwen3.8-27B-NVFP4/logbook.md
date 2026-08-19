@@ -140,6 +140,13 @@ MTP win erodes from +54% at c1 to −5% at c32. **Deployment caveat for the prom
 large win for interactive/low-concurrency long-context use and a slight loss for c32 batch
 long-context throughput. The chat shape does not show this inversion (c32 177.34 → 214.33, +20.9%).
 
+**CORRECTED 20260819 — this inversion is CHECKPOINT-SPECIFIC, not a property of MTP.** On
+`unsloth/Qwen3.8-27B-NVFP4` (same base model, mixed FP8+NVFP4, FlashInfer Cutlass FP4 GEMM) MTP
+n=3 *helps* coder c32 by **+34.8%** (137.32 → 185.08) instead of hurting it. The inversion happens
+on a checkpoint whose kernel path saturates compute sooner, leaving no headroom for speculative
+work as the batch fills; a faster GEMM keeps speculation paying at c32. Do not carry the caveat
+forward as a general MTP property.
+
 ### Two harness defects found and fixed this session
 
 1. **`suite.sh` ran loglikelihood `mmlu` on a spec-decode config.** `REASONING` and `SPEC` were tested
