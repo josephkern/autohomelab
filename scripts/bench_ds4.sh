@@ -30,11 +30,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Validity library (docs/validity-contract.md §1 — the ONLY implementation of the rules):
-#   $AHL_RESULTS_HEADER                              the 23-column header string
-#   ahl_validity <bundle_dir> <levels_csv> <tps_csv> stdout "<req_counts>\t<validity>";
-#                                                    exit 0=ok 1=suspect 2=fatal.
-#   levels_csv/tps_csv are PARALLEL over the levels actually attempted (a hung level appears with
-#   tps `hang` and no json). Sourced, so it may read REPO_ROOT/NODE_FP from this scope.
+#   $AHL_RESULTS_HEADER   the 23-column header string
+#   ahl_validity <bundle_dir> <levels_csv> <tps_csv> [--node-profile P] [--model-gb G]
+#       -> "<validity>\t<req_counts>\t<status_floor>"   (status_floor ∈ ok|suspect|void)
+#   levels_csv = the levels actually ATTEMPTED (a hung level is one of them: its missing json is
+#   itself a verdict). tps_csv = the 5 fixed tps_c* cells c1,c4,c8,c16,c32 (`na`/`hang` accepted).
+#   The status FLOOR is authoritative — severity is never derived from the exit code, which is
+#   non-zero only when the library itself failed.
+#   --model-gb is deliberately NOT passed: a GGUF's file size is the right bytes-per-token for a
+#   dense model but wildly wrong for an MoE (ds4 reads a few active experts of an 81 GiB file), and
+#   an over-tight ceiling would void good rows. The library's loose default bound is the safe one.
 [ -f "$SCRIPT_DIR/lib/validity.sh" ] || { echo "missing scripts/lib/validity.sh — see docs/validity-contract.md" >&2; exit 1; }
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/validity.sh"
@@ -83,7 +88,9 @@ elif printf '%s' "$SRV_CMD" | grep -q -- '--dspark';        then SRV_DSPARK="on"
 else                                                             SRV_DSPARK="off"; fi
 # DSpark's scheduler/exec knobs are ENV vars, invisible to the cmdline (and to config_hash) — the
 # launcher only echoes them to its log. Read them off the served process so the row keeps them.
-SRV_ENV="$(tr '\0' '\n' < "/proc/$SRV_PID/environ" 2>/dev/null | grep -E '^(DS4_DSPARK|DS4_MTP)' | sort | tr ',\t' ';:' | paste -sd';' - || true)"
+# `|` is the list separator inside a knob value, so a value can never contain the `,` that
+# separates knob pairs (contract §2 encoding).
+SRV_ENV="$(tr '\0' '\n' < "/proc/$SRV_PID/environ" 2>/dev/null | grep -E '^(DS4_DSPARK|DS4_MTP)' | sort | tr ',\t' ';:' | paste -sd'|' - || true)"
 
 # GuideLLM version comes from the lockfile (charter: pinned) — no network, no venv resolution.
 GLLM_VER="$(awk '/^name = "guidellm"$/{f=1} f && /^version = /{gsub(/"/,"",$3); print $3; exit}' "$REPO_ROOT/uv.lock" 2>/dev/null || true)"
@@ -126,7 +133,8 @@ for shape in "${SHAPES[@]}"; do
 
   # Effective knob set for THIS row: contract-order base knobs, then the ds4 launcher's own.
   # stall=na — a host process has no docker-log watchdog, so bench.sh's STALL_SECS has no analogue.
-  knobs="levels=${LEVELS_SET:-1},max_s=$MAX_SECONDS,seed=$SEED,prompt=$prompt,output=$output"
+  # A list value is `|`-joined so no value can contain the `,` that separates knob pairs.
+  knobs="levels=$(printf '%s' "${LEVELS_SET:-1}" | tr ',' '|'),max_s=$MAX_SECONDS,seed=$SEED,prompt=$prompt,output=$output"
   knobs+=",temp=$TEMP,stall=na,ltimeout=$LEVEL_TIMEOUT,gllm=${GLLM_VER:-na}"
   knobs+=",gguf=$SRV_QUANT,ctx=${SRV_CTX:-na},dspark=$SRV_DSPARK,dspark_conf=${SRV_DSPARK_CONF:-default}"
   knobs+=",mtp=$SRV_MTP,mtp_draft=${SRV_MTP_DRAFT:-na},batched_session=${SRV_BATCH:-off}"
@@ -134,39 +142,42 @@ for shape in "${SHAPES[@]}"; do
 
   echo "== ds4 $TAG: $shape (p$prompt/o$output) @ c${LEVELS[*]} (max_s=$MAX_SECONDS, seed=$SEED, temp=$TEMP) ==" >&2
   tps=(na na na na na); status="measured"; peak=0
-  ran_levels=(); ran_tps=()          # parallel arrays over ATTEMPTED levels — the validity input
+  ran_levels=()                      # the levels actually ATTEMPTED — the validity input
   for level in "${LEVELS[@]}"; do
     idx="$(col_index "$level")"; [ "$idx" -ge 0 ] || continue
     if run_level "$bundle" "$level" "$data"; then
       tps[idx]="$TPS_OUT"
-      ran_levels+=("$level"); ran_tps+=("$TPS_OUT")
+      ran_levels+=("$level")
       echo "   c$level = $TPS_OUT tok/s" >&2
     else
       tps[idx]="hang"; status="crash"
-      ran_levels+=("$level"); ran_tps+=("hang")   # a hung level WAS run: its missing json is a verdict
+      ran_levels+=("$level")   # a hung level WAS run: its missing json is itself a verdict
       echo "   c$level = CRASH/hang (see $bundle/level_c$level.log)" >&2
       break
     fi
     p="$(peak_gb)"; awk -v a="$p" -v b="$peak" 'BEGIN{exit !(a>b)}' && peak="$p"
   done
 
-  # Validity: rules live in the library. We consume the verdict, we do not classify it.
+  # Validity: rules live in the library. We consume its verdict + status floor and classify nothing.
   set +e
-  v_out="$(ahl_validity "$bundle" "$(IFS=,; echo "${ran_levels[*]-}")" "$(IFS=,; echo "${ran_tps[*]-}")")"
+  v_out="$(ahl_validity "$bundle" "$(IFS=,; echo "${ran_levels[*]-}")" \
+             "${tps[0]},${tps[1]},${tps[2]},${tps[3]},${tps[4]}" \
+             --node-profile "$REPO_ROOT/results/$NODE_FP/node_profile.json")"
   v_rc=$?
   set -e
-  case "$v_out" in
-    *$'\t'*) req_counts="${v_out%%$'\t'*}"; validity="${v_out#*$'\t'}" ;;
-    *)       req_counts="na"; validity="${v_out:-na}" ;;
+  IFS=$'\t' read -r validity req_counts floor <<< "$v_out" || true
+  : "${validity:=na}"; : "${req_counts:=na}"; : "${floor:=na}"   # a column value is never empty
+  if [ "$v_rc" -ne 0 ]; then                    # the library itself failed: no verdict was reached,
+    floor="void"                                # so the row cannot be cited either way
+    echo "   !! validity library failed (rc=$v_rc) — row recorded as void" >&2
+  fi
+  case "$floor" in
+    ok)           ;;
+    suspect|void) [ "$status" = crash ] || status="$floor" ;;
+    *)            [ "$status" = crash ] || status="void" ;;   # unknown floor: refuse to cite
   esac
-  : "${req_counts:=na}"; : "${validity:=na}"     # contract: a column value is never empty
-  case "$v_rc" in
-    0) ;;
-    1) [ "$status" = crash ] || status="suspect" ;;   # suspect verdict(s)
-    *) [ "$status" = crash ] || status="void" ;;      # fatal verdict(s), or the library itself failed
-  esac
-  if [ "$status" = crash ]; then rc_all=3                       # the box broke: outranks validity
-  elif [ "$v_rc" -ne 0 ] && [ "$rc_all" -eq 0 ]; then rc_all=4  # numbers are not citable
+  if [ "$status" = crash ]; then rc_all=3                        # the box broke: outranks validity
+  elif [ "$floor" != ok ] && [ "$rc_all" -eq 0 ]; then rc_all=4  # numbers are not citable
   fi
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
