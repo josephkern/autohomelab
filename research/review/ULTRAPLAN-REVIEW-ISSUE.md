@@ -1,5 +1,8 @@
 # [Review] Ultraplan review of autohomelab: correctness of the measurement pipeline, gate design, and what "validated" actually certifies
 
+**POSTED:** https://github.com/josephkern/autohomelab/issues/1 (2026-08-19). This file is the
+source of record for the issue body; edit here and update the issue if it changes.
+
 ## Why now
 
 The project has reached a scale where its conclusions are being trusted operationally:
