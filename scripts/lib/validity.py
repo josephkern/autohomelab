@@ -21,10 +21,14 @@ Contract v1.2 (2026-08-19, four independent verifiers) is folded in on top:
       clause fired alone on 3 of 693 bundles, all three the most reproducible bracket on
       this node (CV 0.59-0.70%), and it APPROVED 10 of the 15 genuinely starved levels
       because a coder completion carries ~1000 tokens (3 requests clear a 2048 budget).
-  A2. `survivorship` measures EXCESS discard: `incomplete > level` (subtract the
-      steady-state in-flight set) AND `incomplete/(ok+incomplete) > AHL_DISCARD_TOL`.
-      v1.1's `incomplete >= successful` was `successful <= level` in disguise and could
-      not fire below a 50% discard rate — the rule's own justification cites 32.4%.
+  A2. `survivorship` fires on MAJORITY discard: `ok > 0 and incomplete > ok`, i.e. the
+      published mean is an average over a minority of the work started. Two earlier forms
+      were wrong and the rule carries the measurements: v1.1 used this condition but
+      justified it as a general bias detector (it cannot fire below 50% discard), and
+      v1.2's first form `incomplete > level` was unsatisfiable — GuideLLM bounds in-flight
+      by the level — so it fired ZERO times on 690 levels. The systemic 30-48% coder
+      discard is a METHODOLOGY finding (lab notes + audit), not a per-row verdict: at a
+      30% threshold it would flag 19 of 23 coder rows.
   A3. new FATAL `no_output`: successful > 0 but tok/s null / non-finite / <= 0. There was
       a ceiling on throughput and no floor (NemotronH emits zero tokens under think-off).
   A4. `errored` ESCALATES: > AHL_ERR_FATAL (50%) is fatal (`errored_fatal`), 10-50% stays
@@ -93,9 +97,9 @@ AHL_DROP_TOL = 0.10         # an ADJACENT higher level this far below its predec
 AHL_ERR_TOL = 0.10          # errored / (successful+errored) > this -> errored (suspect)
 AHL_ERR_FATAL = 0.50        # ... and > this -> errored_fatal (A4). A dead endpoint answers
                             # every request instantly and mostly with an error.
-AHL_DISCARD_TOL = 0.30      # EXCESS discard fraction above which survivorship fires (A2),
-                            # measured only once `incomplete` exceeds the level's own
-                            # steady-state in-flight set.
+AHL_DISCARD_TOL = 0.30      # RETIRED 20260819: the discard-fraction form flagged 83% of
+                            # coder rows (methodology, not per-row defect). Kept for the audit's
+                            # reporting only; the survivorship RULE is majority-discard.
 AHL_ROOFLINE_SAFETY = 3.0   # SAFETY multiplier on the bandwidth roofline
 AHL_MIN_MODEL_GB = 1.0      # fallback bytes-per-token (GB) when the model size is unknown.
                             # Stays 1.0: deriving bytes/token from checkpoint size voids
@@ -585,28 +589,32 @@ def verdicts(levels: Mapping, ceiling_fn: Optional[Callable] = None) -> list:
             elif err_rate > err_tol:
                 found.add(tag_verdict(V_ERRORED, lvl))
 
-        # A2 survivorship: GuideLLM's successful.mean drops the requests still in flight,
-        # and those are the SLOW ones -- so a level that discards a large share of its work
-        # reports the mean of its faster part. `incomplete > lvl` subtracts the
-        # steady-state in-flight set (the median `incomplete` across this corpus is exactly
-        # `level - 1`), so what is left is EXCESS discard rather than sample size in
-        # disguise. Never fires on an empty level: nothing was discarded there.
+        # survivorship (v1.2 A2, RE-ADJUDICATED 20260819 after measurement).
+        # GuideLLM's successful.mean silently drops the requests still in flight, and those
+        # are the SLOW ones, so the reported mean is the mean of the faster part. This rule
+        # fires when a MAJORITY of the work started at a level was discarded: the published
+        # number is then an average over a minority of the requests.
         #
-        # MEASURED, and reported to the orchestrator (F3 sweep, 2026-08-19): across all 690
-        # parseable level jsons on this node `incomplete` NEVER exceeds `lvl` -- 88.8% sit
-        # at exactly lvl-1, 10.1% at lvl, 1.0% below; max ratio 1.000. That is structural,
-        # not luck: GuideLLM's in-flight set is bounded by the concurrency level, so
-        # `incomplete > lvl` cannot be true. AS WRITTEN THIS RULE FIRES ZERO TIMES ON THE
-        # CORPUS -- including on all 53 level-instances discarding >30% that it was
-        # introduced to catch (v1.1's form caught 20 of them). It is implemented exactly as
-        # adjudicated in contract v1.2 A2 and deliberately NOT quietly retuned, because the
-        # committed journal is being recomputed from these verdicts. Candidate repairs and
-        # their level-instance counts are in the F3 report: `incomplete >= lvl` -> 19, the
-        # discard fraction alone -> 53. Awaiting adjudication.
-        if not c.missing:
-            seen = c.ok + c.incomplete
-            if seen > 0 and c.incomplete > lvl and (c.incomplete / seen) > discard_tol:
-                found.add(tag_verdict(V_SURVIVORSHIP, lvl))
+        # History, kept because two adjudications went wrong here and the reasons matter.
+        # v1.1 used `incomplete >= ok` but justified it as a general bias detector; a
+        # verifier showed that is arithmetically `ok <= level` (the in-flight set at stage
+        # end is ~level) and therefore cannot fire below a 50% discard rate, while the
+        # justification cited 32.4%/46.2% regimes. v1.2 A2 then tried `incomplete > level`
+        # to subtract that in-flight set -- but GuideLLM BOUNDS in-flight by the level, so
+        # that condition is unsatisfiable and the rule fired ZERO times on 690 levels.
+        # Measured row impact of the alternatives on this corpus (315 rows, 23 coder):
+        # discard>30% flags 19/23 coder rows, >40% flags 13/23, >50% flags 10/23.
+        # A verdict that fires on 83% of a shape is a statement about the METHODOLOGY, not
+        # a per-row defect signal, and it is the flag-fatigue failure this layer must avoid.
+        #
+        # So the rule is deliberately a MAJORITY-DISCARD rule, and its limit is stated
+        # rather than implied: it does NOT catch the systemic 30-48% discard that the coder
+        # shape shows at high concurrency. That bias is real, it is a property of the
+        # measurement method rather than of any single run, and it is recorded in the
+        # AGENTS.md lab notes and research/review/AUDIT-measurement-validity.md instead of
+        # being flagged 19 times per campaign. Never fires on an empty level.
+        if not c.missing and c.ok > 0 and c.incomplete > c.ok:
+            found.add(tag_verdict(V_SURVIVORSHIP, lvl))
 
         if ceiling_fn is not None and c.tps is not None and not c.missing:
             cap = ceiling_fn(lvl)
