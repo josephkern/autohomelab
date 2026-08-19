@@ -1,9 +1,9 @@
-# Measurement-validity contract (v1)
+# Measurement-validity contract (v1.1)
 
 The binding spec for the §1 work of [issue #1](https://github.com/josephkern/autohomelab/issues/1).
-Authored 2026-08-19 as the fixed interface ten parallel agents build against. **Implement to this
-spec exactly.** If you believe a rule here is wrong, implement it anyway and say so in your report —
-adjudication is the orchestrator's call, not a unilateral edit.
+v1.0 authored 2026-08-19 as the fixed interface ten parallel agents built against; **v1.1 (same
+day) folds in the eleven adjudications those agents' findings forced.** Where v1.1 differs from
+v1.0, v1.1 wins — the implementation matches v1.1.
 
 ## 0. Why
 
@@ -11,15 +11,18 @@ The project's only product is measurements. Three defects in one session each wr
 `status=measured` rows that were wrong and raised no error: a c32 figure averaged over **2**
 completed requests, a `tps_c16` of **449,358** from a dead endpoint, and a spec-decode config
 scored by a loglikelihood task returning `NaN` for 56,168 requests. The failure mode of this
-codebase is not a crash, it is a plausible number. This contract adds the missing validity layer.
+codebase is not a crash, it is a plausible number.
+
+**Scope limit, stated plainly:** the third defect is a **Gate 2** failure. Every rule below reads
+GuideLLM level JSON, so nothing here would catch a repeat of it. This contract closes the
+throughput path only. Gate 2 has no validity layer and that remains an open follow-up.
 
 ## 1. Single source of truth
 
 `scripts/lib/validity.py` is the **only** implementation of the rules. `scripts/lib/validity.sh`
-is a thin bash shim for the `bench*.sh` callers; it must not re-implement any rule. Four files
-currently hard-code the header string (`bench.sh`, `bench_ds4.sh`, `bench_llamacpp.sh`,
-`aggregate.py`) — after this work the header exists once, in the library, and is consumed from
-there.
+is a thin bash shim; it re-implements nothing. The header string previously existed in four
+hard-coded copies (`bench.sh`, `bench_ds4.sh`, `bench_llamacpp.sh`, `aggregate.py`) — all four now
+consume it from the library.
 
 ## 2. `results.tsv` schema (23 columns)
 
@@ -29,97 +32,113 @@ load_s  max_s  seed  tps_c1  tps_c4  tps_c8  tps_c16  tps_c32  peak_gb
 req_counts  validity  knobs  status  notes  data
 ```
 
-Three new columns, inserted after `peak_gb`, before `status` (the trailing `status notes data`
-tail is preserved so eyeballing a row is unchanged):
+- **`req_counts`** — per-level request outcome as **`ok/incomplete/errored`** (that order),
+  semicolon-joined, run levels only: `c1:41/0/0;c16:118/4/0`. A level that ran but produced no
+  parseable JSON renders `c16:na`. `na` for the whole field when no bundle survives.
+- **`validity`** — `ok`, or a `+`-joined list of verdict tokens (§3).
+- **`knobs`** — effective knob set, `k=v` comma-joined:
+  `levels=1|16,max_s=180,seed=42,prompt=512,output=256,stall=90,ltimeout=480,gllm=0.6.0`.
 
-- **`req_counts`** — per-level request outcome, `ok/incomplete/errored`, semicolon-joined, only
-  for levels actually run: `c1:41/0/0;c16:118/4/0`. `na` when unknown (historical rows with no
-  retained bundle). This is the column that makes validity auditable without the raw bundle.
-- **`validity`** — `ok`, or a `+`-joined list of verdict tokens (§3): `low_sample+nonmonotonic`.
-- **`knobs`** — the full effective knob set resolved at run time, `k=v` comma-joined:
-  `levels=1,16,max_s=180,seed=42,prompt=512,output=256,stall=90,ltimeout=480,gllm=0.6.0`.
-  Rationale: a baseline run at `MAX_SECONDS=600` and a finalize run at the 180 default were
-  indistinguishable in the journal until someone compared curve shapes.
+**Value encoding (v1.1).** No value may contain the pair separator. List values use `|`
+(`levels=1|16`), so a naive `split(",")` is always correct. v1.0's `levels=1,16` example was not
+round-trippable and is withdrawn.
 
-Column order is fixed. Values are never empty — use `na`. No tabs or newlines inside a value.
+**`tps_c*` sentinels.** `na` = level not run. **`hang`** = the level that wedged — an undocumented
+sentinel present on 13 historical cells. Anything parsing these columns as float must handle both.
+
+Column order is fixed. No value is ever empty (`na`), and none contains a tab or newline.
 
 ## 3. Verdict tokens
 
-Computed per row from the per-level GuideLLM JSON.
+**Tokens carry the level they refer to (v1.1):** `low_sample@c1`, `no_data@c32`,
+`survivorship@c16`. Only `ok` and `nonmonotonic` are row-wide and untagged. Rationale: severity was
+per-row in v1.0, so a structurally-thin c1 sentinel condemned a campaign's c16 objective. Consumers
+gate on the level they actually cite. It also names the wedged level on a crash row.
 
 | token | rule | severity |
 |---|---|---|
 | `ok` | all checks pass | — |
-| `no_data` | a run level has `successful < AHL_MIN_DATA` (default **5**), or its `level_c<N>.json` is missing/unparseable | fatal |
-| `low_sample` | a run level has `successful < AHL_MIN_SUCCESSFUL` (default **20**, per the AGENTS.md rule of thumb) | suspect |
-| `over_roofline` | a level's tok/s exceeds the physical ceiling of §4 | fatal |
-| `nonmonotonic` | a higher concurrency level is more than **10%** below a lower one (plateau and noise are expected on this box; only a real inversion trips it) | suspect |
-| `errored` | a level has `errored > 10%` of `successful + errored` | suspect |
+| `no_data` | a run level has `successful < AHL_MIN_DATA` (**5**), or its `level_c<N>.json` is missing/unparseable | fatal |
+| `low_sample` | `successful * mean_output_tokens < AHL_MIN_TOKENS` (**2048**) **OR** `successful < max(AHL_MIN_DATA, min(20, 4*level))` | suspect |
+| `over_roofline` | a level's tok/s exceeds the §4 ceiling | fatal |
+| `survivorship` | `incomplete >= successful` | suspect |
+| `nonmonotonic` | a run level is more than **10%** below the **immediately preceding** run level | suspect |
+| `errored` | `errored > 10%` of `successful + errored` | suspect |
+| `na` | rules could not be evaluated (no bundle) — never `ok` | — |
 
-`no_data` and `low_sample` are mutually exclusive — report the more severe. Verdicts are computed
-over **run** levels only; `na` (unrun) levels are skipped, never treated as zero.
+**`low_sample` (v1.1).** v1.0's flat 20-request floor was miscalibrated: it fired on 55% of the
+historical corpus, 160 of 181 flagged bundles offended only at c1, and at c1 the sample count is
+`MAX_SECONDS / per-request latency` — arithmetic, not operator error. Measured across 77 replicate
+brackets, the median CV of reported tok/s is 0.39% at n<10 and 1.42% at 10<=n<20 vs 0.56% at
+20<=n<50: **request count does not predict reproducibility; tokens generated does.** The token
+budget is therefore the primary clause. Measured result: 4% suspect, all §0 defects still caught.
 
-Note for implementers: of the three historical defects, the 2-request c32 is caught by `no_data`,
-the 449,358 row by `over_roofline`, and the coder inversion (c8 70.88 > c16 68.88, a 2.8% drop) is
-caught by `no_data` and **not** by `nonmonotonic` — the 10% threshold is deliberately loose because
-`c8 > c16` within noise is a real, legitimate result on a bandwidth-bound box. Sample count is the
-primary detector; monotonicity is a secondary one.
+**`survivorship` (v1.1, new).** GuideLLM's `successful.mean` silently drops incomplete requests,
+which are the *slow* ones, so the reported mean is the mean of the faster half — a directional
+bias that grows with concurrency (chat c1 0.1% discarded, chat c32 10.3%, coder c16 32.4%, coder
+c32 46.2%). This is the mechanism behind the "non-monotonic coder curve": throughput is not
+falling, the estimator stops keeping up.
+
+**`nonmonotonic` is adjacent-only (v1.1)** — each run level against the previous run level, never
+pairwise across the whole curve. This box legitimately plateaus at high concurrency; pairwise-all
+would flag gentle decay as an inversion. v1.0 left this unspecified, which left the rule untested
+at 3+ levels.
+
+`no_data` and `low_sample` are mutually exclusive **per level**. A level is **run** if the journal
+published a cell **or** a bundle file exists — the union. Unrun levels are skipped, never scored as
+zero. A hung level is scored (and its token names it), not skipped. The run-level *list* is
+authoritative over a directory listing, so a stale `level_c8.json` from a previous shape is ignored.
 
 ## 4. Physical ceiling (roofline)
 
-Decode is memory-bandwidth-bound. With batch size B, one decode step reads the weights once and
-emits B tokens, so aggregate throughput cannot exceed
+With batch B, one decode step reads the weights once and emits B tokens:
 
 ```
-ceiling(level) = SAFETY * level * (mem_bw_GB_s / bytes_per_token_GB)
+ceiling(level) = SAFETY * level * (mem_bw_GB_s / bytes_per_token_GB)      GB = 10^9
 ```
 
-- `mem_bw_GB_s` comes from `node_profile.json` -> `gpu.mem_bw_gbs` (new field; the probe must
-  record it — 273 for GB10/LPDDR5X).
-- `bytes_per_token_GB` is the model's active weight bytes per token when known; when unknown fall
-  back to `AHL_MIN_MODEL_GB` (default **1.0**), which yields a loose but sound bound.
-- `SAFETY` defaults to **2.0**. This bound is meant to refute the physically impossible
-  (449,358 tok/s implies 0.0006 GB/token on a 273 GB/s box), not to be tight. A tight bound would
-  produce false positives and get ignored.
+- `mem_bw_GB_s` ← `node_profile.json` → `gpu.mem_bw_gbs` (273 for GB10). Absent or `null` → the
+  check is **skipped**, never guessed.
+- `bytes_per_token_GB` ← `AHL_MIN_MODEL_GB` (**1.0**) unless a caller supplies a real figure.
+  **Do not derive it from checkpoint size:** an MoE reads only its active experts, and the unsloth
+  27B's resident-but-unread vision tower implies 117% of peak bandwidth on a perfectly healthy run.
+  A wrong tightening voids good rows.
+- `SAFETY` = **3.0** (v1.1, raised from 2.0). Measured MTP accepted length on this node reaches
+  2.69, so a legitimate spec-decode config can exceed a 2.0 bound and be fatally voided. 3.0 still
+  catches the 449,358 row by 34×.
 
-If `mem_bw_gbs` is absent from the node profile, the check is **skipped** and the row records
-`validity=...` without `over_roofline` — never invent a bandwidth number.
+Worked: at c16 on 273 GB/s, 449,358 tok/s implies **0.0097 GB/token**. (v1.0 said 0.0006 — that
+dropped the `level` factor from its own formula.)
 
-## 5. Enforcement
+## 5. Enforcement — record and flag, exit 4
 
-Decided: **record and flag, exit non-zero.** A failing run is still written to `results.tsv` — the
-evidence must survive in the committed journal, not only in the gitignored bundle — but:
+A failing run is **still written**; the evidence must survive in the committed journal.
 
-- `status` is downgraded: any fatal verdict -> **`void`**; any suspect verdict -> **`suspect`**;
-  otherwise unchanged (`measured`, or the caller's `STATUS`).
-- `bench.sh` exits **4** on a validity failure (distinct from the existing 3 = crash/hang, so
-  callers can tell "the box broke" from "the numbers are not citable"). A crash still wins: an
-  already-`crash` row keeps `status=crash` and its verdict is recorded in `validity`.
-- Downstream consumers must treat `void` as non-existent data and `suspect` as non-citable:
-  `promote.sh` refuses to promote a config whose supporting rows are `void`/`suspect`,
-  `run_experiment.sh` refuses to compute a median over them, `aggregate.py` filters them out of
-  the default view.
+- Fatal verdict → `status=void`; suspect verdict → `status=suspect`; else the caller's status stands.
+- **`crash` outranks validity** and is **non-valid for every consumer** (v1.1 — v1.0's filtering
+  rules named only void/suspect, leaving a crash row carrying `over_roofline` to pass a status-only
+  filter).
+- **Consumers filter on `validity`, never on `status` alone** (v1.1), for the same reason.
+- `bench.sh` exits **4** on any non-`ok` verdict, **including `suspect` alone** (v1.1, was
+  unspecified); **3** on crash; crash wins when both occur. Callers must treat 4 as *"the row is
+  written but not citable — continue"*, never as an abort.
+- `promote.sh` refuses void/suspect supporting rows; `run_experiment.sh` refuses to median over
+  them; `aggregate.py` hides them by default.
 
 ## 6. Status vocabulary
 
-`measured` (valid, unjudged) · `keep` · `discard` · `crash` (engine wedge/hang) · **`suspect`**
-(measured but invariants question it) · **`void`** (not data; must not be cited). `measured` no
-longer means "a row exists" — it means the invariants passed.
+`measured` (invariants passed) · `keep` · `discard` · `crash` · `suspect` · `void`.
 
 ## 7. Historical rows
 
-313 rows across 15 campaigns; 693 `level_c*.json` bundles are retained locally. Decided: backfill
-`req_counts`/`validity`/`knobs` where the bundles allow, publish an audit of what the invariants
-say about published numbers, and **do not rewrite historical `status` values** — those are
-adjudicated row by row by the orchestrator, because several are already cited in logbooks.
+315 rows across 15 campaigns (v1.0 said 313 — the ctx merge added two). 309 have retained bundles;
+**6 are permanently unauditable, the ceiling on how much of this project's record can ever be
+verified.** Backfill `req_counts`/`validity`/`knobs`; publish an audit; **status is adjudicated by
+the orchestrator, not rewritten in bulk.**
 
-Bundles live under `results/**/data/` which is **gitignored and therefore absent from your
-worktree**. Read them read-only from the main checkout at
-`/home/jk/projects/dgx-homelab/results/...`; write only inside your own worktree.
+Bundles are gitignored and absent from agent worktrees — read them from the main checkout.
 
 ## 8. Rules that still bind
 
-Charter rule 4: helper scripts are `bash` or `python` via `uv`/`uvx` — no other languages, no
-global pip. `set -euo pipefail` in every script. `.env` and `results/**/data/` are never committed.
-No agent runs docker, serves a model, or touches the GPU: the box is a shared single-GPU lab and
-may be serving right now.
+`bash` or `python` via `uv`/`uvx`. `set -euo pipefail`. `.env` and `results/**/data/` never
+committed. No agent runs docker, serves a model, or touches the GPU.
