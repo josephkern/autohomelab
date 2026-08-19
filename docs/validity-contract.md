@@ -1,4 +1,4 @@
-# Measurement-validity contract (v1.1)
+# Measurement-validity contract (v1.2)
 
 The binding spec for the §1 work of [issue #1](https://github.com/josephkern/autohomelab/issues/1).
 v1.0 authored 2026-08-19 as the fixed interface ten parallel agents built against; **v1.1 (same
@@ -146,3 +146,124 @@ Bundles are gitignored and absent from agent worktrees — read them from the ma
 
 `bash` or `python` via `uv`/`uvx`. `set -euo pipefail`. `.env` and `results/**/data/` never
 committed. No agent runs docker, serves a model, or touches the GPU.
+
+
+---
+
+# v1.2 amendments (2026-08-19, post-verification)
+
+Four independent verifiers reviewed the merged v1.1 implementation. These amendments are their
+findings adjudicated. **Where v1.2 differs from v1.1, v1.2 wins.**
+
+## A1. The token-budget clause is REMOVED
+
+`low_sample` is now solely `successful < max(AHL_MIN_DATA, min(20, 4*level))`.
+
+Two verifiers refuted the v1.1 rationale independently, by different methods. The clause fired
+alone on exactly **3 of 693 bundles**, all three the same replicate bracket, whose measured CV of
+**0.59-0.70%** makes it *more* reproducible than the majority of brackets on this node — three
+false positives, zero true positives. Banding CV by token budget runs the wrong way
+(0.70% under 2048 -> 1.28% above 20k), and correlation against measured reproducibility is
+`r = -0.006`. Worse, coder completions carry ~1000 output tokens, so **3 requests clear a 2048
+budget** and 10 of the 15 genuinely starved levels in the corpus would have passed it. The clause
+did not merely fail to detect starvation, it approved it. `AHL_MIN_DATA` was doing all the work.
+
+Retained for the record: v1.1's premise that *request count* does not predict reproducibility is
+confirmed. The inference that *tokens* do was wrong. Neither predicts it on this corpus.
+
+## A2. `survivorship` is REDEFINED
+
+```
+survivorship  <=>  incomplete > level  AND  incomplete/(ok+incomplete) > AHL_DISCARD_TOL (0.30)
+```
+
+v1.1's `incomplete >= successful` is arithmetically `successful <= level`, because the median
+`incomplete` per level across the corpus is exactly `level - 1` — the in-flight set at stage end.
+It therefore could not fire below a 50% discard rate, while the rule's own justification cites
+32.4% (coder c16) and 46.2% (coder c32). 18 level-instances discarding 30-48% were graded `ok`.
+The new form subtracts the steady-state in-flight set before judging, so it measures *excess*
+discard — the actual bias — instead of sample size in disguise. It must not fire on an empty
+level (`ok == 0 and incomplete == 0`).
+
+## A3. New fatal verdict `no_output`
+
+`successful > 0` but `tps` is null, non-finite, or `<= 0` -> **fatal**. There is currently a
+ceiling on throughput and no floor: a serve emitting zero output tokens returns `validity=ok`
+(verified with 200 successful requests at 0.0 tok/s). AGENTS.md records NemotronH doing exactly
+this under think-off, so it is not hypothetical.
+
+## A4. `errored` escalates
+
+`errored/(successful+errored) > 0.50` -> **fatal** (was uniformly suspect). A level with 107,589
+errors and 17 successes — a dead endpoint — carried the same severity as one with 11% errors.
+This is the fingerprint of §0 defect (b) at *any* magnitude, and it is what catches a dead
+endpoint whose reported tok/s happens to land under the roofline (the real 1,992.87 sibling row).
+
+## A5. `na` is never `ok`, in the library too
+
+`parse_validity("na")` returned `["ok"]` and `verdicts({})` returned `["ok"]`. §3 has said since
+v1.1 that `na` means "could not be evaluated — never `ok`"; the library asserted the opposite, so
+any consumer that parsed before checking was wrong by construction. An empty or unreadable bundle
+now yields `na` with a **suspect** floor, never `ok`.
+
+## A6. The harness must supply the roofline input, and must fail CLOSED
+
+`bench.sh` never passed `--node-profile`, so §4 was **dead code on the vLLM path** — the two
+host-process benchers passed it, the primary bencher did not. Separately, when the library call
+failed, `bench.sh` defaulted `STATUS_FLOOR=ok` and exited 0: a `uv` hiccup produced a fully
+citable row. Both are now required behaviour: pass the node profile, and treat any failure to
+evaluate as **not citable** (floor `suspect`, exit 4). The host benchers already fail closed.
+
+## A7. One classifier, and it gates on the level being cited
+
+Six hand-rolled copies of the verdict classifier each tested membership against *level-tagged*
+tokens, so `'no_data@c16' in {'no_data','over_roofline'}` was always false and **no consumer ever
+reported a row as void**. Consumers use the library's `verdict_base`/`split_verdict`/
+`parse_validity_pairs` through a single shared module. A promotion gates on the rows supporting
+the objective it cites (chat c16 by default, falling back to the highest level actually run, since
+the host launchers bench `levels=1` only); tokens tagged at other levels are reported, never
+blocking; anything fatal at the cited level blocks absolutely.
+
+## A8. The acceptance suite must test the SYSTEM, not agree with the library
+
+Mutation testing found 16 surviving mutations: every v1.1 amendment (token clause, survivorship,
+adjacency, level tagging, unrun-levels-not-zeros) and **every enforcement path** — the status
+downgrade, exit 4, the library call itself, the promotion block, the default-view hiding, and the
+Gate-3 handling could each be deleted with 121/121 green. Requirements now:
+
+- Wiring tests **execute** the code path against a fixture bundle. A substring grep is not a test:
+  `_needs("promote.sh", "void", "suspect")` passes on a comment saying they are unhandled.
+- Fixtures must **vary** `output_token_count` (the helper hardcoded 256.0 for every level, so the
+  token and request clauses agreed on 100% of fixtures) and must include more than one healthy
+  real bundle (the false-positive defence was n=1).
+- Level tagging must be asserted on tagged tokens. The compatibility helper returns tagged AND
+  bare names, which makes the suite structurally unable to notice whether tagging exists.
+- **A mutation harness is part of the suite.** A rule with no mutation that turns the suite red is
+  an untested rule.
+
+## A9. Gate 2 gets an acceptance predicate (scope EXPANDED, deliberately)
+
+v1.0/v1.1 scoped §0 defect (c) out as a Gate-2 problem. Verification showed Gate 2 has no
+acceptance predicate whatsoever: a literal `nan` score, a score computed over **37 of 14,042**
+requested samples, and a missing results file all write an `accuracy.tsv` row and report **PASS**,
+because only `lm_eval`'s exit code is consulted. Defect (c) — one of the three defects that
+motivated this entire work — reproduces unchanged today.
+
+This is now in scope. Gate 2 must reject a non-finite score, must compare lm-eval's **effective**
+sample count against the requested one (`n-samples` is in every bundle) and fail below a stated
+fraction, and must fail when no score was produced. `accuracy.tsv` gains the columns needed to
+audit that after the fact, including the sample counts and the long-standing missing `conc`.
+
+## A10. Consistency and honesty fixes
+
+- `assess_bundle(discover=False)` vs the CLI's `discover=True` gave **opposite verdicts on the
+  same evidence**, and the code comment stated the inverse of what the code did. The tested path
+  must be the executed path: the caller's run-level list is authoritative everywhere; only the
+  audit/migration path may opt into discovery, explicitly.
+- The audit's private `unauditable` rule disagrees with the library on 5 rows, and §7's published
+  "6 permanently unauditable" comes from that private rule rather than from the library.
+- `tests/test_verdicts.py` names three tests `test_c_*` after §0 defect (c). They test a missing
+  level JSON, which is unrelated. A reader sees all three defects green. Rename them: this is
+  precisely the mechanism by which a project comes to believe it is protected when it is not.
+- `SAFETY = AHL_ROOFLINE_SAFETY` binds at import, so the documented override path silently fails
+  to move the public alias.
