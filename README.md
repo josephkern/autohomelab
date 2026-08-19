@@ -24,10 +24,12 @@ container runs vLLM* and *what the baseline config should be*. autohomelab makes
 |---|---|---|
 | **Probe** | `node_profile.json` + fingerprint (GPU, VRAM, compute cap, arch, driver, CUDA, RAM, fw) | reads it |
 | **Backend** | pluggable adapter: launch server, health-check, expose OpenAI endpoint (vLLM first) | yes (pinned image per arch) |
-| **Bench** | GuideLLM sweep @ 1/4/8/16/32 concurrency → tok/s curve | no |
-| **Tune** | program.md loop: baseline derived from probe → mutate config → re-sweep → keep if tok/s up | no |
+| **Bench** | GuideLLM sweep @ 1/4/8/16/32 concurrency → tok/s curve, scored against measurement-validity invariants | no |
+| **Tune** | program.md loop: baseline derived from probe → mutate config → re-sweep → keep if **valid** tok/s up | no |
 
-See [docs/architecture.md](docs/architecture.md) and [docs/reproducibility.md](docs/reproducibility.md).
+See [docs/architecture.md](docs/architecture.md), [docs/validation.md](docs/validation.md) (the
+three gates), [docs/validity-contract.md](docs/validity-contract.md) (what makes a measurement
+citable) and [docs/reproducibility.md](docs/reproducibility.md).
 
 ## Repository tree
 
@@ -40,10 +42,16 @@ autohomelab/
 ├── .env.example                  copy → .env (gitignored): HF_TOKEN, AHL_HOST/PORT
 ├── .github/ISSUE_TEMPLATE/       new-node-profile.md, new-model-run.md
 │
-├── scripts/                      harness — bash (system) or python via `uv run`
+├── scripts/                      harness — bash (system) or python via `uv run`  (abridged: 27 files)
+│   ├── lib/  validity.py         SINGLE source of the results.tsv header + the validity rules
+│   │          validity.sh        thin bash shim for the bench*.sh callers (re-implements nothing)
 │   ├── probe.sh                  hardware → results/<node_fp>/node_profile.json + fingerprint
 │   ├── serve.sh                  launch backend from a runbook; records load_s (time-to-healthy)
-│   ├── bench.sh                  GuideLLM per-level sweep → results.tsv row (+ watchdog + sidecar)
+│   ├── bench.sh                  GuideLLM per-level sweep → results.tsv row (+ watchdog + sidecar);
+│   │                             exit 0 clean / 3 crash / 4 validity failure
+│   ├── suite.sh                  all three gates against one serve session → SUITE-<cfg>.md
+│   ├── smoke.sh · eval*.sh       Gate 1 (functional) and Gate 2 (lm-eval / LiveBench / BFCL)
+│   ├── promote.sh                winner → VLLM-<minor>-<org>_<base>_<quant>_final.sh
 │   ├── run_experiment.sh         one experiment: serve once → N benches → median c16
 │   ├── new_variant.sh            copy current best → <date>_<slug>_tuned.sh (one change)
 │   ├── tune_status.py            leaderboard: median c16 per config, best ★
@@ -62,9 +70,11 @@ autohomelab/
 │
 ├── results/<node_fp>/            HARDWARE-KEYED
 │   └── gb10-…/  node_profile.json · node_notes.md
-│       └── <org>/<model>/  results.tsv (data) · logbook.md (narrative) · data/ (raw, gitignored)
+│       └── <org>/<model>/  results.tsv (23-col throughput journal) · accuracy.tsv (Gate 2) ·
+│                            logbook.md (narrative) · SUITE-<cfg>.md · data/ (raw, gitignored)
 │
-├── docs/   architecture.md · reproducibility.md · hardware/gb10-dgx-spark.md · charter.md
+├── docs/   architecture.md · validation.md · validity-contract.md · reproducibility.md ·
+│           contamination-resistant-evals.md · research-loop.md · charter.md · hardware/gb10-dgx-spark.md
 ├── launchers/                    symlinks → runbook .sh (convenience)
 └── source/                       gitignored scratch (e.g. source/vllm clone for grepping kernels)
 ```
@@ -93,7 +103,11 @@ by copying `baseline.sh` to `<YYYYMMDD>_<change>_tuned.sh` and changing one thin
    runbook**; `backends/vllm/image.lock` is the validated-image registry + default.
 2. Every logbook entry records the full driver / firmware / software stack used.
 3. Helper scripts are `bash` (system) or `python` via `uv`/`uvx` only.
-4. `.env` and raw `data/` are never committed.
+4. `.env` and raw `data/` are never committed — which is why each `results.tsv` row carries its own
+   `req_counts` / `validity` / `knobs`: the evidence for a number has to survive in the committed
+   journal, not only in the gitignored bundle.
+5. A measurement that fails the invariants is recorded and flagged (`status=void`/`suspect`), never
+   silently dropped and never citable. See [docs/validity-contract.md](docs/validity-contract.md).
 
 ## Status
 
