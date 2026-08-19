@@ -24,7 +24,7 @@ container runs vLLM* and *what the baseline config should be*. autohomelab makes
 |---|---|---|
 | **Probe** | `node_profile.json` + fingerprint (GPU, VRAM, compute cap, arch, driver, CUDA, RAM, fw) | reads it |
 | **Backend** | pluggable adapter: launch server, health-check, expose OpenAI endpoint (vLLM first) | yes (pinned image per arch) |
-| **Bench** | GuideLLM sweep @ 1/4/8/16/32 concurrency → tok/s curve, scored against measurement-validity invariants | no |
+| **Bench** | GuideLLM sweep @ 1/4/8/16/32 concurrency → tok/s curve, scored against measurement-validity invariants (sample adequacy in generated tokens, survivorship bias, bandwidth roofline) | no |
 | **Tune** | program.md loop: baseline derived from probe → mutate config → re-sweep → keep if **valid** tok/s up | no |
 
 See [docs/architecture.md](docs/architecture.md), [docs/validation.md](docs/validation.md) (the
@@ -48,11 +48,12 @@ autohomelab/
 │   ├── probe.sh                  hardware → results/<node_fp>/node_profile.json + fingerprint
 │   ├── serve.sh                  launch backend from a runbook; records load_s (time-to-healthy)
 │   ├── bench.sh                  GuideLLM per-level sweep → results.tsv row (+ watchdog + sidecar);
-│   │                             exit 0 clean / 3 crash / 4 validity failure
+│   │                             exit 0 clean / 3 crash / 4 not citable (incl. a lone suspect)
 │   ├── suite.sh                  all three gates against one serve session → SUITE-<cfg>.md
 │   ├── smoke.sh · eval*.sh       Gate 1 (functional) and Gate 2 (lm-eval / LiveBench / BFCL)
 │   ├── promote.sh                winner → VLLM-<minor>-<org>_<base>_<quant>_final.sh
-│   ├── run_experiment.sh         one experiment: serve once → N benches → median c16
+│   ├── run_experiment.sh         one experiment: serve once → N benches → median c16 over VALID
+│   │                             rows only; publishes cite=ok|partial|insufficient|no_valid_data
 │   ├── new_variant.sh            copy current best → <date>_<slug>_tuned.sh (one change)
 │   ├── tune_status.py            leaderboard: median c16 per config, best ★
 │   ├── gen_baseline.py           derive a baseline runbook from the node profile
@@ -75,6 +76,10 @@ autohomelab/
 │
 ├── docs/   architecture.md · validation.md · validity-contract.md · reproducibility.md ·
 │           contamination-resistant-evals.md · research-loop.md · charter.md · hardware/gb10-dgx-spark.md
+├── tests/  run.sh — 121-test acceptance suite for the validity layer (stdlib only, no GPU,
+│           no network); run it with AHL_TEST_STRICT=1, where a SKIP fails
+├── research/review/  ULTRAPLAN-REVIEW-ISSUE.md · AUDIT-measurement-validity.md (what the
+│           invariants say about every number this project has published)
 ├── launchers/                    symlinks → runbook .sh (convenience)
 └── source/                       gitignored scratch (e.g. source/vllm clone for grepping kernels)
 ```
@@ -107,7 +112,9 @@ by copying `baseline.sh` to `<YYYYMMDD>_<change>_tuned.sh` and changing one thin
    `req_counts` / `validity` / `knobs`: the evidence for a number has to survive in the committed
    journal, not only in the gitignored bundle.
 5. A measurement that fails the invariants is recorded and flagged (`status=void`/`suspect`), never
-   silently dropped and never citable. See [docs/validity-contract.md](docs/validity-contract.md).
+   silently dropped and never citable. Verdicts name the concurrency level they concern
+   (`low_sample@c1`), and consumers filter on the `validity` column, never on `status` alone. See
+   [docs/validity-contract.md](docs/validity-contract.md) (v1.1).
 
 ## Status
 
