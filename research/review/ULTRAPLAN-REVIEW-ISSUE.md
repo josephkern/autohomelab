@@ -145,6 +145,72 @@ expected value of a candidate wave, given this hit rate?
 
 ---
 
+## 8. A capacity dimension the harness does not model at all — and the one tool that could have caught it is wrong (added 2026-08-19)
+
+Follow-up to §3, with the root cause traced and a second defect found underneath it.
+
+### 8a. Root cause: how a `_final` came to serve 1/32 of its model's context
+
+`VLLM-27-unsloth_Qwen3.8-27B_NVFP4_final.sh` serves `--max-model-len 8192` against a 262,144-native
+model. The chain:
+
+1. `gen_baseline.py` emits `--max-model-len 8192` as a hardware-derived default.
+2. It is **not a throughput knob**, so no tuning candidate in four waves ever touched it.
+3. Both benchmark shapes (`chat` 512/256, `coder` 4096/1024) **fit inside it**, so no gate ever
+   pressured it.
+4. It therefore rode through 4 tuning waves and 3 gates unexamined, into a promoted artifact.
+
+No single step is wrong. The gap is that **nothing in the pipeline asks "what workloads can this
+config actually serve?"** — only "how fast is it on ours, and is it still accurate?"
+
+### 8b. `kv_calc.py` over-estimates KV by 1.87x on hybrid architectures
+
+The one tool that exists to answer the capacity question gives the wrong number for this arch:
+
+```
+kv_calc.py assumed:  256.0 KiB/token   (2 · 64 layers · 4 kv_heads · 256 head_dim · 2 B)
+engine reported:     283,989 tokens in a 36.99 GB pool at util 0.5
+=> MEASURED:         136.6 KiB/token   -> calculator is 1.87x high
+```
+
+Cause: it multiplies by **all** `num_hidden_layers`. `qwen3_5` is a hybrid — **48 of 64 layers are
+Gated DeltaNet**, which carry per-sequence state, not per-token KV; only 16 layers hold real KV.
+The script *detects* this and prints `(hybrid attention detected — KV is an over-estimate)`, but
+still emits the wrong `kv/token` and, worse, a wrong `util` recommendation.
+
+Concretely: it says c8 @ 32K context needs `util 0.72`. Measurement says it **already fits at
+util 0.5**. The error is in the conservative direction, so acting on it would have under-provisioned
+context or over-provisioned memory on a unified-memory box where high util destabilises the host.
+
+### 8c. Context and concurrency trade against one pool, and nothing records the envelope
+
+From the measured 283,989-token pool at util 0.5:
+
+| context used | max concurrent full-length sequences |
+|---|---|
+| 8,192 | 34.7 |
+| 32,768 | 8.7 |
+| 65,536 | 4.3 |
+| 262,144 | **1.08** |
+
+Long-context serving on this node is **single-stream at native context**, and that is arithmetic,
+not a tunable. Note also that the promoted 8192 is *accidentally* matched to the benchmark ceiling:
+32 x 8192 = 262,144 ≈ the 283,989-token pool. **The context setting was implicitly chosen by the
+sweep's top concurrency level, not by anyone.**
+
+### Questions
+
+- Should promotion require a **capacity statement** — the (context x concurrency) envelope a config
+  supports — alongside tok/s and accuracy? A `_final` that cannot state what it can serve is
+  under-specified for its stated purpose ("the canonical config to serve").
+- Should `kv_calc.py` respect `layer_types` / `full_attention_interval` and compute per-arch KV,
+  rather than detecting hybrids and warning while still returning the wrong figure?
+- Should `kv_calc.py` be wired into `gen_baseline.py` so `--max-model-len` is a *derived, recorded*
+  decision rather than a default nobody revisits?
+- Should `results.tsv` record the engine's `GPU KV cache size` so the envelope is derivable per row?
+
+---
+
 ## Suggested review output
 
 1. A severity-ranked defect list for the measurement pipeline (§1) with proposed invariants.
