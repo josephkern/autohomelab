@@ -75,6 +75,12 @@ ahl_level_counts() {
 #   <tps_csv> is the 5 fixed tps_c* cells (c1,c4,c8,c16,c32); `na`/`hang` are accepted.
 #   Returns non-zero only if the library itself failed (a *failing* validity check is a
 #   normal result, reported in the fields — the caller decides on exit 4, per contract §5).
+#   A non-zero return means NO VERDICT WAS REACHED: every caller must fail CLOSED on it
+#   (floor the row at least `suspect` and exit 4), never fall back to `ok` — contract v1.2 A6.
+#   Trailing args are passed straight through to `validity.py check`, which is how a caller
+#   supplies `--node-profile` (required for the §4 roofline) and `--model-gb`. `--discover`
+#   exists there too, but ONLY the audit/migration path may pass it: it scores level jsons the
+#   caller did not list, which is wrong for a live bench (contract v1.2 A10).
 ahl_validity() {
   local bundle="${1:-}" levels="${2:-}" tps="${3:-}"
   [ -n "$bundle" ] && [ -n "$levels" ] || {
