@@ -124,9 +124,9 @@ thin bash shim and re-implements nothing). Column order is fixed, no value is ev
 | `seed` | `AHL_SEED` (default 42) → identical synthetic prompts across configs, so comparisons are paired |
 | `tps_c1 … tps_c32` | GuideLLM `output_tokens_per_second.successful.mean` per level; `na` = level not run, `hang` = the level that wedged |
 | `peak_gb` | peak memory; `na` on unified-memory nodes (nvidia-smi can't report it) — falls back to a system-used proxy |
-| `req_counts` | **new** — per-level request outcome `ok/incomplete/errored`, semicolon-joined, run levels only: `c1:41/0/0;c16:118/4/0`. `na` when no bundle survives. This is what makes a number auditable without the raw bundle |
-| `validity` | **new** — `ok`, or a `+`-joined list of verdict tokens: `low_sample+nonmonotonic` (table below) |
-| `knobs` | **new** — the full effective knob set resolved at run time, `k=v` comma-joined: `levels=1,16,max_s=180,seed=42,prompt=512,output=256,stall=90,ltimeout=480,gllm=0.6.0`. A baseline at `MAX_SECONDS=600` and a finalize at the 180 default used to be indistinguishable in the journal |
+| `req_counts` | **new** — per-level request outcome in the order `ok/incomplete/errored`, semicolon-joined, run levels only: `c1:41/0/0;c16:118/4/0`. A level that ran but left no parseable JSON renders `c16:na`; the whole field is `na` when no bundle survives. This is what makes a number auditable without the raw bundle |
+| `validity` | **new** — `ok`, or a `+`-joined list of **level-tagged** verdict tokens: `low_sample@c1+survivorship@c16` (table below) |
+| `knobs` | **new** — the full effective knob set resolved at run time, `k=v` comma-joined, **list values separated by `|`** so a naive `split(",")` is always right: `levels=1\|16,max_s=180,seed=42,prompt=512,output=256,stall=90,ltimeout=480,gllm=0.6.0`. A baseline at `MAX_SECONDS=600` and a finalize at the 180 default used to be indistinguishable in the journal |
 | `status` | see the status vocabulary below |
 | `notes` | free text: `hang@c<N>` on a wedge, the `thermal=…` sidecar summary, plus any `NOTES=` |
 | `data` | bundle path relative to the repo root (gitignored content) |
@@ -137,22 +137,45 @@ thin bash shim and re-implements nothing). Column order is fixed, no value is ev
 ### Validity verdicts
 
 Computed per row from the per-level GuideLLM JSON; **fatal** verdicts void a row, **suspect**
-verdicts flag it. Full rules and thresholds: [docs/validity-contract.md](docs/validity-contract.md)
-§3–4; the reasoning a human applies by hand is in [docs/validation.md](docs/validation.md) (Gate 3).
+verdicts flag it. Binding rules and thresholds: [docs/validity-contract.md](docs/validity-contract.md)
+§3–4 (**v1.1**); the reasoning a human applies by hand is in [docs/validation.md](docs/validation.md)
+(Gate 3); the pass over the whole published record is `research/review/AUDIT-measurement-validity.md`.
+
+**Tokens carry the level they refer to**: `low_sample@c1`, `no_data@c32`, `survivorship@c16`. Only
+`ok` and `nonmonotonic` are row-wide and untagged. This matters operationally — a thin c1 sentinel
+no longer condemns the c16 objective the campaign is actually tuning; **94.6% of rows carry no
+verdict against c16.** Gate on the level you cite.
 
 | token | rule | severity |
 |---|---|---|
 | `ok` | all checks pass | — |
-| `no_data` | a run level has `successful < AHL_MIN_DATA` (default **5**), or its `level_c<N>.json` is missing/unparseable | fatal |
-| `low_sample` | a run level has `successful < AHL_MIN_SUCCESSFUL` (default **20**) | suspect |
-| `over_roofline` | a level's tok/s exceeds the physical ceiling (bandwidth roofline) | fatal |
-| `nonmonotonic` | a higher concurrency level is >**10%** below a lower one | suspect |
-| `errored` | a level has `errored > 10%` of `successful + errored` | suspect |
+| `no_data` | `successful < AHL_MIN_DATA` (**5**), or `level_c<N>.json` missing/unparseable | fatal |
+| `low_sample` | `successful * mean_output_tokens < AHL_MIN_TOKENS` (**2048**) **OR** `successful < max(AHL_MIN_DATA, min(20, 4*level))` | suspect |
+| `over_roofline` | a level's tok/s exceeds the physical ceiling (bandwidth roofline, SAFETY **3.0**) | fatal |
+| `survivorship` | `incomplete >= successful` — the reported mean is the mean of the faster half | suspect |
+| `nonmonotonic` | a run level >**10%** below the **immediately preceding** run level (adjacent-only) | suspect |
+| `errored` | `errored > 10%` of `successful + errored` | suspect |
+| `na` | the rules could not be evaluated (no bundle) — **never `ok`** | — |
 
-`no_data` and `low_sample` are mutually exclusive (report the more severe). Verdicts cover **run**
-levels only — an `na` level is skipped, never scored as zero. Sample count is the primary detector;
-monotonicity is secondary and deliberately loose, because `c8 > c16` within noise is a legitimate
-result on a bandwidth-bound box.
+`no_data` and `low_sample` are mutually exclusive **per level**. A level counts as **run** if the
+journal published a cell **or** a bundle file exists (the union); unrun levels are skipped, never
+scored as zero; a hung level is scored and its token names it. The published run-level list wins
+over a directory listing, so a stale `level_c8.json` from a previous shape is ignored.
+
+**Why `low_sample` is a token budget, not a request count (v1.1).** A flat 20-request floor fired
+on 55% of the historical corpus, and 160 of 181 flagged bundles offended only at c1 — where the
+sample count is `MAX_SECONDS / per-request latency`, i.e. arithmetic, not operator error. Measured
+across 77 replicate brackets, the median CV of reported tok/s is **0.39% at n<10** and **1.42% at
+10≤n<20** against **0.56% at 20≤n<50**: request count does not predict reproducibility, **tokens
+generated does**. Under the token-budget rule the record reads 90% ok / 4% suspect / 4% void and
+all three motivating defects are still caught. Consequence worth stating: **`coder` characterization
+is no longer suspect by construction** — a `coder(4096/1024)` level carries ~1024 output tokens per
+completion, so a handful of completions clears the 2048-token budget that 20 requests were
+previously demanded for, and the structurally low request count the old rule condemned is now
+correctly read as adequate precision.
+
+Sample adequacy is still the primary detector; monotonicity is secondary and deliberately loose,
+because `c8 > c16` within noise is a legitimate result on a bandwidth-bound box.
 
 ### Status vocabulary
 
@@ -162,7 +185,7 @@ result on a bandwidth-bound box.
 |---|---|
 | `measured` | **the invariants passed** — valid data, not yet judged. It no longer means merely "a row exists" |
 | `keep` / `discard` | adjudicated against the KEEP rule (set via `STATUS=` at bench time) |
-| `crash` | engine wedge/hang; the offending level's tok/s cell is `hang` |
+| `crash` | engine wedge/hang; the offending level's tok/s cell is `hang`. **Non-valid for every consumer** |
 | `suspect` | measured, but an invariant questions it — **not citable** without an adjudication recorded in the logbook |
 | `void` | **not data.** Must not be cited, medianed, plotted, or promoted on |
 
@@ -173,13 +196,27 @@ journal, not only in the gitignored bundle. What changes is the verdict, not the
 
 - Any fatal verdict → `status=void`; any suspect verdict → `status=suspect`; otherwise the caller's
   status stands.
-- **`crash` outranks validity**: an already-`crash` row keeps `status=crash`, and its verdict is
-  still recorded in `validity`.
-- `bench.sh` exits **4** on a validity failure — distinct from **3** (crash/hang), so a caller can
-  tell *"the box broke"* from *"the numbers are not citable"*. 0 = clean.
+- **`crash` outranks validity** — an already-`crash` row keeps `status=crash` and carries its
+  verdict in `validity` — and `crash` is **non-valid for every consumer**.
+- **Consumers filter on `validity`, never on `status` alone.** A `crash` row carrying
+  `over_roofline` would sail through a status-only filter; that is exactly the class of hole this
+  layer exists to close.
+- `bench.sh` exits **4** on *any* non-`ok` verdict — **including a `suspect` on its own** — and **3**
+  on crash; crash wins if both occur; 0 = clean. **Exit 4 means "the row is written but not
+  citable — continue", never "abort"**: a caller that treats it as a fatal error loses the rest of
+  the sweep and the evidence it was about to record.
 - Downstream refuses to launder a bad row: `promote.sh` will not promote a config whose supporting
-  rows are `void`/`suspect`, `run_experiment.sh` will not median over them, `aggregate.py` hides
-  them by default. Operator procedure when this fires: program.md → "Invalid runs".
+  rows are void/suspect/crash (override: `AHL_PROMOTE_OVERRIDE`, below), `run_experiment.sh` will
+  not median over them and publishes `cite=ok|partial|insufficient|no_valid_data` on its `MEDIAN`
+  line, `aggregate.py` hides them by default (`--include-void`, `--include-suspect`, `--validity
+  <token>` to look anyway). Operator procedure: program.md → "Invalid runs".
+- **`AHL_PROMOTE_OVERRIDE` is a justification, not a flag** — `promote.sh` rejects `1`/`yes`/`force`
+  and anything under 12 characters, and writes the text permanently into the promoted `_final.sh`,
+  where it is greppable. Overriding is a human act that leaves a signature; there is deliberately no
+  equivalent in `run_experiment.sh`, because a tuning loop must not self-authorize.
+- **`tests/run.sh`** is the acceptance suite for this layer (121 tests, stdlib only, no GPU or
+  network). Run it with `AHL_TEST_STRICT=1` — a SKIP means "this contract rule was not checked",
+  not "it passed".
 
 ### Schema history — and why this section is normative
 
@@ -188,15 +225,17 @@ This section documented a **16-column** row long after it had become **20** (`lo
 doc change), and it went to **23** on 20260819 with `req_counts`/`validity`/`knobs`. Four files
 hard-coded the header string and all four agreed with each other; the only disagreeing copy was the
 one humans and agents read. That is itself evidence for issue #1 §1 — **the schema changed and the
-reference did not follow**, silently, for months. The header now lives in one place; when it
-changes, this table changes in the same commit.
+reference did not follow**, silently, for months. The header now lives in one place
+(`scripts/lib/validity.py`); when it changes, this table changes in the same commit.
 
-Historical rows (313 across 15 campaigns as of 20260819) get `req_counts`/`validity`/`knobs`
-backfilled where a retained bundle allows it, but **historical `status` values are not rewritten** —
-several are already cited in logbooks, so they are adjudicated row by row (contract §7). Note that
-`keep` has never actually been written to a row (0/313; 295 `measured`, 12 `crash`, 6 `discard`):
-keep/discard adjudication has in practice lived in `logbook.md`, so read a `measured` row as "valid
-and unjudged", not as "kept".
+Historical rows (**315** across 15 campaigns as of 20260819 — the review issue's 313 predates two
+rows added by the ctx merge) get `req_counts`/`validity`/`knobs` backfilled where a retained bundle
+allows it, but **historical `status` values are not rewritten** — several are already cited in
+logbooks, so they are adjudicated row by row (contract §7). **309 of 315 are still auditable; 6 are
+permanently unauditable** — their bundles are gone, and that is the hard ceiling on how much of this
+project's record can ever be verified. Note that `keep` has never actually been written to a row
+(0/315; 297 `measured`, 12 `crash`, 6 `discard`): keep/discard adjudication has in practice lived in
+`logbook.md`, so read a `measured` row as "valid and unjudged", not as "kept".
 
 ## Standard test suite
 
@@ -255,7 +294,9 @@ per-candidate.
   both by hand.
 
 Suite knobs: `FULL`, `LIMIT`, `LEVELS_SET`, `SHAPES`, `MAX_SECONDS` (defaults in the script header).
-Validity knobs: `AHL_MIN_DATA`, `AHL_MIN_SUCCESSFUL`, `AHL_MIN_MODEL_GB` (contract §3–4).
+Validity knobs: `AHL_MIN_DATA` (5), `AHL_MIN_TOKENS` (2048), `AHL_MIN_SUCCESSFUL` (20 — the *ceiling*
+of the per-level request floor, not a flat threshold), `AHL_MIN_MODEL_GB` (1.0), `AHL_ROOFLINE_SAFETY`
+(3.0). Defaults live in `scripts/lib/validity.py`; the library reads the env at **call** time.
 
 ## Hardware notes
 
@@ -264,8 +305,12 @@ Validity knobs: `AHL_MIN_DATA`, `AHL_MIN_SUCCESSFUL`, `AHL_MIN_MODEL_GB` (contra
   rebrands — research across all vendor names.
 - `results/<node_fp>/node_notes.md` — **this physical box's** narrative (firmware quirks, thermals).
 - `node_profile.json` carries `gpu.mem_bw_gbs` — the memory bandwidth the roofline check is derived
-  from (**273** on GB10/LPDDR5X). If the probe couldn't determine it the field is absent and the
-  `over_roofline` check is **skipped**; never hand-write a bandwidth number to make the check run.
+  from. **Present and armed on this node since 20260819: 273** (GB10/LPDDR5X, 128 GB, 256-bit @
+  8533 MT/s), hand-added with a `mem_bw_source` string recording that it is a spec figure and not a
+  probe measurement, and corroborated in-lab at 255 GB/s = 93% of peak (llama.cpp FF711 decode
+  roofline). Where the field is absent or `null` the `over_roofline` check is **skipped** — never
+  guess a bandwidth number to make the check run, and if you add one by hand, record its provenance
+  in `mem_bw_source` the same way.
 
 ## Variance
 
@@ -286,13 +331,19 @@ three rows that passed the invariants, not three rows that exist.
 > layer to the **throughput** path only (`results.tsv`, Gate 3). Checked item by item, it closes
 > **none** of the pre-existing entries below outright — it was a new capability, not a backlog
 > sweep — so nothing here is being ticked off on its account. Items it *touches without closing*
-> are annotated `§1:` inline; the items it *created* are at the end of the list.
+> are annotated `§1:` inline; the items it *created* are at the end of the list, one of which
+> (`gpu.mem_bw_gbs`) closed the same day. The binding spec was amended in **eleven** places on merge
+> evidence: **contract v1.1** is what the code implements and what this file documents.
 
 - [ ] **`promote.sh` version-derivation bug** — it sets the `VLLM-<minor>` name by grepping the
   *first* `vX.Y.Z` in the runbook text, which catches migration-comment lines (e.g. a baseline header
   saying `image v0.22.0 -> v0.23.0` yields `VLLM-22-…` on a 0.23.0 config). Workaround: pass
   `VLLM_TAG=<minor>` (used `VLLM_TAG=23` for the 35B promote). Fix: derive from the pinned
   `VLLM_IMAGE` digest via the `image.lock` catalog, or grep only the `VLLM_IMAGE=` line's comment.
+  Unrelated to, but now living in the same script: **`AHL_PROMOTE_OVERRIDE`** — the escape hatch for
+  promoting on flagged supporting rows. It takes a **justification of ≥12 chars, not a flag**
+  (`1`/`yes`/`force` are rejected), and the text is written permanently into the promoted `_final.sh`,
+  so every override is greppable across the whole runbook tree.
 - [ ] **BUG: grammar-forced tool_choice 500s on the 35B production serve (found 20260712).**
   `tool_choice:"required"` AND named tool_choice both → HTTP 500: xgrammar `Failed to advance FSM
   ... grammar rejected tokens [248069, 271, 248058] ... Terminating request`. `tool_choice:"auto"`
@@ -406,18 +457,21 @@ three rows that passed the invariants, not three rows that exist.
 
 *Created by the §1 validity work (20260819):*
 
-- [ ] **Adjudicate the 313 historical rows.** Contract §7 backfills `req_counts`/`validity`/`knobs`
-  from the 693 retained `level_c*.json` bundles but **deliberately does not rewrite historical
-  `status` values** — several are already cited in logbooks and in promotion decisions, so flipping
+- [ ] **Adjudicate the 315 historical rows** (audit: `research/review/AUDIT-measurement-validity.md`).
+  Contract §7 backfills `req_counts`/`validity`/`knobs` from the 693 retained `level_c*.json`
+  bundles but **deliberately does not rewrite historical `status` values** — several are already cited in logbooks and in promotion decisions, so flipping
   one to `void` silently invalidates a published claim. The backfill produces an audit listing which
   published numbers the invariants now dispute; someone has to walk that list row by row, decide,
   and record the decision in the relevant `logbook.md`. Until then a historical row's `validity`
-  column is *information*, and its `status` is *history*.
-- [ ] **`gpu.mem_bw_gbs` is absent from the existing node profile** (`gb10-1988a9714b4e`, probed
-  2026-06-13), so the `over_roofline` check is **skipped on this node** until the box is re-probed
-  (or the field is added by hand from the platform doc: 273 GB/s for GB10/LPDDR5X). The check is
-  the only invariant that would have refuted the 449,358 tok/s row from first principles, so a node
-  running without it is running with the weakest of the four detectors disabled.
+  column is *information*, and its `status` is *history*. Scope: **309 of 315 rows are auditable; 6
+  never will be** (bundles gone) — that is the permanent ceiling on how much of this record can be
+  verified, and the six should be treated as uncitable rather than assumed good.
+- [x] ~~**`gpu.mem_bw_gbs` is absent from the existing node profile**~~ **DONE 20260819.** Added to
+  `gb10-1988a9714b4e` as `273` with a `mem_bw_source` string recording that it is the GB10 spec
+  figure, hand-added rather than probed, and independently corroborated in-lab at 255 GB/s (93% of
+  peak). The node fingerprint was proven unchanged by the edit. **The roofline is armed today** —
+  `over_roofline@c16` fires on the 449,358 row. No re-probe needed; `probe.sh` gained a
+  `mem_bw_for_gpu()` platform table so new nodes get it automatically.
 - [ ] **Gate 2 has no validity layer at all.** The contract covers throughput rows only. Of the
   three defects that motivated it, the mmlu-on-spec-decode NaN run is a *Gate-2* failure and is
   caught by none of these verdicts — it was fixed by a specific branch-order fix (20260817), not by
@@ -425,10 +479,12 @@ three rows that passed the invariants, not three rows that exist.
   requests errored, how many produced empty output, or what fraction of the task set actually
   scored. The exact analogue of `req_counts`/`validity` for lm-eval rows is missing, and the same
   class of "plausible number over a degraded subset" is still possible on the quality gate.
-- [ ] **`keep` has never been written to a `results.tsv` row** (0 of 313; 295 `measured`, 12
+  Contract v1.1 §0 now states this scope limit in the spec itself rather than leaving it implied —
+  which is the right place for it, but does not make the gap any smaller.
+- [ ] **`keep` has never been written to a `results.tsv` row** (0 of 315; 297 `measured`, 12
   `crash`, 6 `discard`). Keep/discard adjudication lives in `logbook.md` prose, so no tool can
   answer "which rows support this promotion?" from the journal alone — `promote.sh` can only check
-  that supporting rows are not `void`/`suspect`, not that they were ever affirmatively kept. Either
+  that supporting rows are valid, not that they were ever affirmatively kept. Either
   wire `STATUS=keep` into `run_experiment.sh`'s decision, or drop `keep` from the documented
   vocabulary and say plainly that the row-level statuses are validity states, not verdicts.
 
@@ -446,24 +502,60 @@ three rows that passed the invariants, not three rows that exist.
   normally, and it would have reported a score over whatever subset happened not to NaN.
 - **Two of the three were caught only because a human eyeballed the shape of the numbers.** The
   third was caught by an odd request count on a progress bar. That is not a control; that is luck,
-  and it does not scale to 313 rows across 15 campaigns.
+  and it does not scale to 315 rows across 15 campaigns.
 - The common structure: every failing component **kept running and kept producing output**.
   GuideLLM averages `successful` only and silently drops in-flight requests; lm-eval retries a 400
   and continues; a dead endpoint returns fast, and fast looks like throughput. Each layer degraded
   gracefully into a number, and a number is exactly what the journal accepts.
-- The fix is not more care. It is **invariants that run on every row**: minimum successful count per
-  level, a physical roofline (449,358 tok/s **at c16** on a 273 GB/s box implies 16×273/449,358 =
-  0.0097 GB of weight traffic per token, i.e. a **9.7 MB model** — refutable from first principles
-  without knowing which model was served), monotonicity, error rate. Plus
+- The fix is not more care. It is **invariants that run on every row**: sample adequacy measured in
+  **tokens generated, not requests completed** (2048-token budget), survivorship (`incomplete >=
+  successful`), a physical roofline (449,358 tok/s **at c16** on a 273 GB/s box implies
+  16×273/449,358 = 0.0097 GB of weight traffic per token, i.e. a **9.7 MB model** — refutable from
+  first principles without knowing which model was served), adjacent monotonicity, error rate. Plus
   the counts written INTO the committed row (`req_counts`), because the bundle that proves a number
   is gitignored and the number is not.
+- **Calibrating the invariants was itself measurement work, and the first calibration was wrong.**
+  The flat 20-request floor shipped in contract v1.0 flagged 55% of the corpus — a detector that
+  fires on the majority of good rows is a detector nobody reads. Three independent agents caught it
+  by running the rule over the real record before trusting it, and the replacement (token budget +
+  `max(5, min(20, 4*level))`) lands at 4% suspect with all three defects still caught. **Run a new
+  invariant over the existing corpus before you ship it**: a rule you cannot afford to obey is worse
+  than no rule, because it teaches people to ignore the column.
 - **Generalize it:** any metric derived from "the mean of the requests that finished" is a lie
   whenever the interesting failure is *not finishing*. Before trusting a mean, ask what got
   excluded from it. The corollary for tooling: when a component fails, prefer that it stop rather
   than continue at reduced fidelity, and when it can't stop, make the fidelity a recorded column.
-- Rules now: [docs/validity-contract.md](docs/validity-contract.md) (binding), the Results-model
-  section above (schema + vocabulary), [docs/validation.md](docs/validation.md) (Gate 3 by hand),
-  program.md → "Invalid runs" (what an operator does about it).
+- Rules now: [docs/validity-contract.md](docs/validity-contract.md) **v1.1** (binding), the
+  Results-model section above (schema + vocabulary), [docs/validation.md](docs/validation.md)
+  (Gate 3 by hand), program.md → "Invalid runs" (what an operator does about it),
+  `research/review/AUDIT-measurement-validity.md` (what the invariants say about the published
+  record), `tests/run.sh` with `AHL_TEST_STRICT=1` (the acceptance gate, 121 tests).
+
+**PARALLEL AGENTS — disjoint file ownership prevents MERGE conflicts and does nothing about INTERFACE drift (20260819)**
+- Ten agents built the validity layer in ten worktrees with strictly disjoint file ownership. The
+  merge produced **zero file conflicts** and **six API mismatches at the seams**: one agent had the
+  bash shim's field order *and* field count wrong; two coded against library function names that
+  never shipped; one wrote a harness that applied env overrides only across the import, while the
+  library reads its env at **call** time, so every override silently did nothing.
+- **git conflict-free is not integration-tested.** A conflict is a *collision* on the same bytes;
+  the expensive failures here were *agreements that never happened* — two files that both compile,
+  both pass their own author's tests, and disagree about a name, an order, or when a value is read.
+  Nothing in the VCS can see that, and none of the six would have been caught by review of either
+  file alone.
+- What actually caught them: a **hermetic acceptance suite written against the contract rather than
+  against any implementation** (`tests/run.sh`, 121 tests, stdlib only, no GPU/network/container),
+  run with `AHL_TEST_STRICT=1` so a SKIP fails — because pre-merge those tests skip with a message
+  naming exactly what is missing, and post-merge a skip means "this contract rule was not checked",
+  which is indistinguishable from a hole.
+- Rules for the next fan-out: (1) fix the interface in a written contract *before* the fan-out, and
+  version it — v1.0 → v1.1 here was eleven evidence-driven amendments, and having a version number
+  is what let ten branches be told, unambiguously, what they now had to match; (2) exactly one
+  agent owns each shared API and everyone else consumes it, never re-implements it; (3) budget an
+  explicit integration pass — the merge is where parallel work costs its time, not the writing;
+  (4) write the seam tests against the spec, not against the code that exists.
+- Corollary for the docs: the same drift is what put a 16-column schema in this file while four
+  scripts agreed on 20. Interfaces drift toward whatever is *executed*; anything not executed —
+  documentation especially — has to be pulled along deliberately.
 
 **Hardware — GB10 (node #1) — UNIFIED MEMORY CAVEATS (expect odd results)**
 - sm_121 (Blackwell), aarch64, ~121.6 GiB **unified** LPDDR5X (~273 GB/s); driver 580.159.03, CUDA 13.0.
@@ -505,10 +597,24 @@ three rows that passed the invariants, not three rows that exist.
   56.42, all void; the chat shape at 39–42 successful was fine). **Before trusting any GuideLLM mean,
   check the successful/incomplete counts in the level json**:
   `jq '.benchmarks[0].metrics.request_concurrency | {ok:.successful.count, inc:.incomplete.count}'`.
-  Rule of thumb: want ≥20 successful per level; slow dense models need `MAX_SECONDS>=600` for coder.
-  **This check is now automated** — that ≥20 rule of thumb is the `low_sample` verdict and the
-  counts land in the row's `req_counts` column (Results model above). Run the `jq` by hand only when
-  you are looking at a historical row whose bundle predates the columns.
+  Slow dense models need `MAX_SECONDS>=600` for coder.
+  **This check is now automated** — the counts land in the row's `req_counts` column and the
+  judgement in `validity` (Results model above). Run the `jq` by hand only for a historical row
+  whose bundle predates the columns.
+  **CORRECTION 20260819 — the old "≥20 successful per level" rule of thumb is RETIRED, and this
+  note's explanation of the non-monotonic coder curve was the wrong mechanism.** (a) Request count
+  does not predict reproducibility: median CV of reported tok/s across 77 replicate brackets is
+  **0.39% at n<10** and **1.42% at 10≤n<20** vs **0.56% at 20≤n<50**. Tokens generated is what
+  predicts it, hence the `AHL_MIN_TOKENS=2048` budget. A coder level at ~1024 output tokens per
+  completion clears that budget in a handful of requests; a chat c1 level with 19 completions at
+  ~256 tokens each carries ~4900 and clears it easily too. Twenty requests was never the quantity
+  that mattered. (b) The inverted coder curve is **survivorship bias**, not a small-sample artifact:
+  `successful.mean` drops the `incomplete` requests, and the dropped ones are the SLOW ones, so the
+  reported mean is the mean of the faster half — a directional bias that grows with concurrency.
+  Measured discard rates on our own record: chat c1 **0.1%**, chat c32 **10.3%**, coder c16 **32.4%**,
+  coder c32 **46.2%**. At coder c32 nearly half the work is thrown away before the average is taken.
+  Throughput is not falling at high concurrency; the estimator stops keeping up. That is now the
+  `survivorship` verdict (`incomplete >= successful`).
 
 **llama.cpp host backend — GB10 lessons (FF711 campaign, 20260809)**
 - **`CTX = CTX_PER_SLOT * NP` in the launcher is a trap.** Raising `NP` alone silently doubles total

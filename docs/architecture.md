@@ -45,8 +45,12 @@ single-definition property is the point: the four writers previously hard-coded 
 independently, which is how the documented schema drifted three columns behind reality.
 
 Consequence for the layer above: the Tune layer no longer consumes tok/s, it consumes *valid* tok/s.
-`void` rows are excluded from medians, `promote.sh` refuses to promote on them, and `aggregate.py`
-hides them by default. Spec: [validity-contract.md](validity-contract.md).
+`void`, `suspect` and `crash` rows are excluded from medians, `promote.sh` refuses to promote on
+them (override: a written `AHL_PROMOTE_OVERRIDE` justification, stamped into the artifact), and
+`aggregate.py` hides them by default. Consumers filter on the **`validity`** column, never on
+`status` alone — a crash row carrying `over_roofline` would pass a status-only filter. Verdicts are
+tagged with the level they concern (`low_sample@c1`), so a consumer gates on the level it cites.
+Spec: [validity-contract.md](validity-contract.md) (v1.1); acceptance suite: `tests/run.sh`.
 
 ## Why hardware-as-data matters
 
@@ -78,4 +82,6 @@ Because GuideLLM and litellm only need an OpenAI endpoint:
 results.tsv + logbook → tune decides keep/discard over VALID rows only → next config`.
 
 `bench.sh` exit codes carry the distinction downstream: **0** clean, **3** crash/hang (the box
-broke), **4** validity failure (the numbers are not citable).
+broke), **4** any non-`ok` verdict including a lone `suspect` (the row is written, the numbers are
+not citable — continue, do not abort). `run_experiment.sh` carries the same distinction up to the
+operator as `cite=ok|partial|insufficient|no_valid_data` on its `MEDIAN` line.
