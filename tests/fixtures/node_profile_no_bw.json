@@ -1,0 +1,21 @@
+{
+  "node_fp": "gb10-1988a9714b4e",
+  "probed_at": "2026-06-13T10:25:03Z",
+  "gpu": {
+    "name": "NVIDIA GB10",
+    "count": 1,
+    "compute_capability": "12.1",
+    "memory_kind": "unified",
+    "gpu_memory_mb": null,
+    "effective_mem_mb": 124546
+  },
+  "arch": "aarch64",
+  "system_ram_mb": 124546,
+  "stack": {
+    "driver": "580.159.03",
+    "cuda": "13.0",
+    "vbios": "9A.0B.25.00.00",
+    "kernel": "6.17.0-1021-nvidia",
+    "os": "Ubuntu 24.04.4 LTS"
+  }
+}
