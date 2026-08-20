@@ -1,38 +1,51 @@
 # tests/ — the acceptance suite for the measurement-validity layer
 
-The binding spec is [`docs/validity-contract.md`](../docs/validity-contract.md) — **v1.2**, whose
-amendment block wins wherever it differs from v1.1, and whose closing **"v1.2 status"** section wins
-over the amendment block: A2 and A4 were both wrong as written and were re-adjudicated after
-measuring. The tests follow the shipped forms (`survivorship` = `incomplete > ok`; `errored_fatal`
-as its own base token), not the amendment text. **Every threshold in its §3 and §4 is a test
+The binding spec is [`docs/validity-contract.md`](../docs/validity-contract.md) — **v1.3**. That
+file is an amendment ledger and later sections overrule earlier ones: the v1.2 amendment block wins
+over v1.1, the closing **"v1.2 status"** section wins over the amendment block (A2 and A4 were both
+wrong as written and were re-adjudicated after measuring), and the closing **v1.3** section wins
+over all of it (`keep` retired, `discard` redefined as a signed §7 adjudication). The tests follow
+the shipped forms — `survivorship` = `incomplete > ok`, `errored_fatal` as its own base token, a
+five-word `STATUS_VOCAB` — not the amendment text. **Every threshold in its §3 and §4 is a test
 case here**, both sides of every boundary. This suite is the acceptance gate for issue #1 §1: if
 it is green with no skips *and `tests/mutate.sh` reports no survivors*, the layer does what the
 contract says.
 
-**Current state: `AHL_TEST_STRICT=1 tests/run.sh` = 206 tests, 0 skips, ~12 s. `tests/mutate.sh` =
-26 mutations, 26 killed, 0 survivors, 0 N/A.**
+**Current state: `AHL_TEST_STRICT=1 tests/run.sh` = 279 tests, 0 skips, ~45 s. `tests/mutate.sh` =
+38 mutations, 38 killed, 0 survivors, 0 N/A.**
 
 Those are two different claims, and the second one is why the harness exists. Mutation testing of
 the v1.1 suite found **16 surviving mutations**: every v1.1 amendment and every enforcement path
 could be deleted or inverted with 121/121 still green. A suite that agrees with the library is not
 a test of the library.
 
-The repo's scar makes this concrete. Three separate guards here have been *correct* and
+The repo's scar makes this concrete. **Five** separate guards here have been *correct* and
 *unreachable* — `suite.sh`'s reasoning-before-spec-decode `if/elif` (which burned a 75-minute,
-56,168-request NaN eval), `bench.sh` reading verdict globals nothing ever set, and contract v1.2's
-own `incomplete > level`, which GuideLLM makes unsatisfiable. Two of the three carried a comment
-asserting they were live. **"This condition is correct" and "this condition is reached" are
-different claims; only the second one needs an execution trace.** That is why the wiring tests run
-the real scripts against stubs, and why mutation coverage is part of the gate rather than a nicety:
+56,168-request NaN eval); `bench.sh` reading verdict globals nothing ever set; `--node-profile`
+never being passed, so the roofline was dead on the primary bencher while the two host benchers ran
+it; contract v1.2's own `incomplete > level`, which GuideLLM makes unsatisfiable; and a `trap` that
+could not fire until `LEVEL_TIMEOUT`, because bash defers a trap until the foreground command ends.
+Two of the five carried a comment asserting they were live. **"This condition is correct" and "this
+condition is reached" are different claims; only the second one needs an execution trace.** That is
+why the wiring tests run the real scripts against stubs, why `test_interrupt_recovery.py` actually
+*sends the signal* mid-level, and why mutation coverage is part of the gate rather than a nicety:
 a mutation that does not turn the suite red proves the rule it broke was never exercised.
+
+**And a third claim, learned the hard way in the same wave: TEST FAITHFULNESS.** A green assertion
+can encode the bug — one selftest case asserted that an uncatalogued image should take its version
+from a trailing runbook comment, which was exactly the `promote.sh` defect. And a "surviving"
+mutation can be a bad experiment rather than a coverage gap: one survivor here died as soon as the
+case set its env override *before* sourcing the library, because this library reads env at **call**
+time. Correctness, reachability and faithfulness need three different kinds of evidence; a green
+suite gives you none of them by itself.
 
 This is the repo's first test suite, so it also sets the convention. Two rules shaped it:
 
 - **Hermetic.** No network, no container runtime, no server, no accelerator. The box is a shared
   single-GPU lab that may be serving right now (contract §8), and a benchmark harness whose tests
-  need the hardware they are testing can never be run when it matters. The whole suite is ~12 s,
-  most of it the wiring tests, which run the real `bench.sh`/`aggregate.py`/`promote.sh` against
-  stubbed children rather than reading them as text.
+  need the hardware they are testing can never be run when it matters. The whole suite is ~45 s,
+  most of it the wiring and interrupt tests, which run the real
+  `bench.sh`/`aggregate.py`/`promote.sh` against stubbed children rather than reading them as text.
 - **Zero dependencies.** Python's stdlib `unittest`, driven by bash. Charter rule 4 allows bash or
   python via `uv`/`uvx`; nothing is installed, nothing is pinned, nothing can rot.
 
@@ -50,8 +63,8 @@ tests/mutate.sh survivorship_deleted      # just one
 ```
 
 **The acceptance run is both.** `AHL_TEST_STRICT=1 tests/run.sh` says the rules hold;
-`tests/mutate.sh` says the suite would notice if they stopped holding. The harness takes a few
-minutes because it is deliberately serial (see below); the suite itself is ~12 s.
+`tests/mutate.sh` says the suite would notice if they stopped holding. The harness takes several
+minutes because it is deliberately serial (see below); the suite itself is ~45 s.
 
 `run.sh` uses `uv run --no-project --offline python` (falling back to `python3`), so it never
 touches the network and never pulls the project's heavy `guidellm`/`lm-eval` dependencies.
@@ -76,14 +89,18 @@ any skip into a failure and prints the reasons. **The acceptance run is the stri
 | `test_v12_amendments.py` | The v1.2 block. A1 the token clause is **gone** (an absurd `AHL_MIN_TOKENS` must change nothing) · A2 `survivorship` as finally adjudicated — majority discard, `incomplete > ok`, with the `incomplete == ok` boundary and the two withdrawn forms asserted NOT to fire · A3 `no_output` (zero / negative / missing / NaN tok/s with successful requests) · A4 `errored_fatal` as a distinct base token above 50%, both sides of the boundary · A5 `na` is never `ok`, including `parse_validity("na")` and an empty bundle · A10 the CLI and `assess_bundle` agree on the same evidence, including a stale `level_c8.json`. |
 | `test_roofline.py` | §4. The ceiling at **13103 vs 13105** tok/s at c16 on a 273 GB/s node (SAFETY **3.0**), plus a guard asserting the pair still brackets `SAFETY * 16 * 273` — the old pair said 8735 with a comment reading `2.0 * 16 * 273`, so half of it sat 33% below the real threshold and constrained nothing. Per-level scaling; a known bytes/token tightening it; and a profile **without** `gpu.mem_bw_gbs` **skipping** the check rather than guessing. |
 | `test_encodings.py` | §2 `req_counts` and `knobs`. Round-trip stability, ascending level order, `na` for unknown, the `ok/incomplete/errored` triple order, and that no value can carry a tab or newline into a TSV. Plus the `|` list separator asserted on an actual Python list — the round-trip tests only ever hand the encoder a pre-joined string, so they pass unchanged with the joiner set back to a comma. |
-| `test_status.py` | §5/§6 precedence. `void` outranks `suspect`; `crash` outranks both and still records its verdict; a clean row keeps the caller's `STATUS`; the vocabulary is exactly the six words of §6; the validity exit code is 4. |
+| `test_status.py` | §5/§6/§7 precedence and the **v1.3 vocabulary**. `void` outranks `suspect`; `crash` outranks both and still records its verdict; a clean row keeps the caller's `STATUS`; the vocabulary is exactly the **five** words of §6 and `check_status()` **raises on `keep`** with its retirement notice; a hand-set `discard` without an `adjudicated@YYYYMMDD who: reason` stamp (reason ≥ 12 chars) is refused, and a stamp that parses but says nothing is not a signature; the validity exit code is 4 and a refused invocation is **2**, off the ladder. |
 | `test_schema.py` | §2 header (exactly 23 columns, contract order) and §7 migration: a legacy 20-column row keeps every original value byte-identically in its new position, historical `status` is not rewritten, and the migration is idempotent. |
 | `test_real_bundles.py` | The reality check on minimized real bundles from this node. **Five healthy fixtures** — chat, coder, a five-level sweep, llama.cpp and ds4 — must all come back `ok`; the 2-request c32 must be `void`; the 449,358 row must be `over_roofline` and `errored_fatal`. Plus fixture-integrity guards so a silently edited fixture cannot make the suite lie. |
 | `test_bench_enforcement.py` | §5 and A6 **executed**: the real `bench.sh` runs in a scratch repo with stubbed children, and the assertions are on the emitted row, the exit code and the call log — status downgrade, exit 3 vs 4, `suspect` alone still exiting 4, the row surviving its own verdict, `--node-profile` reaching the library, the roofline firing on the vLLM path and being skipped without a bandwidth figure, and failing **closed** when the library errors. |
 | `test_consumers.py` | §1 and §5 **executed**: the header's single definition (rename the library's last column and watch `validity.sh` and `bench.sh` follow), and `aggregate.py`'s default view holding back void / suspect / crash / `na` / *and a `measured` row whose `validity` is fatal* — the status-only filter's blind spot. |
-| `test_reachability.py` | Runs `scripts/citability_selftest.sh` (68 checks) as part of the suite. It already exercised `promote.sh`, `suite.sh`, `validate.sh` and both runners the right way — by executing them — but nothing ran it, which is why four enforcement mutations survived. |
-| *(Gate 2, outside this suite)* | `scripts/eval_validity_selftest.sh` — **95 checks** on `scripts/eval_validity.py`, the Gate-2 acceptance predicate (contract A9): `no_score` / `nonfinite` / `short_sample` fatal, `zero_score` / `no_samples` suspect, task-tagged verdicts, the 16-column `accuracy.tsv`, and **execution traces proving every Gate-2 branch is reachable for all four runbook variants** — neither / reasoning / spec-decode / **both**, the combination that the original `if/elif` could not reach. Hermetic, synthetic bundles, no GPU. |
-| `tools/mutations.py`, `mutate.sh` | The harness (contract A8). 26 mutations: every §3/§4 rule and every enforcement link. |
+| `test_reachability.py` | Runs `scripts/citability_selftest.sh` (**102 checks**) as part of the suite. It already exercised `promote.sh`, `suite.sh`, `validate.sh` and both runners the right way — by executing them — but nothing ran it, which is why four enforcement mutations survived. |
+| `test_interrupt_recovery.py` | **59 tests, every one of which SIGNALS the real `bench.sh` mid-level** (a marker file marks "provably inside this level", so nothing is a timing guess). An interrupted sweep must still leave a row carrying `incomplete_run`; the write is the atomic unit in both directions (a signal at any of the six command boundaries inside `emit_row` must not lose the row of a sweep that FINISHED); no process outlives the run, and the stall-watchdog must not be orphaned into firing a box-wide `pkill` at somebody else's bench; a signal must not erase a real wedge; an escalating supervisor is ordinary; and the host benchers record an interrupted shape too — the orphan bundle that motivated all of this came from `bench_llamacpp.sh`. |
+| *(Gate 2, outside this suite)* | `scripts/eval_validity_selftest.sh` — **96 checks** on `scripts/eval_validity.py`, the Gate-2 acceptance predicate (contract A9): `no_score` / `nonfinite` / `short_sample` fatal, `zero_score` / `no_samples` suspect, task-tagged verdicts, the 16-column `accuracy.tsv`, and **execution traces proving every Gate-2 branch is reachable for all four runbook variants** — neither / reasoning / spec-decode / **both**, the combination that the original `if/elif` could not reach. Hermetic, synthetic bundles, no GPU. |
+| *(host identity, outside this suite)* | `scripts/hostcfg_selftest.sh` — **108 checks** on `scripts/lib/hostcfg.sh`, the `hp3-` config identity for ds4 / llama.cpp. Feeds the library a **fabricated `/proc`** via `AHL_PROC`, so it needs no server, no root and no GPU; asserts that Gate 2 (`eval.sh`) and Gate 3 (the benchers) hash the *same document* for one process, which is the whole point of the layer. |
+| *(private set, outside this suite)* | `scripts/eval_private_selftest.sh` — **261 checks** on the tier-4 held-out runner, most of them leakage regressions: an adversarial verifier found twelve paths through the first version while its own 139-check selftest was green. |
+| *(statistics, outside this suite)* | `scripts/power_selftest.sh` — **77 CLI checks** (**71** in a worktree, where `results/**/data/` is absent; set `AHL_POWER_DATA_ROOT` to the main checkout) plus 68 numeric self-checks inside `power.py selftest`, each hand-checkable against a published value. |
+| `tools/mutations.py`, `mutate.sh` | The harness (contract A8). **38 mutations**: every §3/§4 rule, every enforcement link, and the interrupt/watchdog paths. |
 
 ## The mutation harness
 
@@ -98,6 +115,16 @@ Three properties are deliberate:
   a clean sheet — the same false green the whole exercise is about.
 - **It is serial.** The first attempt at this raced two mutators over one directory and reported
   everything red, which is that artifact wearing the opposite colour.
+
+A **survivor is a hypothesis, not a finding**: before writing a test for one, confirm the mutant
+really breaks the rule it names. One survivor in the 20260820 wave was an artefact of *when* the
+case set its env override (this library reads env at call time), not of missing coverage.
+
+**And check the table is COMPLETE before reading it as clean.** The harness used to copy the 5.1 GB
+`.venv` per mutation; one run died mid-table on `file changed as we read it` while another agent
+wrote into the tree — a silent `set -e` abort that printed a short table with no failures, which
+looks exactly like a clean sheet. A copy is now 4.8 MB and a failed copy is a loud error. Count the
+rows against `tests/mutate.sh -l`.
 
 A mutation whose pattern no longer matches is reported **N/A**, never green: that means the
 implementation spells the rule differently and the pattern needs updating, not that the rule is
@@ -150,7 +177,8 @@ tables there — not the tests. The surface the suite prefers:
 COLUMNS: list[str]        # 23 names, contract §2 order
 HEADER:  str              # "\t".join(COLUMNS)
 MIN_DATA = 5 ; MIN_SUCCESSFUL = 20 ; SAFETY = 3.0 ; MIN_MODEL_GB = 1.0
-STATUSES = {"measured", "discard", "crash", "suspect", "void"}   # §6 v1.3: `keep` is RETIRED
+STATUS_VOCAB = ("measured", "discard", "crash", "suspect", "void")   # §6 v1.3: `keep` is RETIRED
+STATUSES = STATUS_VOCAB                          # legacy alias, same five words
 EXIT_INVALID = 4 ; EXIT_USAGE = 2        # 2 = the invocation was refused, outside the 3>4>1>0 ladder
 
 def check_status(status, notes=None) -> str      # raises on `keep`, or on an unsigned `discard`

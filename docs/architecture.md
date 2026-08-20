@@ -26,7 +26,7 @@ portable, and why hardware coupling is confined to the probe and the backend.
 ┌─ Tune (portable) ────────────────────────────────────────────────┐
 │ scripts/run_experiment.sh + tune_status.py run the program.md    │
 │ loop: baseline from the probe → mutate config → re-sweep → keep   │
-│ if VALID tok/s up.                                                │
+│ the CONFIG if the median of VALID tok/s is up.                    │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -45,11 +45,14 @@ single-definition property is the point: the four writers previously hard-coded 
 independently, which is how the documented schema drifted three columns behind reality.
 
 Consequence for the layer above: the Tune layer no longer consumes tok/s, it consumes *valid* tok/s.
-`void`, `suspect` and `crash` rows are excluded from medians, `promote.sh` refuses to promote on
-them (override: a written `AHL_PROMOTE_OVERRIDE` justification, stamped into the artifact), and
-`aggregate.py` hides them by default. Consumers filter on the **`validity`** column, never on
-`status` alone — a crash row carrying `over_roofline` would pass a status-only filter. Verdicts are
-tagged with the level they concern (`low_sample@c1`), so a consumer gates on the level it cites.
+`void`, `suspect` and `crash` rows are excluded from medians, and `aggregate.py` hides them by
+default. `promote.sh` gates the **objective** it cites rather than every row sharing the
+`config_hash`: it blocks on a fatal-at-the-objective row, on a crash, or on there being no citable
+objective row at all, and it *reports* everything else (override: a written
+`AHL_PROMOTE_OVERRIDE` justification of ≥12 characters, stamped into the artifact as a comment).
+Consumers filter on the **`validity`** column, never on `status` alone — a crash row carrying
+`over_roofline` would pass a status-only filter. Verdicts are tagged with the level they concern
+(`low_sample@c1`), so a consumer gates on the level it cites.
 **One classifier answers "may this row be cited?" for every consumer — `scripts/citability.py`**;
 it previously existed as five hand-copied `def classify` bodies inside shell heredocs, all five
 carrying the same three bugs.
@@ -61,12 +64,29 @@ predicate for an lm-eval score (`no_score` / `nonfinite` / `short_sample` fatal,
 `eval.sh`'s exit code alone — and a `nan` score, a 37-of-14,042 run and a missing results file all
 reported PASS.
 
-Spec: [validity-contract.md](validity-contract.md) **v1.2** (its amendment blocks and closing "v1.2
-status" section win over anything earlier in that file). Acceptance: `AHL_TEST_STRICT=1
-tests/run.sh` (206 tests) **and** `tests/mutate.sh` (26 mutations, 0 survivors) — the first says the
-rules hold, the second says the suite would notice if they stopped. Plus
-`scripts/citability_selftest.sh` (68 checks) and `scripts/eval_validity_selftest.sh` (95), which
-execute the real consumers against stubs rather than reading them as text.
+**Identity is part of validity, and host-process backends had none.** A vLLM runbook *is* the
+config, so `config_hash = sha256sum <runbook>` is honest. A ds4 / llama.cpp launcher leaves the
+gates nothing to hash but a `.smoke-runbook.sh` stub, so every config of an engine collided on one
+hash — and `promote.sh` selects supporting rows *by* `config_hash`. `scripts/lib/hostcfg.sh`
+computes `hp3-<8 hex>` from the served process instead (argv, the tuning environment, and the
+engine binary by content through `/proc/<pid>/exe`), and **both** `eval.sh` and the host benchers
+use it, so a quality row and a throughput row for one launcher config finally join.
+
+**An interrupted run leaves a row too.** `bench.sh` wrote its row only after the level loop, so a
+hard stop mid-shape left a bundle full of real evidence that no row referenced — invisible to every
+consumer, because the journal is committed and the bundle is gitignored. All three benchers now trap
+and record a partial row carrying the row-wide `incomplete_run` verdict (row-wide because the
+level-scoped classifier ignores `status`, so nothing narrower would have been visible to a gate);
+`scripts/reconcile_bundles.py` recovers the orphans a `SIGKILL` or a power cut still produces.
+
+Spec: [validity-contract.md](validity-contract.md) **v1.3** (its amendment blocks and closing
+"v1.2 status" / "v1.3" sections win over anything earlier in that file). Acceptance:
+`AHL_TEST_STRICT=1 tests/run.sh` (**279 tests**) **and** `tests/mutate.sh` (**38 mutations, 0
+survivors**) — the first says the rules hold, the second says the suite would notice if they
+stopped. Plus four hermetic selftests that execute the real consumers against stubs rather than
+reading them as text: `scripts/citability_selftest.sh` (102),
+`scripts/eval_validity_selftest.sh` (96), `scripts/hostcfg_selftest.sh` (108) and
+`scripts/eval_private_selftest.sh` (261).
 
 ## Why hardware-as-data matters
 
@@ -95,7 +115,10 @@ Because GuideLLM and litellm only need an OpenAI endpoint:
 ## Data flow for one experiment
 
 `probe → gen_baseline → serve (adapter up) → bench (GuideLLM) → validity verdict → append
-results.tsv + logbook → tune decides keep/discard over VALID rows only → next config`.
+results.tsv + logbook → tune keeps or drops the CONFIG on a median over VALID rows only → next
+config`. The keep/drop verdict lands on the `MEDIAN` line and in the logbook, never in a row's
+`status` — that column holds validity states, and its five words are
+`measured` `discard` `crash` `suspect` `void`.
 
 `bench.sh` exit codes carry the distinction downstream: **0** clean, **3** crash/hang (the box
 broke), **4** any non-`ok` verdict including a lone `suspect` (the row is written, the numbers are

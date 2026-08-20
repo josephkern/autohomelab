@@ -49,6 +49,15 @@ Power/storage/networking differences affect dataset & checkpoint **I/O**, not de
   correctly via NVML — but power is **GPU-domain only**, not wall/system (use a wall meter for total).
 - **Filesystem cache can occupy "visible" memory and starve CUDA.** Run `sync && echo 3 | sudo tee
   /proc/sys/vm/drop_caches` before a benchmark for clean, repeatable results.
+- **"Repeatable" is about the numbers, not the tokens — a vLLM serve with prefix caching is NOT
+  run-to-run byte-reproducible.** Measured on this box 20260820: an identical 32-prompt greedy pass
+  repeated against the deployed config (`enable_prefix_caching=True`, `kv_cache_dtype=fp8_e4m3`)
+  gave **7/32 byte-identical** completions; with prefix caching off, **32/32**. A single prompt
+  repeated 5× is deterministic either way, so it is cache *state*, not randomness. Anything needing
+  bit-reproducibility — a differential debug session, a paired item-level eval — must serve
+  `--no-enable-prefix-caching`. Throughput benchmarking is unaffected. (This is an engine property,
+  not a GB10 one; it is recorded here because it interacts with the cache-hygiene advice above.
+  Full note and its limits: AGENTS.md → lab notes.)
 - **CPU and GPU share the 273 GB/s pool** — quiesce/pin CPU work during a run.
 - Known "GPU stuck at ~5–14 W / 0%" power-state bug — verify the GPU is active before trusting low
   numbers.
