@@ -24,3 +24,21 @@ source/*
 
 # agent run logs
 .ahl_logs/
+
+# ── Tier-4 PRIVATE held-out eval (docs/private-eval.md) ───────────────────────
+# This repo is PUBLIC. A private eval item is worth something only while it is unpublished, and
+# `git push` is irreversible — the blob stays in the history and in every clone. The real set
+# therefore lives OUTSIDE the tree ($AHL_PRIVATE_EVAL_DIR, default
+# ~/.local/share/autohomelab/private-eval); these patterns are the second line of defence for
+# whoever authors in the wrong place and runs `git add -A`, and the third is the pre-commit hook
+# (`scripts/eval_private.sh install-guard`). The committed FAKE example set,
+# evalsets/private-example/, is deliberately not matched by any of them.
+private-eval/
+**/private-eval/
+*.private.json
+*.private.jsonl
+private_items*.jsonl
+transcripts/
+**/transcripts/
+*.age
+*.gpg
