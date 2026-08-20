@@ -35,6 +35,8 @@ source/*
 # evalsets/private-example/, is deliberately not matched by any of them.
 private-eval/
 **/private-eval/
+private-eval-transcripts/
+**/private-eval-transcripts/
 *.private.json
 *.private.jsonl
 private_items*.jsonl
@@ -42,3 +44,15 @@ transcripts/
 **/transcripts/
 *.age
 *.gpg
+
+# A new directory under evalsets/ was NOT matched by anything above — which is how 36 real items
+# got staged with `guard: ok` during the adversarial review. Ignore the whole directory and
+# re-admit only the one blessed example (which is already tracked, so the negation is for readers
+# as much as for git).
+evalsets/*
+!evalsets/private-example/
+
+# ...and any items.jsonl anywhere, for the operator who authors in scripts/ or in the repo root.
+items.jsonl
+**/items.jsonl
+!evalsets/private-example/items.jsonl
