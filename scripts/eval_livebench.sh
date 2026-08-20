@@ -54,10 +54,19 @@ SCORE="$(grep -aoiE 'average[^0-9]*([0-9]+\.[0-9]+)' "$BUNDLE/run.log" | grep -o
 SCORES="livebench_${BENCH//\//_}=${SCORE:-na}"
 echo "scores: $SCORES" >&2
 
-HDR=$'run_id\tcommit\tnode_fp\tmodel\tconfig_hash\tscript\tsuite\ttasks\tlimit\tscores\tdata\tthink'
+# accuracy.tsv is 16 columns since docs/validity-contract.md A9. This harness is not lm-eval and
+# emits no `n-samples` bundle, so the Gate-2 predicate cannot be evaluated for its row: `samples`,
+# `validity` and `status` are recorded as `na`, which contract A5 says is NEVER `ok` -- an
+# unevaluable quality number is reported as unevaluable, not asserted clean. A legacy 12-column
+# journal is migrated in place first, so this append can never widen a narrow file.
+migrate_acc(){ [ -f "$1" ] && [ "$(head -1 "$1")" != "$2" ] && \
+  python3 "$SCRIPT_DIR/migrate_accuracy_tsv.py" --tsv "$1" --bundle-root "$REPO_ROOT" --write >&2
+  return 0; }
+HDR=$'run_id\tcommit\tnode_fp\tmodel\tconfig_hash\tscript\tsuite\ttasks\tlimit\tscores\tdata\tthink\tconc\tsamples\tvalidity\tstatus'
+migrate_acc "$TSV" "$HDR"
 [ -f "$TSV" ] || printf '%s\n' "$HDR" > "$TSV"
 DATA_REL="$(realpath --relative-to="$REPO_ROOT" "$BUNDLE")"
-printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
   "$RUN_ID" "$COMMIT" "$NODE_FP" "$MODEL" "$CONFIG_HASH" "$SCRIPT_REL" \
-  "general_lb" "$BENCH${RELEASE:+@$RELEASE}" "full" "$SCORES" "$DATA_REL" "na" >> "$TSV"
+  "general_lb" "$BENCH${RELEASE:+@$RELEASE}" "full" "$SCORES" "$DATA_REL" "na" "${CONC:-na}" "na" "na" "na" >> "$TSV"
 echo "row -> $TSV" >&2

@@ -1,2 +1,2 @@
-run_id	commit	node_fp	model	config_hash	script	suite	tasks	limit	scores	data	think
-20260617-050834-eval	a7ea025	gb10-1988a9714b4e	WeiboAI/VibeThinker-3B	727fd7ca	runbooks/WeiboAI/VibeThinker-3B/baseline.sh	math	aime24,aime25	full	aime24=90.0;aime25=86.67	results/gb10-1988a9714b4e/WeiboAI/VibeThinker-3B/data/20260617-050834-eval	off
+run_id	commit	node_fp	model	config_hash	script	suite	tasks	limit	scores	data	think	conc	samples	validity	status
+20260617-050834-eval	a7ea025	gb10-1988a9714b4e	WeiboAI/VibeThinker-3B	727fd7ca	runbooks/WeiboAI/VibeThinker-3B/baseline.sh	math	aime24,aime25	full	aime24=90.0;aime25=86.67	results/gb10-1988a9714b4e/WeiboAI/VibeThinker-3B/data/20260617-050834-eval	off	16	aime24=30/30;aime25=30/30	ok	measured

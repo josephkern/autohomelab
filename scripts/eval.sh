@@ -2,7 +2,10 @@
 # eval.sh <runbook.sh> [suite] — Gate 2 (quality): lm-evaluation-harness against the live endpoint.
 #   suite ∈ general (gsm8k,mmlu) | coder (humaneval,mbpp) | auto (infer from model name)
 # Env: LIMIT (per-task sample cap; set for fast in-loop checks, unset for the full final run),
-#      GEN_TOKS (default 1024 — CoT on reasoning models overruns lm-eval's stock 256), CONC,
+#      GEN_TOKS (default 1024 — CoT on reasoning models overruns lm-eval's stock 256),
+#      CONC (eval concurrency, default 16 — now RECORDED in the row's `conc` column, so a
+#      quality result finally says which point on the 1..32 curve it was measured at),
+#      AHL_EVAL_MIN_SAMPLE_FRAC (default 0.99 — the completeness floor, see eval_validity.py),
 #      GREEDY (default 1 — pin temperature 0 so the serving --override-generation-config doesn't
 #      bleed into eval; GREEDY=0 uses the server's sampling), GEN_KWARGS (full manual gen_kwargs),
 #      THINK (default on; THINK=off evals GENERATIVE tasks via the chat endpoint with thinking
@@ -15,6 +18,20 @@
 #
 # NOTE: coder tasks EXECUTE generated code (HF_ALLOW_CODE_EVAL + --confirm_run_unsafe_code) — run
 # only against models/endpoints you trust.
+#
+# ── Gate 2 has an ACCEPTANCE PREDICATE (docs/validity-contract.md A9) ─────────────────────────
+# This script used to exit 0 whatever lm-eval returned, and suite.sh judged Gate 2 on that exit
+# code alone. So `mmlu: acc = NaN`, a score over 37 of 14,042 requested samples, and a missing
+# results json all wrote a row and reported PASS — §0 defect (c), unchanged. The row is now
+# scored by scripts/eval_validity.py before it is written, in the throughput layer's vocabulary
+# (`validity` tokens, a `status` floor of void/suspect, "not citable"), and the exit code follows
+# the repo-wide precedence:
+#     3  the harness died on a signal (killed / OOM / a wedge tore it down)
+#     4  the row IS written but is NOT citable (non-finite score, short sample, no score)
+#     1  lm-eval failed for some other reason though the numbers themselves look structurally ok
+#     0  citable
+# 4 means "recorded, do not quote it" — never an abort. A non-zero lm-eval exit never suppresses
+# the row: the evidence must survive in the committed journal (contract §5).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -24,6 +41,30 @@ SUITE="${2:-auto}"
 TARGET="${TARGET:-http://${AHL_HOST:-127.0.0.1}:${AHL_PORT:-8000}}"
 GEN_TOKS_USER="${GEN_TOKS:-}"   # capture whether the caller set it (suites may pick a bigger default)
 GEN_TOKS="${GEN_TOKS:-1024}"; CONC="${CONC:-16}"
+
+# Charter rule 4: python via uv when available; eval_validity.py is stdlib-only, so python3 is a
+# correct fallback (and the one the self-test uses).
+ahl_py() {
+  if [ -n "${AHL_PYTHON:-}" ]; then
+    # shellcheck disable=SC2086
+    $AHL_PYTHON "$@"
+  elif command -v uv >/dev/null 2>&1; then
+    uv run --project "$REPO_ROOT" --quiet python "$@"
+  else
+    python3 "$@"
+  fi
+}
+# The lm-eval invocation, behind one seam. `AHL_LM_EVAL` lets the self-test drive this script with
+# a stub harness that emits synthetic lm-eval bundles — the ONLY way to prove, without a GPU, that
+# a NaN bundle actually fails here rather than merely that a function returns the right verdict.
+ahl_lm_eval() {
+  if [ -n "${AHL_LM_EVAL:-}" ]; then
+    # shellcheck disable=SC2086
+    $AHL_LM_EVAL "$@"
+  else
+    uv run --project "$REPO_ROOT" lm_eval "$@"
+  fi
+}
 
 MODEL=""; SERVED_NAME=""
 # shellcheck disable=SC1090
@@ -90,40 +131,73 @@ echo "== lm-eval $SUITE [$TASKS] limit=${LIMIT:-full} sampling=$([ "$GREEDY" = 1
 # EVAL_TIMEOUT: per-request HTTP timeout (lm-eval default 300s). Long-CoT models (e.g. VibeThinker)
 # generate for many minutes per item (32K tokens @ ~tens of tok/s, slower under concurrency) and 300s
 # times out -> no results. Default 1800s; raise for very long budgets / high CONC.
-uv run --project "$REPO_ROOT" lm_eval --model "$MODEL_TYPE" \
+# lm-eval must NOT abort this script: a failed run still has to leave a row behind (contract §5,
+# "a failing run is still written; the evidence must survive in the committed journal"). Capture
+# the rc and keep going.
+LM_RC=0
+set +e
+ahl_lm_eval --model "$MODEL_TYPE" \
   --model_args "base_url=${ENDPOINT},model=${SERVED_NAME},tokenizer=${TOKENIZER:-$MODEL},num_concurrent=${CONC},max_retries=3,timeout=${EVAL_TIMEOUT:-1800},tokenized_requests=False" \
   --tasks "$TASKS" --gen_kwargs "$GK" ${LIMIT:+--limit "$LIMIT"} "${CHAT_ARGS[@]}" \
   --output_path "$BUNDLE" "${CODE_ARGS[@]}"
+LM_RC=$?
+set -e
+[ "$LM_RC" -ne 0 ] && echo "WARN: lm_eval exited $LM_RC — scoring whatever bundle it left behind" >&2
 
-# lm_eval writes results_*.json under the output dir; extract the headline metric per task.
-RESJSON="$(find "$BUNDLE" -name 'results_*.json' | head -1)"
-SCORES="$(python3 - "$RESJSON" "$TASKS" <<'PY'
-import sys, json
-f, tasks = sys.argv[1], set(sys.argv[2].split(","))
-try: d = json.load(open(f))
-except Exception: print("na"); sys.exit()
-out = []
-# Record only the requested top-level tasks/groups (gsm8k, mmlu, ...) — not the 57 mmlu_* subtasks
-# (full per-subtask detail stays in the raw lm-eval json in the bundle).
-for task, m in (d.get("results") or {}).items():
-    if task not in tasks: continue
-    for k in ("exact_match,strict-match","exact_match,flexible-extract","exact_match,custom-extract",
-              "acc,none","acc_norm,none","pass@1,none","acc","pass@1"):
-        if k in m: out.append(f"{task}={round(m[k]*100,2)}"); break
-    else:
-        # fallback: first real accuracy metric — skip bookkeeping fields (sample_len, alias, etc.)
-        SKIP = {"sample_len", "samples"}
-        nums = {k:v for k,v in m.items() if isinstance(v,(int,float)) and "stderr" not in k and k not in SKIP}
-        if nums: out.append(f"{task}={round(next(iter(nums.values()))*100,2)}")
-print(";".join(sorted(out)) or "na")
-PY
-)"
+# ── Gate 2 acceptance predicate ───────────────────────────────────────────────
+# scripts/eval_validity.py reads the bundle lm-eval just wrote and answers "is this a
+# measurement?": a finite headline metric per requested task, over the sample count that was
+# actually requested (`n-samples.effective` vs `min(limit, original)` summed across the task's
+# leaf subtasks), present at all. It is a VALIDITY check, not a tolerance test — it never
+# compares the value to a reference, because at LIMIT=100 the binomial SE is ~4.3 points and no
+# threshold on the value could mean anything (AGENTS.md).
+EV_LINE="$(ahl_py "$SCRIPT_DIR/eval_validity.py" assess --bundle "$BUNDLE" --tasks "$TASKS" \
+             ${LIMIT:+--limit "$LIMIT"} --conc "$CONC" || true)"
+SCORES=""; SAMPLES=""; VALIDITY=""; EV_STATUS=""; EV_CONC=""; EV_CITABLE=""
+IFS=$'\t' read -r SCORES SAMPLES VALIDITY EV_STATUS EV_CONC EV_CITABLE <<<"$(printf '%s' "$EV_LINE" | tail -1)" || true
+# Fail CLOSED (contract A6): if the predicate itself could not run, the row is not citable —
+# a `uv` hiccup must never mint a clean quality gate.
+if [ -z "${VALIDITY:-}" ]; then
+  SCORES="${SCORES:-na}"; SAMPLES=na; VALIDITY=na; EV_STATUS=na; EV_CONC="$CONC"; EV_CITABLE=0
+  echo "WARN: eval_validity.py produced no verdict — recording validity=na (NOT citable)" >&2
+fi
+
 DATA_REL="$(realpath --relative-to="$REPO_ROOT" "$BUNDLE")"
 TSV="$OUT_DIR/accuracy.tsv"
-# `think` is appended LAST so positional readers (run-queue awk $5/$10) stay valid. It disambiguates
-# rows that otherwise look contradictory (e.g. 35B gsm8k=42 think-on vs =90 think-off).
-HDR=$'run_id\tcommit\tnode_fp\tmodel\tconfig_hash\tscript\tsuite\ttasks\tlimit\tscores\tdata\tthink'
-[ -f "$TSV" ] || echo "$HDR" > "$TSV"
-printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-  "$RUN_ID" "$COMMIT" "$NODE_FP" "$MODEL" "$CONFIG_HASH" "$SCRIPT_REL" "$SUITE" "$TASKS" "${LIMIT:-full}" "$SCORES" "$DATA_REL" "$THINK" >> "$TSV"
-echo >&2; echo "scores: $SCORES" >&2; echo "row -> $(realpath --relative-to="$REPO_ROOT" "$TSV")" >&2
+# `think` was appended LAST so positional readers (run-queue awk $5/$10) stayed valid; the four
+# validity columns (contract A9) are appended after it for the same reason.
+#   conc      — the concurrency the eval ran at. Gate 2 sits at a fixed c16 while Gate 3 sweeps
+#               1..32 and the two never cross (AGENTS.md follow-up); it was not even recorded.
+#   samples   — task=effective/requested. The evidence behind the completeness verdict.
+#   validity  — Gate-2 verdict tokens, task-tagged (`nonfinite@mmlu`), `+`-joined, `ok` if clean.
+#   status    — contract §6, floored by the verdict: measured / suspect / void.
+HDR=$'run_id\tcommit\tnode_fp\tmodel\tconfig_hash\tscript\tsuite\ttasks\tlimit\tscores\tdata\tthink\tconc\tsamples\tvalidity\tstatus'
+if [ ! -f "$TSV" ]; then
+  echo "$HDR" > "$TSV"
+elif [ "$(head -1 "$TSV")" != "$HDR" ]; then
+  # A legacy 12-column journal: migrate it in place (append-only, backfilled from the retained
+  # bundles) rather than appending a wider row onto a narrower schema.
+  echo "migrating $TSV to the 16-column schema (docs/validity-contract.md A9)" >&2
+  ahl_py "$SCRIPT_DIR/migrate_accuracy_tsv.py" --tsv "$TSV" --bundle-root "$REPO_ROOT" --write >&2
+fi
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  "$RUN_ID" "$COMMIT" "$NODE_FP" "$MODEL" "$CONFIG_HASH" "$SCRIPT_REL" "$SUITE" "$TASKS" \
+  "${LIMIT:-full}" "$SCORES" "$DATA_REL" "$THINK" "${EV_CONC:-$CONC}" "$SAMPLES" "$VALIDITY" \
+  "$EV_STATUS" >> "$TSV"
+echo >&2
+echo "scores: $SCORES   samples: $SAMPLES   conc: ${EV_CONC:-$CONC}" >&2
+echo "validity: $VALIDITY   status: $EV_STATUS" >&2
+echo "row -> $(realpath --relative-to="$REPO_ROOT" "$TSV")" >&2
+
+# ── Exit, in the repo-wide precedence 3 > 4 > 1 > 0 (contract §5) ─────────────
+# A signal-killed harness is the Gate-2 analogue of a Gate-3 wedge: rc >= 128 means lm-eval was
+# terminated (OOM killer, operator, or a teardown), not that it disagreed with the model.
+rc=0
+[ "$LM_RC" -ne 0 ] && rc=1
+[ "${EV_CITABLE:-0}" = 1 ] || rc=4
+[ "$LM_RC" -ge 128 ] && rc=3
+if [ "$rc" = 4 ]; then
+  echo "!! Gate 2 NOT CITABLE: validity=$VALIDITY status=$EV_STATUS — the row is written, the" >&2
+  echo "   score must NOT be quoted, compared or promoted on (docs/validity-contract.md A9)." >&2
+fi
+exit "$rc"
