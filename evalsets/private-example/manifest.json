@@ -1,0 +1,18 @@
+{
+  "schema": "ahl-private-eval/1",
+  "set_id": "example-fake",
+  "visibility": "example",
+  "authored": "20260820",
+  "salt": "EXAMPLE-SALT-PUBLISHED-ON-PURPOSE-NEVER-REUSE-THIS",
+  "title": "EXAMPLE SET — FAKE, PUBLIC, NOT A QUALITY SIGNAL",
+  "warning": [
+    "This set is committed to a PUBLIC repository on purpose, so the schema is documentable and",
+    "scripts/eval_private_selftest.sh has something real to run against. Every item below is",
+    "invented nonsense. It is contaminated by construction the moment it is pushed.",
+    "It has 3 live items, which is below AHL_PRIVATE_MIN_ITEMS=30, so a run against it can never",
+    "produce a citable row: it records `small_n` and status=suspect. That is deliberate --",
+    "the example cannot be mistaken for the gate.",
+    "The real set lives OUTSIDE this repo. See docs/private-eval.md."
+  ],
+  "authoring_notes": "Fields consumed by the runner: schema, set_id, visibility, salt. Everything else (title, warning, authored, authoring_notes) is for humans. The real set's `salt` must be a random string generated once and never published -- it is what stops the audit digests in results/**/data/ from being a confirmation oracle for guessed questions."
+}
