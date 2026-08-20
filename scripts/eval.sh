@@ -16,6 +16,12 @@
 #      real tokenizer is deepseek-ai/DeepSeek-V4-Flash; mirrors bench_ds4.sh's PROCESSOR).
 # Server must be up (serve.sh). Records a row to accuracy.tsv + the raw lm-eval json in the bundle.
 #
+# `config_hash`: `sha256sum <runbook>` for a vLLM runbook (the runbook IS the config). For a
+# HOST-PROCESS stub (`*.smoke-runbook.sh`, ds4 / llama.cpp) the stub carries no launcher settings,
+# so the identity comes from the SERVED PROCESS via scripts/lib/hostcfg.sh — the same `hp3-` value
+# bench_ds4.sh / bench_llamacpp.sh write, so a quality row and a throughput row can be joined. See
+# the block at the CONFIG_HASH assignment below.
+#
 # NOTE: coder tasks EXECUTE generated code (HF_ALLOW_CODE_EVAL + --confirm_run_unsafe_code) — run
 # only against models/endpoints you trust.
 #
@@ -95,8 +101,48 @@ esac
 RUN_ID="$(date -u +%Y%m%d-%H%M%S)-eval"
 OUT_DIR="$REPO_ROOT/results/$NODE_FP/$ORG/$NAME"; BUNDLE="$OUT_DIR/data/$RUN_ID"; mkdir -p "$BUNDLE"
 COMMIT="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo nogit)"
-CONFIG_HASH="$(sha256sum "$RUNBOOK" | cut -c1-8)"
 SCRIPT_REL="$(realpath --relative-to="$REPO_ROOT" "$RUNBOOK")"
+
+# ── config_hash — Gate 2 must use the SAME identity as Gate 3 ─────────────────
+# For a vLLM runbook the runbook IS the config, so `sha256sum <runbook>` is honest and unchanged.
+# For a HOST-PROCESS backend (ds4, llama.cpp) it is not: `serve.sh` never runs and the only file
+# this script can hash is the `.smoke-runbook.sh` STUB, which carries MODEL / SERVED_NAME /
+# PROCESSOR / parser markers and nothing else — so every ds4 config wrote the same 8 digits. That
+# is the tracked defect, and its four cited rows (gsm8k 60.0 / 76.0 / 74.0 / 74.0 under
+# `10b02344`) are rows in THIS journal, accuracy.tsv, written by this line. The first repair
+# landed only in bench_ds4.sh/bench_llamacpp.sh, so re-running those four evals would still have
+# written `10b02344` while the bench path separated them — and a host config's quality row could
+# not be joined to its throughput row at all. Both gates now hash the same document, computed by
+# scripts/lib/hostcfg.sh from the same SERVED PROCESS (contract: identical `hp3-` value).
+#
+# Applies only to a `.smoke-runbook.sh` stub (the documented host-process convention, AGENTS.md
+# "HOST-PROCESS backends") AND only when a known engine is actually serving $AHL_PORT. A vLLM
+# runbook never takes this path; nor does a stub whose engine cannot be found — that case writes
+# `stub-<8 hex>`, the legacy stub identity, LABELLED so it can never be read as a served identity
+# or grouped with an `hp3-` row. Provenance is not validity: an unidentifiable engine does not
+# make the score wrong, so it warns rather than changing the exit code.
+CONFIG_HASH="$(sha256sum "$RUNBOOK" | cut -c1-8)"
+case "$RUNBOOK" in
+  *.smoke-runbook.sh)
+    # shellcheck disable=SC1091
+    source "$SCRIPT_DIR/lib/hostcfg.sh"
+    if read -r HC_ENGINE HC_PID HC_ERE < <(ahl_hostcfg_detect "${AHL_PORT:-8000}") && [ -n "${HC_PID:-}" ]; then
+      if HC_HASH="$(ahl_hostcfg_hash "$HC_PID" "$HC_ENGINE" "$HC_ERE")"; then
+        CONFIG_HASH="$HC_HASH"
+        echo "config_hash: $CONFIG_HASH ($HC_ENGINE pid $HC_PID — the served process, not the stub)" >&2
+      else
+        CONFIG_HASH="stub-$CONFIG_HASH"
+        echo "WARN: could not read /proc/$HC_PID — recording the STUB hash $CONFIG_HASH; it does" >&2
+        echo "      NOT identify the launcher config (scripts/lib/hostcfg.sh)." >&2
+      fi
+    else
+      CONFIG_HASH="stub-$CONFIG_HASH"
+      echo "WARN: no ds4/llama.cpp engine found on port ${AHL_PORT:-8000}; recording the STUB hash" >&2
+      echo "      $CONFIG_HASH — it does NOT identify the launcher config, and every config of" >&2
+      echo "      this engine shares it (AGENTS.md: the host-process config_hash blind spot)." >&2
+    fi
+    ;;
+esac
 
 # GREEDY eval (default on): the runbook's serving --override-generation-config (chat sampling, e.g.
 # temperature 1.0 + presence_penalty) is applied server-side to lm-eval's requests too, depressing
