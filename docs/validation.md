@@ -55,14 +55,55 @@ differentially affect memorized vs reasoned items — mitigated by the resistant
    uncontaminated set we fully control. Record the model's training cutoff + each benchmark's
    release date in `accuracy.tsv` for auditability.
 
-> **Gate 2 has no validity layer.** The measurement-validity contract reads GuideLLM level JSON
-> only, so it covers Gate 3 and nothing else — deliberately, and it says so in its own §0. One of
-> the three defects that motivated the contract was a Gate-2 failure (loglikelihood `mmlu` on a
-> spec-decode config, 56,168 requests returning `400 NaN`, a progress bar advancing normally for
-> 1h15m); it was fixed by a specific branch-order fix, not by a general invariant. `accuracy.tsv`
-> still records `scores` with no denominator — nothing says how many requests errored, how many
-> produced empty output, or what fraction of the task set actually scored. Read a Gate-2 number
-> knowing that.
+### Gate 2 has an acceptance predicate — `scripts/eval_validity.py` (contract A9, 20260819)
+
+The contract originally scoped this out: every Gate-3 rule reads GuideLLM level JSON, so none of
+them could see a bad *score*. Verification then found something worse than a scope gap — **Gate 2
+had no acceptance predicate whatsoever.** `suite.sh` computed the gate from `eval.sh`'s exit code,
+and `eval.sh` exited 0 whatever came back, so all three of these reported **PASS**:
+
+```
+lm-eval printed `mmlu: acc = NaN`           -> accuracy.tsv mmlu=nan     -> Gate 2 PASS
+lm-eval scored 37 of 14,042 requested docs  -> accuracy.tsv mmlu=41.23   -> Gate 2 PASS
+lm-eval produced no results json at all     -> accuracy.tsv na           -> Gate 2 PASS
+```
+
+The first two are §0 defect (c) — the spec-decode config scored by a loglikelihood task that
+returned NaN for 56,168 requests while the progress bar advanced normally for 75 minutes. lm-eval
+**retries and keeps going**, so it neither aborts nor exits non-zero. An exit code cannot see that.
+The evidence can: every lm-eval bundle carries `n-samples` with `effective` and `original` per task.
+
+All three now record a row and **fail** the gate. Verdict tokens are **task-tagged** the way Gate-3
+tokens are level-tagged (`nonfinite@mmlu`, `short_sample@gsm8k`), `+`-joined, `ok` when clean, `na`
+when unevaluable; the same void/suspect vocabulary and the same 3 > 4 > 1 > 0 exit ladder.
+
+| verdict | trips when | severity | what it is really catching |
+|---|---|---|---|
+| `no_score` | no results json, unparseable, or the task carries no metric | **fatal** | lm-eval did not finish; nothing was measured |
+| `nonfinite` | the headline metric is `NaN` or ±`Inf` | **fatal** | §0 defect (c) — almost always a loglikelihood task on a spec-decode serve |
+| `short_sample` | `effective < 0.99 × requested` (`AHL_EVAL_MIN_SAMPLE_FRAC`) | **fatal** | the score is over a different population than the one asked for |
+| `zero_score` | the headline metric is exactly `0.0` | suspect | usually a broken path, not a hard task — NemotronH emitting zero tokens under think-off, or a `\boxed` extractor mismatch |
+| `no_samples` | the bundle carries no `n-samples`, so the count check could not run | suspect | fail **closed** (contract A6) |
+
+`requested` is `min(limit, original)` summed over the task's **leaf subtasks**, which is how
+`mmlu --limit 100` legitimately asks for 5,700 docs out of 14,042 and not 100. The 1% slack exists
+only so one dropped doc in a 12,000-doc `FULL` run is reported rather than fatal; it still fails the
+motivating case (37/14,042 = 0.26%) by two orders of magnitude. The evidence lands in the row's
+`samples` column (`task=effective/requested`) so a later reader can re-derive the verdict under a
+different threshold.
+
+> **What this predicate deliberately does NOT do: compare a score to a reference or to a floor.**
+> At the in-loop `LIMIT=100` the binomial standard error is ~4.3 points at p≈0.9 — wider than the
+> KEEP rule's ~1% tolerance — so any threshold on the *value* would imply a precision the sample
+> size cannot deliver. Every rule above is structural. It answers "is this a number?", never "is
+> this number good?"; the relative-regression reasoning at the top of this section is still how you
+> decide whether the number is *good*, and it still needs a matched-settings reference.
+
+Residual gaps, stated rather than papered over: lm-eval publishes no per-request error count, so
+there is no `errored`-style visibility on this gate, and a zero-token generation is detectable only
+through its 0.0 score (the bundle carries no output-token count without `--log_samples`).
+`accuracy.tsv` is **16 columns** and finally carries `conc` — schema in AGENTS.md → "Results model";
+operator triage in program.md → "Gate 2: when the SCORE is not a measurement".
 
 - **Cost discipline (outer loop):** tune on tok/s; quality-gate only the throughput **winner** and
   any **quality-risky** flag (kv-cache-dtype, quantization, GEMM backend) — most perf flags can't
@@ -84,7 +125,9 @@ None raised an error. The mechanism is always the same — GuideLLM's
 `output_tokens_per_second.successful.mean` averages the requests that **finished**, and the
 interesting failures are exactly the ones that do not finish.
 
-Rules and thresholds are binding in [validity-contract.md](validity-contract.md) **v1.1** §3–5; the
+Rules and thresholds are binding in [validity-contract.md](validity-contract.md) **v1.2** §3–5 —
+read its amendment blocks and its closing "v1.2 status" section, which win over anything earlier in
+that file; the
 schema and status vocabulary are in AGENTS.md → "Results model"; what the invariants say about every
 number this project has already published is in `research/review/AUDIT-measurement-validity.md`.
 What follows is how to apply the same reasoning **by hand** to a number you are suspicious of.
@@ -94,16 +137,19 @@ What follows is how to apply the same reasoning **by hand** to a number you are 
 Verdict tokens **carry the level they refer to** — `low_sample@c1`, `no_data@c32`,
 `survivorship@c16` — so gate on the level you are actually citing. Only `ok` and `nonmonotonic` are
 row-wide. This is what keeps a structurally thin c1 sentinel from condemning a campaign's c16
-objective: **94.6% of rows carry no verdict against c16.**
+objective: **298 of the 315 published rows (94.6%) carry no token tagged at c16** — recomputed
+under final v1.2, where the corpus reads 283 `ok` / 10 suspect-floor / 22 void-floor / 1 `na`.
 
 | verdict | trips when | severity | what it is really catching |
 |---|---|---|---|
 | `no_data` | `successful < AHL_MIN_DATA` (**5**), or `level_c<N>.json` missing/unparseable | **fatal** | the stage never drained — the "mean" is over a handful of lucky completions |
-| `low_sample` | `successful × mean_output_tokens < AHL_MIN_TOKENS` (**2048**) **OR** `successful < max(5, min(20, 4×level))` | suspect | not enough *generated tokens* to pin the mean down |
+| `low_sample` | `successful < max(5, min(20, 4×level))` | suspect | too few completions for the level to be a sample of anything |
 | `over_roofline` | a level's tok/s exceeds the physical ceiling below | **fatal** | the endpoint was dead, or fast-failing, and speed came from *not serving* |
-| `survivorship` | `incomplete ≥ successful` | suspect | the mean is the mean of the **faster half** — the slow requests were dropped, not counted |
+| `no_output` | `successful > 0` but tok/s is null, non-finite or ≤ 0 | **fatal** | requests succeeded and produced **no tokens** — the floor under the roofline's ceiling |
+| `survivorship` | `successful > 0` and `incomplete > successful` | suspect | a **majority** of the work started was discarded, so the published mean averages a minority of it |
 | `nonmonotonic` | a run level >**10%** below the **immediately preceding** run level | suspect | a curve shape no scheduler produces |
-| `errored` | `errored > 10%` of `successful + errored` | suspect | the config half-works; the survivors are a biased sample |
+| `errored` | `errored` is **10–50%** of `successful + errored` | suspect | the config half-works; the survivors are a biased sample |
+| `errored_fatal` | `errored` is **above 50%** | **fatal** | the endpoint is refusing, not serving — the fingerprint of a dead endpoint whose tok/s happens to land under the roofline |
 | `na` | the rules could not be evaluated (no bundle) | — | absence of evidence — **never** reported as `ok` |
 
 Fatal → the row's `status` becomes `void` (not data, must not be cited). Suspect → `suspect` (not
@@ -119,22 +165,48 @@ numbers are not citable" call for completely different responses (program.md →
 
 Four design choices worth understanding before you argue with a verdict:
 
-- **Sample adequacy is measured in tokens, not requests.** The first version of this rule used a
-  flat 20-request floor and fired on **55%** of the published corpus — a detector that flags the
-  majority of good rows is a detector nobody reads. Measured across 77 replicate brackets, median CV
-  of reported tok/s is **0.39% at n<10** and **1.42% at 10≤n<20** against **0.56% at 20≤n<50**:
-  request count does not predict reproducibility, tokens generated does. Under the token budget the
-  record reads 90% ok / 4% suspect / 4% void with every motivating defect still caught. Practical
-  consequence: a `coder(4096/1024)` level is **not** suspect merely for completing a handful of
-  requests — at ~1024 output tokens each they clear the budget quickly, and generated tokens are the
-  precision that matters. Coder characterization is citable again.
-- **`survivorship` is a *bias* check, not a sample-size check.** GuideLLM's
-  `output_tokens_per_second.successful.mean` silently excludes `incomplete` requests, and the
-  incomplete ones are the slow ones — so the estimator is systematically optimistic, and grows more
-  so with concurrency. Measured discard rates on this project's own record: chat c1 **0.1%**, chat
-  c32 **10.3%**, coder c16 **32.4%**, coder c32 **46.2%**. At coder c32 nearly half the work is
-  discarded before the average is taken. If you have been reading falling high-concurrency coder
-  numbers as saturation, read them again: throughput is not falling, the estimator stops keeping up.
+- **Sample adequacy is a bare structural floor — and it was a token budget for exactly one day.**
+  The rule has been calibrated wrong twice, so the measurements matter more than the story. v1.0's
+  flat 20-request floor fired on **55%** of the published corpus (160 of 181 flagged bundles
+  offended only at c1, where the count is `MAX_SECONDS / latency` — arithmetic, not operator error);
+  a detector that flags the majority of good rows is a detector nobody reads. v1.1 replaced it with
+  a 2048 *generated-token* budget on the premise that tokens predict reproducibility where requests
+  do not. **Two verifiers refuted that independently, by different methods, and v1.2 A1 deleted the
+  clause.** It fired *alone* on **3 of 693 bundles** — all three the same replicate bracket, whose
+  measured CV of **0.59–0.70%** makes it *more* reproducible than most brackets on this node: three
+  false positives, zero true positives. Banding CV by token budget runs backwards (0.70% under 2048
+  vs 1.28% above 20k), and correlation with measured reproducibility is **r = -0.006**. Worst of
+  all, a coder completion carries ~1000 tokens, so **3 requests clear a 2048 budget** and the clause
+  would have **APPROVED 10 of the 15 genuinely starved levels** in the corpus. It did not merely
+  fail to detect starvation, it approved it. What survives from v1.1 is only its negative half:
+  request count does not predict reproducibility (median CV **0.39% at n<10**, **1.42% at
+  10≤n<20**, **0.56% at 20≤n<50**) — and neither do tokens. Nothing on this corpus does, which is
+  why the floor is now openly structural rather than a precision estimate.
+  Two consequences worth holding onto: **`low_sample` can never fire at c1** (the floor is
+  `max(5, min(20, 4×1)) = 5 = AHL_MIN_DATA`, and `no_data` claims everything below 5 first, so a c1
+  stage is either `no_data` or clean — a test pins this), and **coder characterization is not
+  suspect by construction**, because the floor at a given level does not care how long each
+  completion was.
+- **`survivorship` is a MAJORITY-discard check, and what it does *not* catch is stated, not
+  implied.** GuideLLM's `output_tokens_per_second.successful.mean` silently excludes `incomplete`
+  requests, and the incomplete ones are the slow ones — so the estimator is systematically
+  optimistic, and grows more so with concurrency. Measured discard rates on this project's own
+  record: chat c1 **0.1%**, chat c32 **10.3%**, coder c16 **32.4%**, coder c32 **46.2%**. If you
+  have been reading falling high-concurrency coder numbers as saturation, read them again:
+  throughput is not falling, the estimator stops keeping up.
+  This rule went wrong twice before it shipped. v1.1's `incomplete ≥ successful` is arithmetically
+  `successful ≤ level` (the in-flight set at stage end is ~`level`), so it **cannot fire below a 50%
+  discard rate** while its own justification cited the 32.4% and 46.2% regimes above. v1.2 A2 then
+  tried `incomplete > level` to subtract that in-flight set — but GuideLLM **bounds** in-flight by
+  the concurrency level (88.8% of levels sit at exactly `level-1`, max ratio 1.000), so the
+  condition is unsatisfiable and fired **zero times on 690 levels**. The shipped rule is
+  `successful > 0 and incomplete > successful`: the published mean averages a minority of the work
+  started. The 30%-threshold alternative was measured first and flags **19 of 23 coder rows** — a
+  claim about the measurement METHOD, not a per-row defect, and exactly the flag fatigue this layer
+  exists to avoid. **So the systemic 30–48% coder discard at c8 and above is real, is a methodology
+  limitation of the coder shape at these stage times, and NO verdict flags it.** It lives in the
+  AGENTS.md GuideLLM lab note and in `research/review/AUDIT-measurement-validity.md`. When you cite
+  a high-concurrency coder number, read `req_counts` yourself; the fix is `MAX_SECONDS ≥ 600`.
 - **`nonmonotonic` is adjacent-only, and deliberately loose.** Each run level is compared with the
   *previous run level*, never pairwise across the whole curve — this box legitimately plateaus at
   high concurrency, and a pairwise-all rule would flag gentle decay as an inversion. The 10%
@@ -199,11 +271,14 @@ of it is the hardware, not the config.
    explicitly adjudicated and written into `logbook.md` — never a silent one, and never a verdict
    tagged at the level whose number the decision rests on. `low_sample@c1` on a row whose objective
    is c16 is not an obstacle; `low_sample@c16` on that same row is.
-2. **`req_counts` shows a real sample:** ≥2048 generated tokens on the level, and at least
-   `max(5, min(20, 4×level))` completions. If the coder shape is starving, the fix is a larger
-   `MAX_SECONDS` (slow dense models need ≥600 for `coder(4096/1024)`), not a smaller expectation.
-3. **No `survivorship` on the cited level.** If half the requests were dropped, the number is not a
-   throughput measurement of the config, it is a measurement of its fastest requests.
+2. **`req_counts` shows a real sample:** at least `max(5, min(20, 4×level))` completions on the
+   level. If the coder shape is starving, the fix is a larger `MAX_SECONDS` (slow dense models need
+   ≥600 for `coder(4096/1024)`), not a smaller expectation.
+3. **Read the discard fraction yourself on the cited level.** `survivorship` only fires on a
+   *majority* discard; the coder shape routinely discards 30–48% at c8 and above without tripping
+   anything. If a third of the requests were dropped, the number is not a throughput measurement of
+   the config, it is a measurement of its fastest requests — and it is biased, not noisy, so
+   repeating it reproduces the same bias.
 4. **The median is over valid rows only.** `run_experiment.sh` publishes this directly on its
    `MEDIAN` line as `cite=ok|partial|insufficient|no_valid_data` alongside `valid=k/rows` —
    `ok` = all N rows valid, `partial` = 2 ≤ k < N (reported, weaker, and visibly short),

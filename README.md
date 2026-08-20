@@ -24,7 +24,7 @@ container runs vLLM* and *what the baseline config should be*. autohomelab makes
 |---|---|---|
 | **Probe** | `node_profile.json` + fingerprint (GPU, VRAM, compute cap, arch, driver, CUDA, RAM, fw) | reads it |
 | **Backend** | pluggable adapter: launch server, health-check, expose OpenAI endpoint (vLLM first) | yes (pinned image per arch) |
-| **Bench** | GuideLLM sweep @ 1/4/8/16/32 concurrency → tok/s curve, scored against measurement-validity invariants (sample adequacy in generated tokens, survivorship bias, bandwidth roofline) | no |
+| **Bench** | GuideLLM sweep @ 1/4/8/16/32 concurrency → tok/s curve, scored against measurement-validity invariants (per-level sample floor, majority-discard survivorship, a bandwidth roofline above and a zero-output floor below, error-rate bands) | no |
 | **Tune** | program.md loop: baseline derived from probe → mutate config → re-sweep → keep if **valid** tok/s up | no |
 
 See [docs/architecture.md](docs/architecture.md), [docs/validation.md](docs/validation.md) (the
@@ -42,9 +42,15 @@ autohomelab/
 ├── .env.example                  copy → .env (gitignored): HF_TOKEN, AHL_HOST/PORT
 ├── .github/ISSUE_TEMPLATE/       new-node-profile.md, new-model-run.md
 │
-├── scripts/                      harness — bash (system) or python via `uv run`  (abridged: 27 files)
-│   ├── lib/  validity.py         SINGLE source of the results.tsv header + the validity rules
+├── scripts/                      harness — bash (system) or python via `uv run`  (abridged: 35 files)
+│   ├── lib/  validity.py         SINGLE source of the results.tsv header + the Gate-3 validity rules
 │   │          validity.sh        thin bash shim for the bench*.sh callers (re-implements nothing)
+│   ├── citability.py             the ONE classifier: "may this row be cited?" for every consumer
+│   │                             (+ citability_selftest.sh — 68 reachability checks against stubs)
+│   ├── eval_validity.py          Gate-2 acceptance predicate for an lm-eval score; task-tagged
+│   │                             verdicts (+ eval_validity_selftest.sh — 95 checks)
+│   ├── migrate_results_tsv.py    20-col -> 23-col journal migration (idempotent)
+│   ├── migrate_accuracy_tsv.py   12-col -> 16-col accuracy journal; backfills conc from bundles
 │   ├── probe.sh                  hardware → results/<node_fp>/node_profile.json + fingerprint
 │   ├── serve.sh                  launch backend from a runbook; records load_s (time-to-healthy)
 │   ├── bench.sh                  GuideLLM per-level sweep → results.tsv row (+ watchdog + sidecar);
@@ -71,13 +77,15 @@ autohomelab/
 │
 ├── results/<node_fp>/            HARDWARE-KEYED
 │   └── gb10-…/  node_profile.json · node_notes.md
-│       └── <org>/<model>/  results.tsv (23-col throughput journal) · accuracy.tsv (Gate 2) ·
+│       └── <org>/<model>/  results.tsv (23-col throughput journal) · accuracy.tsv (16-col Gate 2) ·
 │                            logbook.md (narrative) · SUITE-<cfg>.md · data/ (raw, gitignored)
 │
 ├── docs/   architecture.md · validation.md · validity-contract.md · reproducibility.md ·
 │           contamination-resistant-evals.md · research-loop.md · charter.md · hardware/gb10-dgx-spark.md
-├── tests/  run.sh — 121-test acceptance suite for the validity layer (stdlib only, no GPU,
+├── tests/  run.sh — 206-test acceptance suite for the validity layer (stdlib only, no GPU,
 │           no network); run it with AHL_TEST_STRICT=1, where a SKIP fails
+│        mutate.sh — mutation harness: 26 mutations, 0 survivors. A rule with no mutation
+│           that turns the suite red is an untested rule
 ├── research/review/  ULTRAPLAN-REVIEW-ISSUE.md · AUDIT-measurement-validity.md (what the
 │           invariants say about every number this project has published)
 ├── launchers/                    symlinks → runbook .sh (convenience)
@@ -114,7 +122,9 @@ by copying `baseline.sh` to `<YYYYMMDD>_<change>_tuned.sh` and changing one thin
 5. A measurement that fails the invariants is recorded and flagged (`status=void`/`suspect`), never
    silently dropped and never citable. Verdicts name the concurrency level they concern
    (`low_sample@c1`), and consumers filter on the `validity` column, never on `status` alone. See
-   [docs/validity-contract.md](docs/validity-contract.md) (v1.1).
+   [docs/validity-contract.md](docs/validity-contract.md) (**v1.2**). The quality gate has the same
+   kind of predicate: a `nan` score, a score computed over fewer samples than were requested, or a
+   missing results file is not a Gate-2 result either.
 
 ## Status
 

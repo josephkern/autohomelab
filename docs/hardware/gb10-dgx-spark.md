@@ -94,46 +94,58 @@ Contract §4, with batch size `level` (one decode step reads the weights once an
 tokens):
 
 ```
-ceiling(level) = SAFETY * level * (mem_bw_gbs / bytes_per_token_GB)      SAFETY = 2.0
+ceiling(level) = SAFETY * level * (mem_bw_gbs / bytes_per_token_GB)      SAFETY = 3.0
 ```
+
+**`SAFETY` is 3.0, raised from 2.0 in contract v1.1** — see "Not tight, on purpose" below: the
+FF711 campaign measured an MTP accepted length of **2.69** on this node, so a 2.0 bound would
+fatally void a legitimate spec-decode config. The tables below are at 3.0.
 
 With no per-model number, the harness falls back to `AHL_MIN_MODEL_GB = 1.0` GB/token, which on this
 box gives a deliberately loose ceiling:
 
 | level | c1 | c4 | c8 | c16 | c32 |
 |---|---|---|---|---|---|
-| ceiling @ 1.0 GB/token (fallback) | **546** | 2,184 | 4,368 | **8,736** | 17,472 |
-| ceiling @ 21.18 GB/token (FF711 27B GGUF) | 25.8 | 103 | 206 | 412 | 825 |
+| ceiling @ 1.0 GB/token (fallback) | **819** | 3,276 | 6,552 | **13,104** | 26,208 |
+| ceiling @ 21.18 GB/token (FF711 27B GGUF) | 38.7 | 155 | 309 | 619 | 1,237 |
 
 Worked examples:
 
-- **c1, fallback:** 546 tok/s. Every real c1 on this box is 10–45 tok/s, so the fallback bound will
+- **c1, fallback:** 819 tok/s. Every real c1 on this box is 10–45 tok/s, so the fallback bound will
   essentially never fire at c1 — that is intended. It exists to catch the impossible, not the fast.
 - **c1, per-model:** the FF711 27B at 21.18 GB/token has a *naive* (SAFETY=1) ceiling of
   **12.89 tok/s**; it measured 12.03. That is how tight a real per-model bound is — and exactly why
   the harness does not use SAFETY=1 (see the spec-decode trap below).
-- **c16, fallback:** 8,736 tok/s. The best chat c16 ever recorded on this node is a few hundred
+- **c16, fallback:** 13,104 tok/s. The best chat c16 ever recorded on this node is a few hundred
   tok/s, so a healthy row clears it by more than an order of magnitude.
 - **449,358 tok/s @ c16 was refutable from first principles.** That row (`20260818_mtp-n4_tuned.sh`,
   a crashed server returning instantly to 16 requests) exceeds even the loose fallback ceiling by
-  **51×**. Inverted: to sustain 449,358 tok/s at c16 within a 2× safety factor, the engine would have
-  to read only **19.4 MB of weights per token** — 0.1% of a 27B NVFP4 checkpoint. Without the batch
+  **34×**. Inverted: to sustain 449,358 tok/s at c16 within a 3× safety factor, the engine would have
+  to read only **29.2 MB of weights per token** — 0.1% of a 27B NVFP4 checkpoint. Without the batch
   and safety terms it is worse still: 273 GB/s ÷ 449,358 tok/s = **0.6 MB/token**. No arrangement of
   a 27B model produces that; the number is not a measurement, and the harness can now say so without
-  looking at the endpoint.
+  looking at the endpoint. Raising SAFETY 2.0 → 3.0 cut the margin against this row from 51× to
+  34×, which changes nothing about the verdict: the bound is nowhere near tight, and that is the
+  point.
 
 ### What the bound is *not*
 
 - **Not a performance target.** Clearing it means "not physically impossible", nothing more.
-- **Not tight, on purpose.** SAFETY=2.0 exists because tokens-per-weight-read can legitimately
-  exceed 1: with MTP/speculative decoding one verify pass emits several accepted tokens. FF711
-  measured accepted lengths of **1.78–2.69** and a net c1 of **+58.7%** over the MTP-off baseline —
-  1.48× the naive roofline, which a SAFETY=1 bound would have called impossible. **Watch this:** an
-  accepted length above 2.0 with a cheap draft head could in principle push a *real* run past
-  SAFETY=2.0 and produce a false `over_roofline` (a fatal verdict → `status=void`). If that is ever
-  observed, the fix is to raise SAFETY for spec-decode configs, not to weaken the sample-count checks.
-- **Not a substitute for sample counts.** Of the three known bad rows, only one is caught here; the
-  starved-stage cases are caught by `no_data`/`low_sample`.
+- **Not tight, on purpose, and it was already too tight once.** SAFETY exists because
+  tokens-per-weight-read can legitimately exceed 1: with MTP/speculative decoding one verify pass
+  emits several accepted tokens. FF711 measured accepted lengths of **1.78–2.69** and a net c1 of
+  **+58.7%** over the MTP-off baseline — 1.48× the naive roofline, which a SAFETY=1 bound would have
+  called impossible. **That measured 2.69 is why the contract raised SAFETY from 2.0 to 3.0** (v1.1):
+  at 2.0 a real, healthy spec-decode config could have been fatally voided by the harness's own
+  bound. The same watch applies one notch up — an accepted length above 3.0 with a cheap draft head
+  would put a legitimate run past the ceiling and produce a false `over_roofline` (fatal →
+  `status=void`). If that is ever observed, raise SAFETY again for spec-decode configs; do **not**
+  weaken the sample-count checks, and do not tighten `bytes_per_token_GB` to compensate.
+- **Not a substitute for sample counts, and it has a floor beside it.** Of the three known bad rows,
+  only one is caught here; the starved-stage cases are caught by `no_data`/`low_sample`. Since
+  contract v1.2 A3 there is also a **`no_output`** verdict — `successful > 0` with tok/s null,
+  non-finite or ≤ 0 — because the roofline bounded throughput from above and nothing bounded it from
+  below: a serve emitting zero output tokens graded `ok` at 0.0 tok/s with 200 successful requests.
 
 ### `bytes_per_token` — what to put in, per model family
 
