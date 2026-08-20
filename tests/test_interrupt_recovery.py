@@ -14,7 +14,26 @@ assertion about the trap's condition could catch that — only sending the signa
 Determinism: the stock guidellm stub returns instantly, which leaves no window to signal. These
 tests swap in a stub that, for levels listed in `AHL_STUB_BLOCK`, touches a marker file and then
 sleeps. The harness waits for the marker (so the process is provably *inside* that level) and
-only then signals. No timing guesses.
+only then signals. No timing guesses. The same trick is applied to `head`, `adapter peakmem`,
+`metrics_sampler --summary` and `sleep`, which puts a deterministic signal point inside every
+window this module cares about: mid-append, mid-crash-recording, mid-handler, and mid-watchdog.
+
+What the first version of this module missed, and what each of the later classes exists for:
+
+  * `TestTheWriteIsTheAtomicUnit` — "exactly once" also has to hold in the ZERO direction. The
+    flag used to come down BEFORE the append, so a signal at any of the six command boundaries
+    inside `emit_row` lost the row of a sweep that had FINISHED.
+  * `TestNoProcessOutlivesTheRun` / `TestTheWatchdogTripsScoped` — the stall-watchdog was orphaned
+    by the interrupt path and kept firing a box-wide `pkill`, which is how a previous run kills a
+    current one and a phantom wedge enters this node's #43885 record.
+  * `TestASignalWhileTheWedgeIsRecorded` — a signal must not erase a REAL wedge either.
+  * `TestTheHandlerSurvivesEscalation` — an escalating supervisor is ordinary behaviour.
+  * `TestHostBenchersRecordAnInterruptedShape` — the orphan bundle that motivated all of this was
+    written by `bench_llamacpp.sh`, not by `bench.sh`.
+
+Process hygiene is part of the contract here, not housekeeping: every child runs in its own
+session, every session is reaped, and `pkill` is stubbed so the suite itself cannot fire a
+box-wide kill on a box whose lab notes say "quiesce before a run".
 """
 from __future__ import annotations
 
@@ -895,8 +914,15 @@ class TestNoProcessOutlivesTheRun(InterruptTestCase):
     phantom wedge in the record that feeds research/upstream/vllm-43885-gb10-wedge.md.
     """
 
-    def assert_session_empty(self, proc, note=""):
+    def assert_session_empty(self, proc, note="", settle: float = 5.0):
+        """Nothing may still be running in the child's session. A short settling window is
+        allowed — SIGTERM delivery and reaping are asynchronous — but not an open-ended one: the
+        orphan this catches lives for as long as the container serves."""
+        deadline = time.time() + settle
         left = self.survivors(proc.pid)
+        while left and time.time() < deadline:
+            time.sleep(0.05)
+            left = self.survivors(proc.pid)
         self.assertEqual([], left,
                          "processes outlived the bench: %s\n%s" % (left, note))
 
