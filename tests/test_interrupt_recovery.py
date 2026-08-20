@@ -504,6 +504,19 @@ class ReconcileTestCase(unittest.TestCase):
         self.assertEqual([], self.rows(), proc.stdout)
         self.assertIn("Gate-2", proc.stdout)
 
+    def test_a_journal_missing_its_final_newline_is_not_corrupted(self):
+        """Appending onto a truncated last line would edit a published row instead of adding
+        one — the single thing this tool must never do."""
+        self.bundle("20260101-000000-chat", {1: api.level_json(41, tps=20.0, rate=1)})
+        self.journal({"run_id": "20251231-235959-chat", "status": "measured"})
+        self.tsv.write_text(self.tsv.read_text().rstrip("\n"))
+        published = self.tsv.read_text().splitlines()[1]
+        proc = self.run_tool("--write")
+        self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+        self.assertIn(published, self.tsv.read_text().splitlines(),
+                      "the published row must still be its own line")
+        self.assertEqual(2, len(self.rows()), self.tsv.read_text())
+
     def test_an_unreadable_journal_claims_nothing_rather_than_everything(self):
         """Fail closed. If the journal cannot be read, every published row looks like an orphan
         and `--write` would duplicate the whole campaign."""

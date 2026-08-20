@@ -346,6 +346,13 @@ def append_rows(journal: Path, rows: list) -> None:
     else:
         journal.parent.mkdir(parents=True, exist_ok=True)
         journal.write_text(RESULTS_HEADER + "\n", encoding="utf-8")
+    # A journal whose last line lost its newline would otherwise absorb the first appended row
+    # into it, silently corrupting a published row instead of adding one.
+    if journal.stat().st_size and not journal.read_bytes().endswith(b"\n"):
+        with journal.open("a", encoding="utf-8") as fh:
+            fh.write("\n")
+    # Append mode, one write per row: O_APPEND keeps a single short line atomic, so a bench
+    # writing into the same journal at the same moment cannot interleave with these.
     with journal.open("a", encoding="utf-8") as fh:
         for row in rows:
             fh.write("\t".join(_tsv_safe(row.get(c, NA)) for c in RESULTS_COLS) + "\n")
