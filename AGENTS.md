@@ -44,7 +44,10 @@ within tolerance), **fast** (tok/s @ 1/16/32 via GuideLLM — the tuned objectiv
 - **Backend** (`backends/<name>/adapter.sh`) → launches a server from a runbook, exposes an
   OpenAI endpoint. Contract: [backends/adapter.md](backends/adapter.md). vLLM first.
 - **Bench** (`scripts/bench.sh`) → GuideLLM sweep → raw bundle + one `results.tsv` row.
-- **Tune** (`program.md` loop) → mutate the runbook to maximize tok/s; keep/discard by result.
+- **Tune** (`program.md` loop) → mutate the runbook to maximize tok/s; keep or drop a *config* by
+  the median of N=3 valid rows. That verdict lives in `run_experiment.sh`'s `MEDIAN` line,
+  `tune_status.py`'s ranking and the campaign `logbook.md` — **never in a row's `status`** (see
+  "Status vocabulary": `keep` is retired, and `discard` is a §7 adjudication, not a loop output).
 
 **HOST-PROCESS backends (GGUF).** Some engines are native host processes, not Docker images with an
 adapter — currently **ds4** (antirez "DwarfStar", DeepSeek-V4 arch only) and **llama.cpp** (broad
@@ -59,6 +62,31 @@ apply: the promoted artifact is the launcher itself, with the winning config as 
 GGUF repos ship no `tokenizer.json`, so `PROCESSOR`/`TOKENIZER` must point at the **unquantized
 source repo** or GuideLLM synthetic data and lm-eval loglikelihood tasks both break.
 Build llama.cpp with `scripts/build_llamacpp.sh` (CUDA, sm_121 explicit).
+
+**Their `config_hash` is `hp3-<8 hex>`, computed from the SERVED PROCESS** (`scripts/lib/hostcfg.sh`,
+20260820) — not from the stub, and not from a git SHA of a source tree. A vLLM runbook *is* the
+config, so `sha256sum <runbook>` is honest; a host launcher leaves the gates nothing to hash but the
+`.smoke-runbook.sh` stub, so **every ds4 config hashed to the same `10b02344`**. The `hp3` document
+is: the process's **argv** read NUL-safely from `/proc/<pid>/cmdline` (repeated flags carry an
+occurrence ordinal — llama.cpp's `-ot` is first-match-wins, so two orderings are two offload
+layouts), the **tuning environment** the cmdline never sees (`DS4_DSPARK_*`/`DS4_MTP_*`,
+`LLAMA_*`/`GGML_*`), the **running binary by content** through `/proc/<pid>/exe`, and the scheme's
+own parameters. A value that is an existing readable file is identified by **content**
+(`file:<size>:<16 hex over the first and last 4 MiB>`), never by basename — the earlier scheme
+reduced every path-looking value to its basename, so `snapshots/rev-AAAA/model.gguf` and
+`snapshots/rev-BBBB/model.gguf` collided. That is exactly the layout `huggingface-cli download`
+produces and exactly the checkpoint-refresh axis of the ds4 round-3b campaign (the two GGUFs share
+a basename and differ only in content), and it also mangled non-paths: a
+`--chat-template-kwargs '{"a": "x/y"}'` blob basenamed to nonsense. `--host`/`--port`/`--log-file`
+are dropped with their values, so
+benching the same config on `:8001` does not mint a new identity. **`eval.sh` computes the same
+identity from the same process**, so a host config's Gate-2 row and its Gate-3 rows finally join;
+when no known engine is serving the port it writes **`stub-<8 hex>`**, labelled and warned about,
+because "we could not identify the engine" is its own claim and must not be groupable with an
+`hp3-` row. The `<engine>@<git-short-sha>` string still lives in the `backend` column, where it is
+provenance rather than identity. The prefix is deliberate: 315 committed rows carry the old bare-hex
+semantics and none was rewritten. Acceptance: `scripts/hostcfg_selftest.sh` (**108 checks**,
+fabricated `/proc` via `AHL_PROC`, no server and no GPU).
 
 ## Runbooks are the reproducible unit
 
@@ -98,17 +126,17 @@ Per **(node, model)** under `results/<node_fp>/<org>/<model>/`:
   | column | meaning |
   |---|---|
   | `run_id` | `<UTC YYYYmmdd-HHMMSS>-eval`; also the `data/` bundle directory name |
-  | `commit` · `node_fp` · `model` · `config_hash` · `script` | same provenance quintet as `results.tsv` |
+  | `commit` · `node_fp` · `model` · `config_hash` · `script` | same provenance quintet as `results.tsv` — including the host-process `hp3-<8 hex>` / `stub-<8 hex>` identity, so a Gate-2 row and a Gate-3 row for one launcher config now carry the *same* `config_hash` and can be joined ("HOST-PROCESS backends" above) |
   | `suite` | `general` / `resistant` / `math` / … — which task set was asked for |
   | `tasks` | the lm-eval task list actually run, comma-joined |
   | `limit` | `LIMIT` per task, or `full` |
-  | `scores` | `task=score` (percent), `;`-joined. **Never rewritten** — the historical text is the record; the migration recomputes it and reports divergence instead (all 76 rows reproduce byte-exact) |
+  | `scores` | `task=score` (percent), `;`-joined. **Never rewritten** — the historical text is the record; the migration recomputes it and reports divergence instead (every migrated row reproduced byte-exact) |
   | `data` | bundle path relative to the repo root (gitignored content) |
   | `think` | `on`/`off` — disambiguates rows that otherwise contradict each other (35B gsm8k `=42` think-on vs `=90` think-off) |
-  | `conc` | **new** — the concurrency the eval ran at. Backfilled **from each bundle's own `config.model_args.num_concurrent`**, never stamped or assumed: 74 of the 76 historical rows are c16 and **two ds4 rows really ran at c4**, which refutes the standing "every accuracy row is c16" claim (see the follow-up) |
-  | `samples` | **new** — `task=effective/requested`, from the bundle's own `n-samples`, `;`-joined. The denominator is computed **per leaf subtask**, never as a flat `limit`: `mmlu --limit 100` legitimately requests **5,700** docs (57 subtasks × 100) out of 14,042. This is the evidence for the completeness check, so a later reader can re-derive the verdict under a different threshold |
-  | `validity` | **new** — Gate-2 verdict tokens, **task-tagged** the way Gate-3 tokens are level-tagged (`nonfinite@mmlu`, `short_sample@gsm8k`), `+`-joined, `ok` when clean, `na` when the rules could not be evaluated (never `ok`) |
-  | `status` | **new** — the same §6 vocabulary as `results.tsv`, floored by the verdict: `measured` / `suspect` / `void` |
+  | `conc` | the concurrency the eval ran at. Backfilled **from each bundle's own `config.model_args.num_concurrent`**, never stamped or assumed: of the 79 rows, 75 are c16, **two ds4 rows really ran at c4**, and the two 20260820 rows are the deliberate c1/c32 pair — which refutes the standing "every accuracy row is c16" claim (see the follow-up) |
+  | `samples` | `task=effective/requested`, from the bundle's own `n-samples`, `;`-joined. The denominator is computed **per leaf subtask**, never as a flat `limit`: `mmlu --limit 100` legitimately requests **5,700** docs (57 subtasks × 100) out of 14,042. This is the evidence for the completeness check, so a later reader can re-derive the verdict under a different threshold |
+  | `validity` | Gate-2 verdict tokens, **task-tagged** the way Gate-3 tokens are level-tagged (`nonfinite@mmlu`, `short_sample@gsm8k`), `+`-joined, `ok` when clean, `na` when the rules could not be evaluated (never `ok`) |
+  | `status` | the same §6 vocabulary as `results.tsv`, floored by the verdict: `measured` / `suspect` / `void` |
 
   | token | rule | severity |
   |---|---|---|
@@ -124,18 +152,43 @@ Per **(node, model)** under `results/<node_fp>/<org>/<model>/`:
   disagree. **Verified against §0 defect (c):** a `nan` score, a 37-of-14,042 run and a missing
   results file each now record a row and **fail** Gate 2 — all three previously reported **PASS**,
   because only `lm_eval`'s exit code was consulted. Acceptance suite:
-  `scripts/eval_validity_selftest.sh` (**95 checks**, synthetic bundles, no GPU) — which includes
+  `scripts/eval_validity_selftest.sh` (**96 checks**, synthetic bundles, no GPU) — which includes
   **execution traces** proving every Gate-2 branch is reachable for all four runbook variants
   (neither / reasoning / spec-decode / **both**). Migrate a legacy journal with
   `scripts/migrate_accuracy_tsv.py --write` (idempotent; `eval.sh` calls it automatically when it
   meets a 12-column file).
   **What this predicate deliberately does NOT do: compare a score to a reference or to a floor.**
-  At `LIMIT=100` the binomial SE is ~4.3 points — wider than the KEEP rule's ~1% tolerance — so any
-  threshold on the *value* would imply a precision the sample size cannot deliver. It answers "is
-  this a number?", never "is this number good?". Residual gaps, recorded rather than papered over:
+  It answers "is this a number?", never "is this number good?" — the value-side reasoning is a
+  *relative* regression check against a matched-settings reference (docs/validation.md → Gate 2),
+  and what a given task can actually resolve is arithmetic, not taste (see the `LIMIT` note below
+  and `research/review/POWER-analysis.md`). Residual gaps, recorded rather than papered over:
   lm-eval publishes no per-request error count, so there is no `errored`-style visibility on this
-  gate, and a zero-token generation is detectable only through its 0.0 score (there is no
-  output-token count in the bundle without `--log_samples`).
+  gate; a zero-token generation is detectable only through its 0.0 score; and — worse than either —
+  **lm-eval substitutes a placeholder for a null completion and counts the item as answered**, so a
+  serve returning empty content on a fifth of the set still reports `samples=100/100` with a finite
+  score and passes `validity=ok` (measured live 20260820, see the lab note). All three need
+  `--log_samples`.
+
+  **`LIMIT` is PER LEAF SUBTASK, and this repo got the arithmetic wrong for months.** `lm_eval
+  --limit L` applies to each leaf, not to the task group, and it takes the **first** L docs of each
+  leaf's split — a deterministic prefix, so every run at a given limit scores the identical items.
+  (Which is also why `LIMIT=100` is **not** a random subsample: on the one config measured both
+  ways, mmlu 73.25@100 vs 70.99@full and gsm8k 92.0 vs 87.64 — the first docs of each leaf are
+  systematically easier, so an in-loop number and a finalize number for the same config are not
+  interchangeable.) Therefore at `LIMIT=100`:
+
+  | task | leaves | effective n | binomial SE at its typical p | lm-eval's own recorded `acc_stderr` |
+  |---|---|---|---|---|
+  | `gsm8k` | 1 | **100** | 2.71 pt @ p=.92 | 2.88 pt strict / 1.97 flexible (33 bundles) |
+  | `mmlu_pro` | 14 | **1,400** | 1.22 pt @ p=.70 | **1.20 pt** (14 bundles) |
+  | `mmlu` | 57 | **5,700** | 0.51 pt @ p=.82 | **0.49 pt** (24 bundles) |
+
+  The right-hand column is not a derivation — it is what lm-eval wrote into every bundle we kept,
+  and the `samples` column above shows the same thing (`mmlu=5700/5700`). **The old "±4.3 points at
+  `LIMIT=100`" figure is right for `gsm8k` and wrong for `mmlu` by 7.6× in n, i.e. 2.8× in SE**, and
+  the follow-ups that rested on it are corrected below. Consequence in both directions: the gate is
+  *better* than believed on the task it actually computes, and the historical spreads it called
+  noise are **not** explainable as sampling noise.
 - **`logbook.md`** — narrative (what was tried/kept/discarded + the environment block). Committed.
 - **`SUITE-<cfg>.md`** — the per-config validation report `suite.sh` writes. Committed.
 - **`data/<run_id>/`** — raw bundle: `level_c<N>.json` (GuideLLM output, one per level — the
@@ -165,34 +218,48 @@ thin bash shim and re-implements nothing). Column order is fixed, no value is ev
 | `model` | full HF repo id |
 | `shape` | workload — `chat(512/256)` (default, the tuning objective) or `coder(4096/1024)` |
 | `backend` | `vllm@<ver>(img:sha256:<short>)`; host-process engines use `<engine>@<git-short-sha>` |
-| `config_hash` | first 8 hex of `sha256sum <runbook>` — provenance for the exact config |
+| `config_hash` | first 8 hex of `sha256sum <runbook>` — provenance for the exact config. **Host-process backends instead carry `hp3-<8 hex>`**, computed from the served process (`scripts/lib/hostcfg.sh`), or `stub-<8 hex>` when no engine could be identified |
 | `script` | runbook path relative to the repo root |
 | `load_s` | time-to-healthy recorded by `serve.sh`; `na` if the serve state doesn't match this runbook |
 | `max_s` | `MAX_SECONDS` per level actually used — **not** universal, scale it to the model |
 | `seed` | `AHL_SEED` (default 42) → identical synthetic prompts across configs, so comparisons are paired |
 | `tps_c1 … tps_c32` | GuideLLM `output_tokens_per_second.successful.mean` per level; `na` = level not run, `hang` = the level that wedged |
 | `peak_gb` | peak memory; `na` on unified-memory nodes (nvidia-smi can't report it) — falls back to a system-used proxy |
-| `req_counts` | **new** — per-level request outcome in the order `ok/incomplete/errored`, semicolon-joined, run levels only: `c1:41/0/0;c16:118/4/0`. A level that ran but left no parseable JSON renders `c16:na`; the whole field is `na` when no bundle survives. This is what makes a number auditable without the raw bundle |
-| `validity` | **new** — `ok`, or a `+`-joined list of **level-tagged** verdict tokens: `low_sample@c1+survivorship@c16` (table below) |
-| `knobs` | **new** — the full effective knob set resolved at run time, `k=v` comma-joined, **list values separated by `|`** so a naive `split(",")` is always right: `levels=1\|16,max_s=180,seed=42,prompt=512,output=256,stall=90,ltimeout=480,gllm=0.6.0`. A baseline at `MAX_SECONDS=600` and a finalize at the 180 default used to be indistinguishable in the journal |
+| `req_counts` | per-level request outcome in the order `ok/incomplete/errored`, semicolon-joined, run levels only: `c1:41/0/0;c16:118/4/0`. A level that ran but left no parseable JSON renders `c16:na`; the whole field is `na` when no bundle survives. This is what makes a number auditable without the raw bundle |
+| `validity` | `ok`, or a `+`-joined list of **level-tagged** verdict tokens: `low_sample@c1+survivorship@c16` (table below) |
+| `knobs` | the full effective knob set resolved at run time, `k=v` comma-joined, **list values separated by `|`** so a naive `split(",")` is always right: `levels=1\|16,max_s=180,seed=42,prompt=512,output=256,stall=90,ltimeout=480,gllm=0.6.0`. A baseline at `MAX_SECONDS=600` and a finalize at the 180 default used to be indistinguishable in the journal |
 | `status` | see the status vocabulary below |
 | `notes` | free text: `hang@c<N>` on a wedge, the `thermal=…` sidecar summary, plus any `NOTES=` |
 | `data` | bundle path relative to the repo root (gitignored content) |
 
 `scripts/aggregate.py` concatenates every `results.tsv` for cross-node comparison, and **filters
-`void`/`suspect` out of its default view**.
+`void`/`suspect`/`crash` out of its default view**.
+
+**An interrupted bench still leaves a row.** `bench.sh` used to emit its row only after the level
+loop, so a Ctrl-C, a session limit, a `kill` or a reboot mid-shape left a `data/<run_id>/` bundle
+full of real `level_c*.json` evidence that **no row referenced** — invisible to `aggregate.py`, to
+the audit and to every gate, because the committed journal is the record and the bundle is
+gitignored. All three benchers now trap and record a partial row (`status=suspect`, or `void` under
+a fatal floor, or `crash` if the shape had already wedged), carrying `incomplete_run` in `validity`.
+`SIGKILL`, a kernel OOM-kill and a power cut are still beyond a trap, and two orphans already on
+disk predate it: **`uv run scripts/reconcile_bundles.py`** walks the tree, finds bundles nothing
+points at, scores them through the library and — with `--write` — appends one plainly-marked
+reconstructed row each (`status` never `measured`, provenance columns `na`, never guessed). It is a
+dry run by default and only ever appends.
 
 ### Validity verdicts
 
 Computed per row from the per-level GuideLLM JSON; **fatal** verdicts void a row, **suspect**
 verdicts flag it. Binding rules and thresholds: [docs/validity-contract.md](docs/validity-contract.md)
-§3–4 (**v1.2**); the reasoning a human applies by hand is in [docs/validation.md](docs/validation.md)
-(Gate 3); the pass over the whole published record is `research/review/AUDIT-measurement-validity.md`.
+§3–4 (**v1.3** — read its amendment blocks and the closing v1.2-status and v1.3 sections, which win
+over anything earlier in that file); the reasoning a human applies by hand is in
+[docs/validation.md](docs/validation.md) (Gate 3); the pass over the whole published record is
+`research/review/AUDIT-measurement-validity.md`.
 
 **Tokens carry the level they refer to**: `low_sample@c1`, `no_data@c32`, `survivorship@c16`. Only
-`ok` and `nonmonotonic` are row-wide and untagged. This matters operationally — a thin c1 sentinel
-no longer condemns the c16 objective the campaign is actually tuning; **298 of the 315 published
-rows (94.6%) carry no token tagged at c16.** Gate on the level you cite.
+`ok`, `nonmonotonic` and `incomplete_run` are row-wide and untagged. This matters operationally — a
+thin c1 sentinel no longer condemns the c16 objective the campaign is actually tuning; **300 of the
+317 published rows (94.6%) carry no token tagged at c16.** Gate on the level you cite.
 
 | token | rule | severity |
 |---|---|---|
@@ -203,6 +270,7 @@ rows (94.6%) carry no token tagged at c16.** Gate on the level you cite.
 | `no_output` | `successful > 0` but tok/s is null, non-finite or `<= 0` — the **floor** under the roofline's ceiling | fatal |
 | `survivorship` | `successful > 0` and `incomplete > successful` — a **majority** of the work started was discarded, so the published mean averages a minority of it | suspect |
 | `nonmonotonic` | a run level >**10%** below the **immediately preceding** run level (adjacent-only) | suspect |
+| `incomplete_run` | the sweep was **cut short** — the process was signalled or the shape never finished. **Row-wide and untagged**, so it is non-citable at *every* level scope | suspect |
 | `errored` | `errored` is 10–50% of `successful + errored` | suspect |
 | `errored_fatal` | `errored` is **above 50%** — the endpoint is refusing, not serving | fatal |
 | `na` | the rules could not be evaluated (no bundle) — **never `ok`** | — |
@@ -211,6 +279,17 @@ rows (94.6%) carry no token tagged at c16.** Gate on the level you cite.
 journal published a cell **or** a bundle file exists (the union); unrun levels are skipped, never
 scored as zero; a hung level is scored and its token names it. The published run-level list wins
 over a directory listing, so a stale `level_c8.json` from a previous shape is ignored.
+
+**Why `incomplete_run` is ROW-WIDE, and the hole it closes.** An interrupted sweep produces real
+numbers for the levels that landed, so voiding them would be the mirror-image lie; but the run as a
+whole never completed, and that is a property of the *run*, not of one concurrency level. It has to
+be row-wide for a second reason, which is the actual defect it fixes: **`citability.classify_row`
+ignores `status` at level scope** (deliberately — a `status` downgrade caused by a token at another
+level must not condemn the level you cite), so `status=suspect` alone had *no consumer-visible
+effect* on an interrupted row, and the promotion gate reported it as `suspect=0`. A row-wide token
+is the only kind that survives a level-scoped reading. Suspect rather than fatal: the completed
+levels **are** data, they are simply not citable until a human adjudicates under contract §7. A
+fatal verdict still outranks it through the status floor.
 
 **Why `low_sample` is a bare request floor — and why it was a token budget for one day
 (v1.1 -> v1.2 A1).** The rule has been wrong twice, and both wrong versions had a plausible story,
@@ -268,17 +347,51 @@ part — a directional bias, not noise. Three forms were written:
 Sample adequacy is still the primary detector; monotonicity is secondary and deliberately loose,
 because `c8 > c16` within noise is a legitimate result on a bandwidth-bound box.
 
-### Status vocabulary
+### Status vocabulary — FIVE words (contract v1.3, 20260820)
 
-`measured` · `keep` · `discard` · `crash` · `suspect` · `void`.
+`measured` · `discard` · `crash` · `suspect` · `void`. **`keep` is RETIRED.**
 
 | status | means |
 |---|---|
 | `measured` | **the invariants passed** — valid data, not yet judged. It no longer means merely "a row exists" |
-| `keep` / `discard` | adjudicated against the KEEP rule (set via `STATUS=` at bench time) |
+| `discard` | an **orchestrator adjudication under contract §7**, applied to the journal *after* the fact, for a row the invariants cannot fault but a human can. Must be signed `adjudicated@YYYYMMDD who: reason` in `notes` (reason ≥ 12 chars) |
 | `crash` | engine wedge/hang; the offending level's tok/s cell is `hang`. **Non-valid for every consumer** |
 | `suspect` | measured, but an invariant questions it — **not citable** without an adjudication recorded in the logbook |
 | `void` | **not data.** Must not be cited, medianed, plotted, or promoted on |
+
+**Why `keep` went, and why it is REFUSED rather than merely undocumented.** It was never written:
+**0 of 317 rows**, across 15 campaigns and every backend. Two structural reasons, either of which
+is sufficient. **Wrong grain** — a keep verdict is a statement about a *config*, decided on the
+median of N=3 benches; `status` is a property of *one row*, and there is no row that is "the kept
+one". **Wrong time** — `bench.sh` writes each row as that row finishes, and §7 forbids rewriting a
+published row afterwards, so at the only moment the column can be written the comparison that would
+justify `keep` has not happened yet. `STATUS_VOCAB` is now five words, `check_status()` (and
+therefore `apply_status()`) raises on `keep` with its retirement notice, and **both runners reject
+`STATUS=keep` before serving anything** (exit **2**, the usage rung — a refused invocation measured
+nothing and is not a result). The decision lives where it always actually lived: the `MEDIAN` line,
+`tune_status.py`'s ranking, and `logbook.md`.
+
+**Why `discard` stayed, and what it is NOT.** It is not a bench-time verdict and never was: the
+documentation used to say keep/discard were "set via `STATUS=` at bench time", and **that mechanism
+does not exist** — `bench_ds4.sh` and `bench_llamacpp.sh` hard-code `status="measured"` and never
+read `$STATUS` at all, and all six historical `discard` values were applied by later adjudication
+commits. It stays because the class of row only a human can fault is non-empty and unrecoverable
+from `validity`. The row that settles it: **`20260809-183024-chat`** (cfg `653a8d9c`, the FF711
+`NP=32` bench) carries only `survivorship@c32` and classifies **valid at c16 — the tuning
+objective**. It is rejected because `NP=32 × CTX_PER_SLOT=12288` drove total context to 393,216
+(~25 GiB KV) and over-committed unified memory into swap, and because it changes two things at once.
+**No invariant can see swap** — it leaves no trace in a GuideLLM level json. Contamination and
+confounded design are the same shape. So `discard` is signed, dated and greppable:
+
+```
+grep -h 'adjudicated@' results/*/*/*/results.tsv
+python3 scripts/lib/validity.py status --tsv results/*/*/*/results.tsv   # 0 clean, 4 offenders
+```
+
+A §7 adjudication may also leave a `discard` standing over a **void** floor — five of the six rows
+do — and the stamp is what records that the human saw the floor and ruled anyway. `apply_status()`
+still downgrades a hand-set `discard` on the WRITE path; the §7 hand adjudication is the deliberate
+exception, which is why the two can disagree in the journal without either being a defect.
 
 ### Enforcement — record and flag, exit 4
 
@@ -320,6 +433,15 @@ journal, not only in the gitignored bundle. What changes is the verdict, not the
   `chat`), `AHL_PROMOTE_LEVEL` (default `16`, or `none` for a row-wide gate). If a config never ran
   the objective level the gate falls back to the highest level it did run, and says so — the ds4 /
   llama.cpp launchers bench c1 only.
+  **Read the gate for what it does, not for the older sentence.** Contract §5 still carries the
+  v1.0 line *"`promote.sh` refuses void/suspect supporting rows"*; that has been false since the
+  level-scoped gate replaced it. The gate blocks on **fatal-at-the-objective or crash**, or on
+  having no citable objective row at all — `blocked = any fatal or n_valid == 0`. A *suspect*
+  objective row is counted and reported (`suspect=N` in the summary line) but does **not** block on
+  its own while another objective row is citable. That is deliberate, and it is exactly why an
+  interrupted row needed the row-wide `incomplete_run` token rather than `status=suspect`: at level
+  scope the classifier does not look at `status`, so the gate was reporting `suspect=0` on a sweep
+  that never finished. Do not restate the §5 sentence anywhere.
 - **`AHL_PROMOTE_OVERRIDE` is a justification, not a flag** — `promote.sh` rejects `1`/`yes`/`force`
   and anything under 12 characters, and writes the text permanently into the promoted `_final.sh`,
   where it is greppable (`grep -l AHL_PROMOTION_OVERRIDE runbooks/*/*/*_final.sh`). Overriding is a
@@ -334,19 +456,26 @@ journal, not only in the gitignored bundle. What changes is the verdict, not the
   `run_experiment.sh`'s `1` means strictly *pre-measurement* (serve/smoke): a failure of the median
   summarizer itself now exits **4** with `cite=error`, because the bench rows were written and
   saying "1" told the caller nothing had been measured.
-- **`tests/run.sh`** is the acceptance suite for this layer (**206 tests**, ~12 s, stdlib only, no
+- **`tests/run.sh`** is the acceptance suite for this layer (**279 tests**, ~45 s, stdlib only, no
   GPU or network). Run it with `AHL_TEST_STRICT=1` — a SKIP means "this contract rule was not
   checked", not "it passed". **`tests/mutate.sh`** is the second half of the gate: it copies the
   repo per mutation, breaks one rule or one enforcement link, and expects the suite to go RED.
-  **26 mutations, 0 survivors.** A rule with no mutation that turns the suite red is an untested
+  **38 mutations, 0 survivors.** A rule with no mutation that turns the suite red is an untested
   rule — mutation testing of the v1.1 suite found **16 survivors** with 121/121 green, including
   every enforcement path. **`scripts/citability_selftest.sh`** is the REACHABILITY companion
-  (68 checks):
+  (**102 checks**):
   it runs the real `promote.sh`/`run_experiment*.sh`/`suite.sh`/`validate.sh` inside a throwaway
   repo whose `serve.sh`/`smoke.sh`/`eval.sh`/`bench*.sh` are stubs returning scripted exit codes,
   and asserts on which branch actually executed — because the scar in this repo (see the
   reasoning × spec-decode bug) is a *correct condition in an unreachable branch*, which no
   assertion about the condition can catch. Also hermetic: no docker, server, GPU or lm-eval.
+  Four more hermetic selftests sit beside them, each owning a layer this suite does not:
+  **`scripts/eval_validity_selftest.sh`** (Gate 2, **96 checks**),
+  **`scripts/hostcfg_selftest.sh`** (host-process identity, **108 checks**, fabricated `/proc`),
+  **`scripts/eval_private_selftest.sh`** (tier-4 private set, **261 checks**) and
+  **`scripts/power_selftest.sh`** (**77 CLI checks** — **71** in a worktree, where the gitignored
+  bundles are absent; point `AHL_POWER_DATA_ROOT` at the main checkout for the other six — plus 68
+  numeric self-checks inside `power.py selftest`).
 
 ### Schema history — and why this section is normative
 
@@ -358,16 +487,28 @@ one humans and agents read. That is itself evidence for issue #1 §1 — **the s
 reference did not follow**, silently, for months. The header now lives in one place
 (`scripts/lib/validity.py`); when it changes, this table changes in the same commit.
 
-Historical rows (**315** across 15 campaigns as of 20260819 — the review issue's 313 predates two
-rows added by the ctx merge) get `req_counts`/`validity`/`knobs` backfilled where a retained bundle
-allows it, but **historical `status` values are not rewritten in bulk** — several are already cited
-in logbooks, so they are adjudicated row by row (contract §7); six fatal rows were hand-adjudicated
-to `void` on 20260819. **309 of 315 are still auditable; 6 are permanently unauditable** — their
-bundles are gone, and that is the hard ceiling on how much of this project's record can ever be
-verified. Under final v1.2 the corpus reads **283 `ok` / 10 suspect-floor / 22 void-floor / 1 `na`**
-on `validity`, and **291 `measured` / 12 `crash` / 6 `discard` / 6 `void`** on `status`. Note that
-`keep` has never actually been written to a row (0/315): keep/discard adjudication has in practice
-lived in `logbook.md`, so read a `measured` row as "valid and unjudged", not as "kept".
+Historical rows (**317** across 15 campaigns as of 20260820 — 315 after the ctx merge, plus the two
+rows the 20260820 live-hardware validation added; the review issue's 313 predates both) get
+`req_counts`/`validity`/`knobs` backfilled where a retained bundle allows it, but **historical
+`status` values are not rewritten in bulk** — several are already cited in logbooks, so they are
+adjudicated row by row (contract §7). **6 rows are permanently unauditable** — their bundles are
+gone, and that is the hard ceiling on how much of this project's record can ever be verified.
+
+**The corpus as of 20260820** (recompute it, never copy it: `awk -F'\t' 'FNR>1&&NF>1{print $(NF-2)}'
+results/*/*/*/results.tsv | sort | uniq -c`):
+
+| axis | breakdown |
+|---|---|
+| `status` | **284 `measured` · 12 `crash` · 8 `suspect` · 7 `void` · 6 `discard`** = 317 |
+| `validity` floor | 284 `ok` · 9 suspect-floor · 23 void-floor · 1 `na` (which also floors suspect) |
+| level scoping | 300 of 317 (94.6%) carry no token tagged at c16 |
+| `accuracy.tsv` | **79 rows** — 76 `measured`, 3 `suspect` (`zero_score@gsm8k`) |
+
+**The adjudication is complete: 0 rows now disagree with their verdict.** Every void-floor row is
+`void`, `crash` or a signed §7 `discard`; every suspect-floor row is `suspect` or better-ruled; and
+`python3 scripts/lib/validity.py status --tsv results/*/*/*/results.tsv` exits 0. The worklist that
+used to live here — "13 rows where the invariants dispute the status and nobody has ruled" — is
+empty. Note that `keep` was **never** written to a row (0 of 317), which is why it is retired.
 
 ## Standard test suite
 
@@ -390,14 +531,34 @@ per-candidate.
   (`aime24,aime25` — they PREFER `\boxed{}` extraction; minerva_math500/hendrycks_math500 do NOT and
   score ~0 on `\boxed` output). Long-CoT eval needs: **temp 1.0** (`GEN_KWARGS do_sample=True`; greedy
   loops on RL-reasoners), large **`GEN_TOKS`** (auto-32768) + **`EVAL_TIMEOUT`** (default 1800s; 32K-tok
-  gens blow lm-eval's 300s default), and the **chat endpoint** (`THINK=off` → apply_chat_template). Tier-3 time-gated (`eval_live.sh` / LiveBench) and a tier-4 private held-out set remain
-  opt-in (not in the standard suite yet — see follow-ups). **Caveat:** standard `mmlu` is
+  gens blow lm-eval's 300s default), and the **chat endpoint** (`THINK=off` → apply_chat_template).
+  Tier-3 time-gated (`eval_live.sh` / LiveBench) and the **tier-4 private held-out set**
+  (`scripts/eval_private.sh`, [docs/private-eval.md](docs/private-eval.md) — the mechanism is built
+  and self-tested, no real items authored yet) remain opt-in, not in the standard suite.
+  **Which task can resolve what is arithmetic, not preference:** `gsm8k@LIMIT=100` really is n=100
+  and detects ~14-point breakage and nothing finer; `mmlu@LIMIT=100` is n=**5,700** and
+  `mmlu_pro@LIMIT=100` is n=1,400, because `--limit` applies per leaf subtask (see the
+  accuracy.tsv `LIMIT` note above, and `research/review/POWER-analysis.md`). `eval.sh general`
+  already computes both — cite the one whose n supports the claim.
+  **Caveat:** standard `mmlu` is
   *loglikelihood*-scored and can be unreliable for some archs (Gemma-4 scored ~41 — BOS/prefix-LM/
   logit-softcapping); cross-check with the *generative* gsm8k + mmlu_pro before trusting it as a gate.
-  **Speculative decoding ⊥ loglikelihood:** a config with `--speculative-config` (MTP/draft) returns
-  **NaN prompt_logprobs**, so loglikelihood `mmlu` 400s (`Out of range float values are not JSON compliant`).
-  The quality gate for ANY spec-decode config must use **generative** tasks (gsm8k/mmlu_pro think-off), not
-  loglikelihood mmlu (Nemotron-3-Super MTP final). Spec-decode is greedy-lossless, so generative scores match.
+  **Speculative decoding ⊥ loglikelihood — PER MODEL, not universal (corrected 20260820).** The
+  failure is real where it was found: a config with `--speculative-config` (MTP/draft) can return
+  **NaN prompt_logprobs**, so loglikelihood `mmlu` 400s (`Out of range float values are not JSON
+  compliant`) — Nemotron-3-Super MTP final, and the 56,168-request NaN grind below. **But the
+  journal holds ELEVEN counter-examples across THREE models**, every one from a runbook carrying a
+  live `--speculative-config` and every one recording `mmlu=5700/5700`, `validity=ok`,
+  `status=measured` with a normal `acc_stderr` of 0.48–0.54, across vLLM 0.23.0 / 0.24.0 / 0.25.0:
+  8 rows on `RedHatAI/Qwen3.6-35B-A3B-NVFP4` (78.19 78.44 77.60 82.82 81.75 82.65 81.79 81.72),
+  2 on `unsloth/Qwen3.6-35B-A3B-NVFP4-Fast` (81.28 81.32) and 1 on
+  `nvidia/NVIDIA-Nemotron-Labs-3-Puzzle-75B-A9B-NVFP4` (83.67). So **probe, do not assume**:
+  `TASKS=mmlu LIMIT=2` is 114 items and finishes in seconds — if it returns finite scores,
+  `mmlu@5,700` is available for that model. Where the loglikelihood path genuinely is closed, fall
+  back to generative gsm8k/mmlu_pro think-off. Spec-decode in vLLM is greedy-lossless, so generative
+  scores carry over. *(Re-checking this count: a naive `grep speculative` also matches
+  commented-out flags and header prose, which inflates 11 rows to 18 across 7 more runbooks. Strip
+  full-line comments before matching — the count depends on the pattern, which is itself the point.)*
   **REASONING × SPEC-DECODE branch-order bug (found + fixed 20260817, Qwen3.8-27B finalize).** suite.sh
   tested `REASONING` and `SPEC` as mutually exclusive `if/elif` with reasoning FIRST, so a runbook that is
   BOTH (reasoning-parser **and** `--speculative-config` — i.e. every promoted reasoning model with MTP)
@@ -411,9 +572,18 @@ per-candidate.
   **Lesson: confirming a guard's condition fires is not the same as confirming its branch is reachable.**
   This was not a one-off — see the lab note "A CORRECT CONDITION IN AN UNREACHABLE BRANCH" for the
   other two instances and what we now run to catch them.
-  **Thinking-OFF generative eval:** reasoning models (runbook has `--reasoning-parser`) emit `<think>`
-  CoT on the raw eval path that truncates/derails generative tasks (35B gsm8k **40→90** with thinking
-  off). suite.sh auto-detects them and runs gsm8k + mmlu_pro on a **second, thinking-OFF serve**
+  **Thinking-OFF generative eval — it is model-dependent, and the direction is NOT consistent.**
+  Reasoning models (runbook has `--reasoning-parser`) emit `<think>` CoT on the raw eval path that
+  truncates/derails generative tasks: the 35B goes gsm8k **40→90** with thinking off. **But
+  `RedHatAI/Qwen3-8B-NVFP4` goes 90→56** — measured live 20260820, same day, same config — with
+  **17–19% of items returning null content**, and Gate 2 passed it `validity=ok` because lm-eval
+  substitutes a placeholder for a null completion and counts the item as answered, so
+  `samples=100/100` and the score is finite. `suite.sh` auto-applies think-off to **every**
+  `--reasoning-parser` runbook, so for that model the gate silently substitutes 56 for 90. **Do not
+  read this fix as always helping.** Probe the think-off serve (`content` non-empty?) before
+  trusting any generative score from it; the predicate cannot see the substitution without
+  `--log_samples`. suite.sh auto-detects reasoning runbooks and runs gsm8k + mmlu_pro on a
+  **second, thinking-OFF serve**
   (`AHL_THINK_OFF=1` → `--default-chat-template-kwargs '{"enable_thinking": false}'`, evaluated via
   the **chat** endpoint with `THINK=off` since `enable_thinking` only applies to `/v1/chat/completions`,
   not `/v1/completions`); loglikelihood `mmlu` stays on the deployed thinking-ON serve (thinking-agnostic).
@@ -456,7 +626,7 @@ Defaults live in `scripts/lib/validity.py`; the library reads the env at **call*
 
 ## Variance
 
-Benchmarks are noisy. For keep/discard decisions, run **N=3** and take the **median**; don't act
+Benchmarks are noisy. For a keep/drop decision on a CONFIG, run **N=3** and take the **median**; don't act
 on a single run (lesson from `homelab-tooling`). Don't change N mid-run. The median is taken over
 **valid** rows only — `void` rows are not data and `suspect` rows are not citable, so N=3 means
 three rows that passed the invariants, not three rows that exist.
@@ -469,28 +639,35 @@ three rows that passed the invariants, not three rows that exist.
 
 ## Pending follow-ups
 
-> **Triage against issue #1 §1 (measurement validity), 20260819–20260820.** The §1 work started as a
-> validity layer for the **throughput** path only (`results.tsv`, Gate 3). Checked item by item it
-> closed **none** of the pre-existing entries below outright — it was a new capability, not a
-> backlog sweep — so nothing here is ticked off on its account. Items it *touches without closing*
-> are annotated `§1:` inline; the items it *created* are at the end of the list. Two of those closed
-> (`gpu.mem_bw_gbs` on 20260819; **Gate 2's missing acceptance predicate** on the same day, when
-> contract A9 deliberately expanded the scope after verification found Gate 2 had no predicate at
-> all). One pre-existing item is **factually corrected, not closed** (accuracy-at-one-concurrency:
-> the recording half is done and its premise was partly wrong; the measuring half needs the GPU).
-> The binding spec was amended eleven times for v1.1 and ten more for v1.2, two of those
-> re-adjudicated after measuring: **contract v1.2 — its amendment blocks and its closing "v1.2
-> status" section — is what the code implements and what this file documents.**
+> **Triage against issue #1, 20260819–20260820.** The §1 work started as a validity layer for the
+> **throughput** path only (`results.tsv`, Gate 3) and expanded twice. Nothing here is ticked off on
+> a claim; every closed item names the evidence and every corrected item names what was wrong.
+> **Closed in this wave:** `gpu.mem_bw_gbs`; Gate 2's missing acceptance predicate (contract A9);
+> the historical-row adjudication (0 of 317 rows now disagree with their verdict); `keep` never
+> being written (retired, contract v1.3); `promote.sh`'s version-derivation bug (now anchored to the
+> pin); and **half** of the host-launcher `config_hash` blind spot (Gates 2 and 3 both use `hp3-`
+> from the served process; the tier-3/4 eval scripts do not — see the new item).
+> **Corrected but NOT closed:** accuracy-at-one-concurrency, the `LIMIT=100` noise item (its
+> arithmetic is wrong for `mmlu` by 2.8× in SE), and the mmlu-drift item (its citation is wrong, its
+> claim is right). Items the wave *created* are at the end of the list.
+> The binding spec was amended eleven times for v1.1, ten more for v1.2 (two of those re-adjudicated
+> after measuring), and once for v1.3: **contract v1.3 — its amendment blocks and its closing
+> "v1.2 status" and "v1.3" sections — is what the code implements and what this file documents.**
 
-- [ ] **`promote.sh` version-derivation bug** — it sets the `VLLM-<minor>` name by grepping the
-  *first* `vX.Y.Z` in the runbook text, which catches migration-comment lines (e.g. a baseline header
-  saying `image v0.22.0 -> v0.23.0` yields `VLLM-22-…` on a 0.23.0 config). Workaround: pass
-  `VLLM_TAG=<minor>` (used `VLLM_TAG=23` for the 35B promote). Fix: derive from the pinned
-  `VLLM_IMAGE` digest via the `image.lock` catalog, or grep only the `VLLM_IMAGE=` line's comment.
-  Unrelated to, but now living in the same script: **`AHL_PROMOTE_OVERRIDE`** — the escape hatch for
+- [x] **`promote.sh` version-derivation bug — CLOSED 20260820.** It used to set the `VLLM-<minor>`
+  name by grepping the *first* `vX.Y.Z` in the runbook TEXT, which caught migration-comment lines
+  (a baseline header saying `image v0.22.0 -> v0.23.0` yielded `VLLM-22-…` on a 0.23.0 config;
+  workaround was `VLLM_TAG=23` by hand). **The name is a claim about which vLLM produced the
+  numbers, so it is now derived from the PIN, never from prose:** `VLLM_TAG` if the operator sets
+  it, else the `backends/vllm/image.lock` catalog entry for this exact digest, else a `vX.Y.Z` in
+  the image REF's tag. A bare digest that is not in `image.lock` is **refused** (add it to the
+  catalog, where a validated image belongs anyway, or pass `VLLM_TAG`), and the result must be
+  numeric — `cut -d. -f2` on a catalog key like `0.23-fix` used to yield `VLLM-23-fix-…`, and
+  `VLLM_TAG=abc` used to yield `VLLM-abc-…`. `promote.sh` prints `>> vLLM minor: N (from <source>)`.
+  Living in the same script and unrelated: **`AHL_PROMOTE_OVERRIDE`** — the escape hatch for
   promoting on flagged supporting rows. It takes a **justification of ≥12 chars, not a flag**
-  (`1`/`yes`/`force` are rejected), and the text is written permanently into the promoted `_final.sh`,
-  so every override is greppable across the whole runbook tree.
+  (`1`/`yes`/`force` are rejected), and the text is written permanently into the promoted `_final.sh`
+  as a COMMENT, so every override is greppable across the whole runbook tree.
 - [ ] **BUG: grammar-forced tool_choice 500s on the 35B production serve (found 20260712).**
   `tool_choice:"required"` AND named tool_choice both → HTTP 500: xgrammar `Failed to advance FSM
   ... grammar rejected tokens [248069, 271, 248058] ... Terminating request`. `tool_choice:"auto"`
@@ -517,9 +694,28 @@ three rows that passed the invariants, not three rows that exist.
   were the xgrammar×reasoning×MTP grammar bug intermittently corrupting forced output, not sampling
   noise. Do NOT add a retry (it would mask a real defect the gate is correctly catching). The fix is
   the structured-outputs backend (see grammar-500 entry); smoke gained a de-facto grammar gate.
-- [ ] **mmlu LIMIT=100 drifts ~1 pt across sessions on IDENTICAL config+image** (35B _final: 82.82 on
-  20260705 vs 81.72 on 20260712, same digest). Quality keep/discard comparisons are only valid as
-  same-session matched pairs — always re-measure the reference in the same session as the candidate.
+- [ ] **mmlu LIMIT=100 drifts ~1 pt across sessions on IDENTICAL config — CLAIM CONFIRMED, CITATION
+  CORRECTED (20260820).** The original citation was wrong twice over: it said *"35B _final: 82.82 on
+  **20260705** vs 81.72 on 20260712, same digest"*, but 82.82 is `20260704_v0.24.0_baseline.sh` on
+  **20260704** and 81.72 is `VLLM-24-…_final.sh` — **two different configs**, not a repeat.
+  **The phenomenon is real anyway, and now has proper evidence.** Grouping runbooks by their
+  *comment-stripped* bytes (see the new `config_hash`-hashes-comments item) surfaces **three**
+  same-effective-config `mmlu@5,700` replicate brackets:
+
+  | model | values | Δ | note |
+  |---|---|---|---|
+  | `RedHatAI/Qwen3.6-35B-A3B-NVFP4` | 82.65, 81.72 | **0.93 pt** | 8 days apart, same image |
+  | `RedHatAI/Qwen3.6-35B-A3B-NVFP4` | 78.19, 77.60 | **0.59 pt** | same day, same image |
+  | `unsloth/Qwen3.6-35B-A3B-NVFP4-Fast` | 81.28, 81.32 | **0.04 pt** | same day, same `config_hash` |
+
+  RMS repeat difference **≈0.64 pt** (per-run SD ≈0.45). The binomial SE of one `mmlu@100` run is
+  0.509 pt, so a difference of two runs has a binomial-only SD of 0.72 pt — **0.64 is inside that**,
+  so these brackets do not by themselves prove an extra session term; what they prove is that
+  **0.6–0.9 pt is the wobble you must expect**, whatever its mechanism. A candidate mechanism now
+  exists (20260820 lab note: prefix caching + fp8 KV makes the deployed serve non-reproducible run
+  to run) but the journal does **not** corroborate it — see that note for the counter-example.
+  Operational rule unchanged and now quantified: **re-measure the reference in the same session as
+  the candidate**, and treat anything inside ~1 pt as not separable.
 - [x] **vLLM 0.25.0 transition (20260712)** — pulled + digest-pinned (`image.lock` catalog; 0.24 still
   DEFAULT), capabilities diff clean (nothing removed; +hpc MoE, +dspark spec-method,
   +VLLM_MOE_SKIP_PADDING). 35B image-only baseline = NEUTRAL across all gates (c16/c1/acceptance/mmlu
@@ -552,56 +748,87 @@ three rows that passed the invariants, not three rows that exist.
   prefix-LM bidirectional attention / `final_logit_softcapping` on NVFP4). Decide per-model whether
   the quality gate uses mmlu (loglikelihood) or pivots to gsm8k + mmlu_pro (generative). Tie-in with
   the greedy-eval follow-up below.
-- [ ] **Quality has never been measured at c1 or c32 — repo-wide blind spot (found 20260818;
-  premise corrected 20260819, recording half CLOSED, measuring half still OPEN).**
+- [ ] **Quality at c1/c32 — the RECORDING half and the TOKEN half are done; the SCORE half is still
+  underpowered (found 20260818; premise corrected 20260819; measured live 20260820).**
   ~~`eval.sh:26` sets `CONC="${CONC:-16}"` and NOTHING in the repo has ever overridden it, so every
   accuracy row is a single point at c16 — and `accuracy.tsv` has no `conc` column.~~ **Both halves
-  of that were wrong.** `accuracy.tsv` now carries `conc` (contract A9) and all 76 historical rows
-  are backfilled from each bundle's own `config.model_args.num_concurrent` — and the bundles show
-  **two ds4 rows really ran at c4**, so `CONC` *was* overridden at least once. What remains true is
-  the part that matters: **no eval has ever run at c1 or c32**, so Gate 2 sits in a narrow band
-  (c4/c16) while Gate 3 sweeps 1→32, and the two still never cross. We therefore have **no data** on whether quality holds at c1 (how OWUI is
-  actually used) or c32 (where this box once deadlocked). Plausible mechanisms for batch-dependent
-  output: GEMM tile/split-k reduction order, piecewise CUDA-graph capture sizes and their fallback,
-  the spec-decode rejection sampler running per batch, hybrid Mamba state under prefix-caching's
-  forced `align` mode, and preemption/recompute under KV pressure. Precedent: the tracked xgrammar ×
-  reasoning-parser × MTP bug is exactly a scheduling/spec-decode-dependent CORRECTNESS failure.
-  Cheap to close — `CONC` is already an env var, so `CONC=1`/`CONC=32` gsm8k runs on one serve in one
-  session settle it; the only work is adding a `conc` column to `accuracy.tsv` (and backfilling the
-  existing rows as 16).
-  **A9 (20260819) — what the evidence actually says.** Backfilling from the bundles refuted
-  "NOTHING in the repo has ever overridden it": **two ds4 rows ran at c4** (`20260808-150310-eval`
-  gsm8k=60.0 and `20260808-153827-eval` gsm8k=76.0), while the two rows beside them
-  (`20260809-210459`, `20260809-213330`, both gsm8k=74.0) ran at c16 — and all four share
-  `config_hash` `10b02344`, the same corpus the host-launcher `config_hash` blind spot is about.
-  **So the 60-vs-76 spread the other follow-up calls ~3.7σ is a spread WITHIN a c4 pair, not across
-  concurrencies: concurrency does not explain it.** 74 of 76 rows are c16, 2 are c4.
-  **Still open, and it needs the GPU:** `CONC=1` and `CONC=32` gsm8k on one serve, in one session,
-  against the same config. Plausible mechanisms for batch-dependent output are unchanged (GEMM
-  tile/split-k reduction order, piecewise CUDA-graph capture sizes and their fallback, the
-  spec-decode rejection sampler running per batch, hybrid Mamba state under prefix-caching's forced
-  `align` mode, preemption/recompute under KV pressure), and the precedent is the tracked
-  xgrammar × reasoning-parser × MTP bug — a scheduling/spec-decode-dependent CORRECTNESS failure.
-  The result will now be recorded, because `conc` exists.
-- [ ] **`LIMIT=100` accuracy noise (±4–5 pts) is WIDER than the KEEP rule's ~1% tolerance.** At n=100,
-  p≈0.9, binomial SE is ~4.3 pts. Measured spreads match: 35B mmlu 77.6→82.82 across 7 runs (5.2 pts),
-  gemma-4 gsm8k 68→73, Qwen3-8B gsm8k 87→92. So an in-loop quality comparison at LIMIT=100 cannot
-  resolve a 1% difference — it can only catch gross breakage. Either raise the in-loop limit for
-  quality-gating decisions or state explicitly that LIMIT=100 is a smoke-level check, not a tolerance test.
-- [ ] **`config_hash` is blind to HOST-PROCESS launcher settings.** ds4 gsm8k recorded 60.0/76.0/74.0/74.0
-  under an IDENTICAL `config_hash` (`10b02344`) — 60 vs 76 is ~3.7σ, not sampling noise. **Ruled out
-  20260819: it is not concurrency** — the 60 and the 76 are both `conc=4` (the `conc` backfill
-  proves it), so the two rows differ only in something the hash does not capture. The hash comes
-  from the `.smoke-runbook.sh` stub, which carries only `MODEL`/`SERVED_NAME`/parser markers and does
-  NOT capture the launcher's `DSPARK`/`NP`/`CTX` settings. Two genuinely different configs can share a
-  hash, which silently breaks keep/discard provenance for ds4 and llama.cpp. Fold the launcher's
-  effective flags into the hash for host backends.
-  **§1: partially mitigated, NOT closed.** The new `knobs` column records the *bench-time* knob set
-  (levels/max_s/seed/prompt/output/…), which removes one class of invisible difference — but it does
-  not record the launcher's `DSPARK`/`NP`/`CTX`, and `config_hash` is still computed from the
-  `.smoke-runbook.sh` stub. Two host-backend configs can still collide on the hash.
-- [ ] **Build a small PRIVATE held-out eval** (tier 4) — authored by us, never published; the only
-  fully-uncontaminated signal for promotion decisions.
+  of that were wrong.** `accuracy.tsv` carries `conc` (contract A9), backfilled from each bundle's
+  own `config.model_args.num_concurrent`, never stamped — and the bundles showed **two ds4 rows
+  really ran at c4**, so `CONC` *was* overridden. Those two are `20260808-150310-eval` gsm8k=60.0
+  and `20260808-153827-eval` gsm8k=76.0; the pair beside them (`20260809-210459`,
+  `20260809-213330`, both 74.0) ran at c16, and all four share `config_hash 10b02344`. **So the
+  60-vs-76 spread the host-launcher item calls ~3.7σ sits WITHIN a c4 pair: concurrency does not
+  explain it.** Distribution over the 79 rows today: 75 at c16, 2 at c4, 1 at c1, 1 at c32.
+
+  **What the live 20260820 run settled, and what it did not.** One serve, deployed config,
+  `gsm8k LIMIT=100 THINK=off`, `CONC=1` then `CONC=32`:
+
+  * **The tokens ARE batch-dependent — demonstrated, not hypothesised.** A 32-prompt greedy
+    determinism probe with prefix caching disabled: **c1 vs c1 = 32/32 byte-identical** (clean
+    control), **c1 vs c32 = 1/32** — 31 of 32 completions differ.
+  * **The score did not move measurably.** 56.0 (c1) vs 58.0 (c32), n=100, SE≈4.9 per arm. That is
+    no detectable difference, and **this design could not have detected one smaller than ~14
+    points** — say both halves or the result is a lie by omission.
+  * **Still open:** whether quality moves with concurrency *by score* needs either a task with real
+    resolution (`mmlu@5,700`, not `gsm8k@100`) or a paired item-level test, which needs
+    `--log_samples`. `research/review/POWER-analysis.md` §7.2's null experiment answers this in the
+    same sitting as its own arms. Mechanisms remain: GEMM tile/split-k reduction order, piecewise
+    CUDA-graph capture sizes and their fallback, the spec-decode rejection sampler running per
+    batch, hybrid Mamba state under prefix-caching's forced `align` mode, preemption/recompute under
+    KV pressure. Precedent: the tracked xgrammar × reasoning-parser × MTP bug is exactly a
+    scheduling-dependent CORRECTNESS failure.
+- [ ] **`LIMIT=100` accuracy noise — the ARITHMETIC WAS WRONG (corrected 20260820); the conclusion
+  survives for `gsm8k` only.** ~~At n=100, p≈0.9, binomial SE is ~4.3 pts.~~ **`--limit` applies per
+  LEAF SUBTASK.** `gsm8k@100` really is n=100 (SE 2.7 pt, MDE **14.08 pt** — 14× too coarse for a
+  1% rule, not 4×). `mmlu@100` is **n=5,700** (57 leaves), SE **0.509 pt** — against lm-eval's own
+  recorded median `acc_stderr` of **0.494** over the 24 kept `mmlu@100` bundles — MDE 2.06 pt.
+  `mmlu_pro@100` is n=1,400, SE 1.22 pt.
+  **The follow-up was wrong about `mmlu` by 7.6× in n, i.e. 2.8× in SE.** Two consequences:
+  * the in-loop gate is *better* than believed on the task `eval.sh general` already computes and
+    then ignores — the KEEP decision has been reading the `gsm8k` number off the same row;
+  * the evidence this item cited as noise is **not** noise. "35B mmlu 77.6→82.82 across 7 runs"
+    decomposes into three per-image clusters (0.23.0: 78.077±0.431 n=3 · 0.24.0: 82.235±0.582 n=4 ·
+    0.25.0: 81.790 n=1) with a real **+4.158 pt** step at 0.23.0→0.24.0. Within-cluster spread
+    matches what n=5,700 predicts. (An earlier draft called that step "8.5σ"; that figure is
+    withdrawn as not reproducible — see POWER-analysis §2 for the three defensible statistics.)
+  * **Still open, and it is a decision not a measurement:** the 1% clause is unachievable *unpaired*
+    at any limit on any task in the suite (it needs 23,668 items/arm; `mmlu` has 14,042 in total).
+    The defensible interim is a tolerance band equal to the **observed same-config spread**
+    (~0.6 pt typical, ~0.9 pt seen — the three brackets in the mmlu-drift item above), cited on
+    `mmlu@5,700`, with `gsm8k@100` demoted in writing to a breakage detector. Adopting anything
+    with a *p-value* in it requires the null experiment first (new item below).
+- [ ] **`config_hash` is blind to HOST-PROCESS launcher settings — HALF CLOSED 20260820; the open
+  half is below.** The finding: ds4 gsm8k recorded 60.0 / 76.0 / 74.0 / 74.0 under an IDENTICAL
+  `config_hash` (`10b02344`) — 60 vs 76 is ~3.7σ, not sampling noise, and it is **not
+  concurrency** (the 60 and the 76 are both `conc=4`). The stub carries
+  `MODEL`/`SERVED_NAME`/parser markers and nothing else, so every ds4 config hashed the same;
+  `promote.sh` selects supporting rows BY `config_hash`, so a collision meant the validity gate
+  could read rows from a different config.
+  **Closed half:** `scripts/lib/hostcfg.sh` computes `hp3-<8 hex>` from the **served process** —
+  argv (NUL-safe, repeated flags ordinal-tagged), the tuning env from `/proc/<pid>/environ`, the
+  engine binary by content through `/proc/<pid>/exe`, and the scheme's own parameters; model files
+  are identified by **content**, not basename (the two ds4 checkpoints share the basename
+  `model.gguf` under different snapshot directories — the layout `huggingface-cli download`
+  produces — and the old basename rule collapsed them onto one hash). **Both
+  `bench_ds4.sh`/`bench_llamacpp.sh` (Gate 3) and `eval.sh` (Gate 2) write it**, from the same
+  process, so a host config's quality row and its throughput rows finally join —
+  and the four cited rows are rows in `accuracy.tsv`, so a bench-only fix would have left the
+  tracked defect untouched. No historical row was rewritten: the `hp3-` prefix keeps old and new
+  distinguishable by eye. `stub-<8 hex>` is written, labelled and warned about, when no known engine
+  is serving the port. Selftest: `scripts/hostcfg_selftest.sh` (108 checks, fabricated `/proc`).
+  **Open half:** the four historical rows still carry `10b02344` and cannot be separated
+  retroactively — the processes are gone. Re-running them is the only way to attribute the 3.7σ
+  spread, and *(see the new item)* five tier-3/4 eval scripts still hash the runbook.
+- [ ] **~~Build a small PRIVATE held-out eval~~ (tier 4) — MECHANISM BUILT 20260820, NO ITEMS
+  AUTHORED.** `scripts/eval_private.sh` + `scripts/eval_private_set.py` + the schema, the guard and
+  a deliberately fake worked example (`evalsets/private-example/`) are committed; threat model and
+  operating rules in [docs/private-eval.md](docs/private-eval.md); selftest
+  `scripts/eval_private_selftest.sh` (**261 checks**). An adversarial verifier found **twelve**
+  leakage paths through the first version — four HIGH — while its own 139-check selftest reported
+  green; all twelve are closed with a regression test each, and two structural weaknesses are
+  stated rather than pretended closed. **Authoring the real items is a human job and is the whole of
+  the remaining work** — and read §8 of that doc first: never paste an item into an agent session,
+  which includes whichever agent is reading this file.
 - [x] **eval.sh pins greedy for eval** — done: `GREEDY=1` (default) sends
   `temperature=0,top_p=1.0,presence_penalty=0,frequency_penalty=0` per-request so the serving
   `--override-generation-config` can't bleed in (request params win over server gen-config defaults;
@@ -620,23 +847,20 @@ three rows that passed the invariants, not three rows that exist.
   non-interactively) and recorded as such in the protocol. User's call: add a sudoers rule for
   just these two, or keep manual.
 
-*Created by the §1 validity work (20260819):*
+*Created by the issue-#1 validity work (20260819-20260820):*
 
-- [ ] **Adjudicate the 315 historical rows** (audit: `research/review/AUDIT-measurement-validity.md`).
-  Contract §7 backfills `req_counts`/`validity`/`knobs` from the 693 retained `level_c*.json`
-  bundles but **deliberately does not rewrite historical `status` values** — several are already cited in logbooks and in promotion decisions, so flipping
-  one to `void` silently invalidates a published claim. The backfill produces an audit listing which
-  published numbers the invariants now dispute; someone has to walk that list row by row, decide,
-  and record the decision in the relevant `logbook.md`. Until then a historical row's `validity`
-  column is *information*, and its `status` is *history*. Scope: **309 of 315 rows are auditable; 6
-  never will be** (bundles gone) — that is the permanent ceiling on how much of this record can be
-  verified, and the six should be treated as uncitable rather than assumed good.
-  **Progress 20260819: six fatal rows were hand-adjudicated to `status=void`** and two promoted
-  runbook headers corrected. Where the remaining worklist sits, under final v1.2: of the **22
-  void-floor** rows, 6 are now `status=void`, 11 are already `crash` (non-valid for every consumer
-  regardless) and **5 still read `discard`**; of the **10 suspect-floor** rows, **8 still read
-  `measured`**. Those 13 are the actual queue — the mismatch between `validity` and `status` is the
-  worklist, and it reads "the invariants dispute this, nobody has ruled yet".
+- [x] **~~Adjudicate the 315 historical rows~~ — CLOSED 20260820. 0 of 317 rows disagree with their
+  verdict.** Contract §7 backfilled `req_counts`/`validity`/`knobs` from the retained
+  `level_c*.json` bundles but deliberately did **not** rewrite historical `status` values in bulk —
+  several are cited in logbooks and in promotion decisions, so flipping one to `void` silently
+  invalidates a published claim. The queue was walked row by row instead: six fatal rows to `void`
+  and two promoted runbook headers corrected on 20260819, then the last thirteen on 20260820 (the
+  audit: `research/review/AUDIT-measurement-validity.md`). The corpus now reads
+  **284 `measured` / 12 `crash` / 8 `suspect` / 7 `void` / 6 `discard`**, every `discard` carries an
+  `adjudicated@YYYYMMDD who: reason` stamp, and
+  `python3 scripts/lib/validity.py status --tsv results/*/*/*/results.tsv` exits 0.
+  **What is permanently unclosable: 6 rows whose bundles are gone.** That is the hard ceiling on how
+  much of this record can ever be verified; treat them as uncitable rather than assumed good.
 - [x] ~~**`gpu.mem_bw_gbs` is absent from the existing node profile**~~ **DONE 20260819.** Added to
   `gb10-1988a9714b4e` as `273` with a `mem_bw_source` string recording that it is the GB10 spec
   figure, hand-added rather than probed, and independently corroborated in-lab at 255 GB/s (93% of
@@ -654,16 +878,86 @@ three rows that passed the invariants, not three rows that exist.
   fatal, `zero_score` / `no_samples` suspect), `accuracy.tsv` carries `conc`/`samples`/`validity`/
   `status`, and a non-citable quality result exits 4 and fails the suite. The denominator the
   finding asked for is the `samples` column: `effective/requested` per task, from the bundle's own
-  `n-samples`. Residual gaps recorded rather than papered over: lm-eval publishes no per-request
-  error count, so `errored`-style visibility does not exist on this gate, and a zero-token
-  generation is detected only through its 0.0 score (there is no output-token count in the bundle
-  without `--log_samples`).
-- [ ] **`keep` has never been written to a `results.tsv` row** (0 of 315; 291 `measured`, 12
-  `crash`, 6 `discard`, 6 `void` after the 20260819 adjudication). Keep/discard adjudication lives in `logbook.md` prose, so no tool can
-  answer "which rows support this promotion?" from the journal alone — `promote.sh` can only check
-  that supporting rows are valid, not that they were ever affirmatively kept. Either
-  wire `STATUS=keep` into `run_experiment.sh`'s decision, or drop `keep` from the documented
-  vocabulary and say plainly that the row-level statuses are validity states, not verdicts.
+  `n-samples`. Its residual gaps are now a separate open item (placeholder-filled samples, below).
+- [x] **~~`keep` has never been written to a `results.tsv` row~~ — CLOSED 20260820: `keep` is
+  RETIRED** (contract v1.3). 0 of 317 rows ever carried it, and the reason is structural, not an
+  oversight: a keep verdict is per-CONFIG on a median of N, while `status` is per-ROW and is written
+  before that comparison exists. The word is now *refused*, not merely undocumented —
+  `check_status()` raises on it and both runners reject `STATUS=keep` on the usage rung. `discard`
+  stays, redefined as a signed §7 orchestrator adjudication. Full reasoning: "Status vocabulary"
+  above. The question the old item actually wanted — *"which rows support this promotion?"* — is
+  answered by `citability.py gate` plus the `exp=` tag in `notes`, not by a status word.
+
+*Created by the 20260820 verification wave (statistical power, host identity, interrupt recovery):*
+
+- [ ] **`config_hash` hashes runbook COMMENTS — the vLLM-side twin of the host-launcher blind
+  spot.** `sha256sum <runbook>` covers the whole file, so `promote.sh` copying a winner and
+  prepending a `# Result: ...` header **mints a new identity for a byte-identical serving config**.
+  Measured across the tree: **12 pairs of runbooks (24 files) are identical once full-line comments
+  and blank lines are stripped**, i.e. 24 `config_hash` identities for 12 configs — every promoted
+  `_final.sh` beside the `baseline.sh` or `_tuned.sh` it was promoted from. This is not cosmetic:
+  it **hid the entire cross-session accuracy replicate evidence**. The mmlu-drift item above went
+  months without a same-config repeat bracket because the only ones that exist are split across a
+  comment-only difference (82.65 vs 81.72 is `20260704_mtp-n2_tuned.sh` vs `VLLM-24-..._final.sh` —
+  the same config). Fix: hash the runbook's *effective* content (strip full-line comments), or hash
+  the resolved `MODEL`/`MODEL_REVISION`/`VLLM_IMAGE`/`VLLM_FLAGS`/`VLLM_ENV` set. Note the cost:
+  every historical `config_hash` moves, so it needs the same prefix treatment `hp3-` got.
+- [ ] **Five tier-3/4 eval scripts still hash the RUNBOOK for host backends.** `eval.sh` (Gate 2)
+  and the three benchers use `hp3-` from the served process; `eval_live.sh`, `eval_livebench.sh`,
+  `eval_livecodebench.sh`, `eval_bfcl.sh` and `eval_private.sh` all still do
+  `CONFIG_HASH="$(sha256sum "$RUNBOOK" | cut -c1-8)"`. For a `.smoke-runbook.sh` stub that is the
+  colliding identity the whole `hp3` work exists to remove, so a LiveBench or private-set row for a
+  ds4 config cannot be joined to its Gate-2/Gate-3 rows. Small fix — the same `case` block `eval.sh`
+  already carries — but it must be ONE shared helper, not five copies (the five hand-rolled
+  `classify` bodies are the standing warning).
+- [ ] **Gate 2 cannot see PLACEHOLDER-FILLED items, and one flag closes that and the psi gap at
+  once.** When a completion comes back with null content, lm-eval substitutes
+  `LMEVAL_MODEL_NONE_ANSWER_PLACEHOLDER` and **counts the item as answered**: `n-samples` says
+  `100/100`, the score is finite and non-zero, and `eval_validity.py` returns `ok`. Measured live
+  20260820: `RedHatAI/Qwen3-8B-NVFP4` under think-off returned null content on **17-19%** of gsm8k
+  items and scored 56 against a think-on 90, with `validity=ok`. Detecting it needs the per-item
+  outputs — i.e. **`--log_samples`** on `eval.sh`, which writes `samples_<task>_<ts>.jsonl` per leaf
+  into the already-gitignored bundle at ~20 MB per `mmlu@100` run and **zero GPU seconds**.
+  `research/review/POWER-analysis.md` wants the same flag independently, to measure the item-level
+  discordance psi that every paired figure in it currently projects. **One flag, two open items.**
+  Wiring note: `mmlu@100` writes **57 files**, one per leaf — pass them all to
+  `power.py mcnemar --samples-a ... --samples-b ...`, never concatenated (`doc_id` restarts per leaf).
+- [ ] **The NULL EXPERIMENT must run before any p-value enters the contract** (~2.5 GPU hours,
+  once). Everything paired in the power analysis is a projection over an unmeasured psi, and the
+  three brackets we have imply psi = 0.0014, 0.312 and 0.774 — the entire admissible range, i.e. no
+  constraint at all. Design (POWER-analysis §7.2): one config, `mmlu@LIMIT=100` with
+  `--log_samples`, four arms — **A** two runs back to back in one serve session, **B** two runs in
+  *different* sessions, **C** A and B on a config with `--enable-prefix-caching` +
+  `--kv-cache-dtype fp8_e4m3`, **D** A and B on a config with neither. Output: the observed
+  `(b, c)` per arm, which is the null distribution. **A p-value may enter the contract only if arms
+  A and B both return p >= 0.05 at the intended alpha** — and the naive McNemar gate that was
+  drafted and then **retracted** fails a config against itself at any psi below 0.1237, so this is
+  not a formality. Run arms A/B at `CONC=1` and `CONC=32` and it closes the quality-at-c1/c32 item
+  in the same sitting.
+- [ ] **RULING NEEDED: discard bench #1 from every variance estimate (throughput).** The first bench
+  of an experiment runs slow at c16 — pooled **-1.22%, t = -3.05** over 63 complete 3-bench
+  experiments, 40% of the KEEP threshold. It cancels between two medians but **not in the
+  variance**, which is what every MDE is computed from. Dropping bench #1 takes the global c16 CV
+  **2.25% -> 1.55%**, the MDE 6.09% -> 4.18%, and the false-keep rate of the `>3%` rule
+  **8.1% -> 2.1%** — at **zero GPU cost**, and cheaper than raising N from 3 to 4 (which reaches
+  only 4.6% for +34 min per campaign). It also flips the corpus audit from "1 of 55 historical calls
+  unsupported" to "0 of 55". **Honest caveats:** it is not a global warm-up law — two campaigns
+  (`Qwen3-8B-NVFP4` -5.15%, `VibeThinker-3B` -5.24%, both |t| > 30) carry the whole pooled effect
+  while five of the nine models with k >= 3 go the other way (two-sided sign test p = 1.0), and the
+  mechanism is unknown; it is not prefix caching (those 12 experiments are the *tightest* group at
+  -0.09%) and it is over after bench 1 (n2 vs n3 = +0.05%, t = 0.17). **Not adopted. Someone has to
+  rule**: change how `run_experiment.sh` summarises (median benches 2..N), or bench 4 and median the
+  last 3, or leave it and document the bias.
+- [ ] **Variance is a per-model property and the KEEP threshold is global.** Pooled c16 CV spans
+  **0.58%** (35B, 11 brackets) to **3.37%** (Nemotron-120B, 8) — a 6x spread in CV, 6x in MDE and
+  500x in false-keep rate, all judged against one 3% line. Worse, the variance component that
+  *governs* a comparison is usually not the one being used: of 55 historical candidate-vs-baseline
+  deltas, **34 are same-session**, 15 are cross-day (governed by a cross-day CV resting on **three**
+  brackets) and **6 are cross-image — for which this repo has no error term at all**, including a
+  promoted artifact. Cheap first step: print the model's own `mde=...% false_keep=...%` on the
+  `MEDIAN` line (`power.py throughput --model <exact id> --drop-first`, refusing to answer under 3
+  brackets) and label each recorded delta with the component that governs it. Gating on a per-model
+  MDE is premature while the estimates rest on 3-11 brackets each.
 
 ---
 
@@ -679,7 +973,7 @@ three rows that passed the invariants, not three rows that exist.
   normally, and it would have reported a score over whatever subset happened not to NaN.
 - **Two of the three were caught only because a human eyeballed the shape of the numbers.** The
   third was caught by an odd request count on a progress bar. That is not a control; that is luck,
-  and it does not scale to 315 rows across 15 campaigns.
+  and it does not scale to 317 rows across 15 campaigns.
 - The common structure: every failing component **kept running and kept producing output**.
   GuideLLM averages `successful` only and silently drops in-flight requests; lm-eval retries a 400
   and continues; a dead endpoint returns fast, and fast looks like throughput. Each layer degraded
@@ -703,27 +997,34 @@ three rows that passed the invariants, not three rows that exist.
   unsatisfiable and fired zero times on 690 levels. **Run a new invariant over the existing corpus
   before you ship it, and run it BOTH ways** — how often it fires on known-good rows, and whether
   it fires at all on the rows it was written for. A rule you cannot afford to obey teaches people to
-  ignore the column; a rule that cannot fire teaches them it is covered. Final v1.2 over 315 rows:
-  **283 ok (89.8%) / 10 suspect (3.2%) / 22 void (7.0%) / 1 na**, all three motivating defects
-  caught.
+  ignore the column; a rule that cannot fire teaches them it is covered. Over the 317-row corpus:
+  **284 ok (89.6%) / 9 suspect-floor / 23 void-floor / 1 na**, all three motivating defects caught.
 - **Generalize it:** any metric derived from "the mean of the requests that finished" is a lie
   whenever the interesting failure is *not finishing*. Before trusting a mean, ask what got
   excluded from it. The corollary for tooling: when a component fails, prefer that it stop rather
   than continue at reduced fidelity, and when it can't stop, make the fidelity a recorded column.
-- Rules now: [docs/validity-contract.md](docs/validity-contract.md) **v1.2** (binding — its
-  amendment blocks and the closing "v1.2 status" section win over anything earlier in the file), the
-  Results-model section above (schema + vocabulary), [docs/validation.md](docs/validation.md)
-  (Gate 3 by hand), `scripts/eval_validity.py` (the same idea on Gate 2), program.md → "Invalid
-  runs" (what an operator does about it),
+- **The layer was validated on real hardware 20260820, and it caught a live inflated number.** First
+  GPU run of the whole thing — everything before it was fixtures and retained bundles. Healthy run
+  on the promoted Qwen3-8B final: c1 = 41.26 (against a 41.87–42 reference spanning two months and
+  three vLLM versions), c16 = 535.62, `validity=ok`, exit 0. Same config minutes later with a 20 s
+  stage: **3 requests drained and 63.34 tok/s reported, 54% above the truth** — written `void`,
+  exit 4, counts printed at the moment it happened. Before this layer that row would have been
+  `status=measured` and indistinguishable from a measurement.
+- Rules now: [docs/validity-contract.md](docs/validity-contract.md) **v1.3** (binding — its
+  amendment blocks and the closing "v1.2 status" / "v1.3" sections win over anything earlier in the
+  file), the Results-model section above (schema + vocabulary),
+  [docs/validation.md](docs/validation.md) (Gate 3 by hand), `scripts/eval_validity.py` (the same
+  idea on Gate 2), program.md → "Invalid runs" (what an operator does about it),
   `research/review/AUDIT-measurement-validity.md` (what the invariants say about the published
-  record), `tests/run.sh` with `AHL_TEST_STRICT=1` (the acceptance gate, **206 tests**) plus
-  `tests/mutate.sh` (**26 mutations, 0 survivors** — the gate on the gate).
+  record), `research/review/POWER-analysis.md` (what the two gates can and cannot RESOLVE),
+  `tests/run.sh` with `AHL_TEST_STRICT=1` (the acceptance gate, **279 tests**) plus
+  `tests/mutate.sh` (**38 mutations, 0 survivors** — the gate on the gate).
 
-**A CORRECT CONDITION IN AN UNREACHABLE BRANCH — three times in this repo, twice with a comment
-saying otherwise (20260820)**
-- Three separate guards in this codebase were *right* and did *nothing*. They are not the same bug
-  and they were written by different hands, months apart, which is what makes the pattern worth a
-  note rather than three fixes.
+**A CORRECT CONDITION IN AN UNREACHABLE BRANCH — FIVE times in this repo, twice with a comment
+saying otherwise (20260817-20260820)**
+- Five separate guards in this codebase were *right* and did *nothing*. They are not the same bug
+  and they were written by different hands, months apart, which is what makes this the repo's named
+  failure mode rather than five fixes.
   1. **`suite.sh`'s reasoning × spec-decode `if/elif`** (found 20260817). The spec-decode branch
      correctly refused to run loglikelihood `mmlu`. It was second, and reasoning was first, so every
      runbook that is BOTH — i.e. every promoted reasoning model with MTP — took the reasoning branch
@@ -740,7 +1041,19 @@ saying otherwise (20260820)**
      levels sit at exactly `level-1`, max ratio 1.000), so the condition is **unsatisfiable**: it
      fired **zero times on 690 levels** and missed all 53 level-instances it was written to catch.
      A spec can ship an unreachable branch exactly as easily as an implementation can.
-- **Two of the three carried a comment asserting they were live.** `assess_bundle`'s comment stated
+  4. **`--node-profile` was never passed, so the roofline was dead on the PRIMARY bencher.** Listed
+     above as part of (2) and worth counting separately, because the two host-process benchers
+     *did* pass it: the check was demonstrably alive somewhere, which is exactly what makes a dead
+     copy invisible. "The rule works" and "the rule works on the path that matters" are two claims.
+  5. **A `trap` that could not fire until `LEVEL_TIMEOUT`** (found 20260820). The interrupt handler
+     was installed and correct, but **bash defers a trap until the foreground command returns** —
+     so a Ctrl-C during a GuideLLM level did nothing until that level's `timeout` expired, minutes
+     later, by which time the operator had usually escalated to `SIGKILL` and the row was lost
+     anyway. The condition was right, the handler was right, and the window in which it could run
+     did not exist. Fixed by running children in their own session and reaping them; the regression
+     tests **send the signal** while the process is provably inside a level (a marker file, not a
+     timing guess), because no assertion about the trap's condition could have caught this.
+- **Two of the five carried a comment asserting they were live.** `assess_bundle`'s comment stated
   the inverse of what its code did; the amendment text described a rule that could not fire. The
   comment is not evidence. Neither is a code review of the condition, and neither is a test that
   asserts the condition is correct — all three of those were satisfied here.
@@ -750,16 +1063,103 @@ saying otherwise (20260820)**
   comment saying void and suspect were unhandled. What gives you the second is running the real
   script against stubbed children and asserting on *which branch executed* — the emitted row, the
   exit code, the call log.
-- What we now run because of this: **`scripts/citability_selftest.sh`** (68 checks — real
+- What we now run because of this: **`scripts/citability_selftest.sh`** (**102 checks** — real
   `promote.sh`/`suite.sh`/`validate.sh`/both runners in a throwaway repo with scripted-exit stubs),
-  the Gate-2 execution traces in **`scripts/eval_validity_selftest.sh`** (95 checks, all four
-  runbook variants including reasoning **AND** spec-decode), and **`tests/mutate.sh`** — which is
-  the reachability question asked backwards: **26 mutations, 0 survivors**, where a mutation that
-  does not turn the suite red proves the rule it broke was never exercised. Mutation testing of the
-  v1.1 suite found **16 survivors at 121/121 green**, including every single enforcement path.
+  the Gate-2 execution traces in **`scripts/eval_validity_selftest.sh`** (**96 checks**, all four
+  runbook variants including reasoning **AND** spec-decode), `tests/test_interrupt_recovery.py`
+  (**59 tests** that actually signal the real `bench.sh` mid-level), and **`tests/mutate.sh`** —
+  which is the reachability question asked backwards: **38 mutations, 0 survivors**, where a
+  mutation that does not turn the suite red proves the rule it broke was never exercised. Mutation
+  testing of the v1.1 suite found **16 survivors at 121/121 green**, including every enforcement path.
 - Corollary for anything with an `elif`: **test the COMBINATION first.** Mutually exclusive branches
   are a claim about the inputs, and in this repo the input that is both things at once is the
   normal case, not the corner.
+- **THE MIRROR IMAGE, learned in the same wave: a test can assert a bug as desired behaviour, and a
+  green mutation can be an unfaithful mutation.** Two new shapes, both of which look like coverage:
+  * **A selftest case asserted the defect.** One case pinned that an *uncatalogued* image should
+    take its version from a trailing comment in the runbook — which was precisely the
+    `promote.sh` version-derivation bug. The suite was green, the mutation harness was happy, and
+    the assertion was wrong. A test inherits its author's model of correct behaviour; nothing in a
+    test framework can tell you that model was the bug.
+  * **A reported "survivor" is a hypothesis, not a finding.** In this wave a mutation survived not
+    because the rule was untested but because the *harness* was wrong: the case set the env
+    override after the library had been sourced, and this library reads its env at **call** time —
+    the same source-time/call-time trap the ten-worktree merge recorded below. It died as soon as
+    the variable was set first. Before writing a test for a survivor, confirm the mutant genuinely
+    breaks the rule it names and that the case genuinely exercises it; otherwise you are adding
+    coverage for a bug you did not introduce.
+  * **And the harness itself can fail into a clean-looking result.** `tests/mutate.sh` copied the
+    5.1 GB `.venv` for every mutation, so a 38-mutation run was hours of I/O; one run died mid-table
+    on `file changed as we read it` while another agent wrote into the tree — a silent `set -e`
+    abort that printed a **short table with no failures**, which reads exactly like a clean sheet.
+    The copy is now 4.8 MB and a failed copy is a loud error. Same family as everything above:
+    **the absence of a red line is not evidence, unless you know the run reached the end.**
+- **The generalization worth carrying: correctness, reachability and TEST FAITHFULNESS are three
+  separate claims, and each needs its own kind of evidence.** Reading gives you correctness. An
+  execution trace gives you reachability. Faithfulness — "this test asserts the behaviour we
+  actually want, and this mutation really does break the rule it names" — is given by neither, and
+  it is the one that survives a green suite. When all three are unchecked you get a codebase that
+  believes it is protected.
+
+**THE DEPLOYED SERVE IS NOT RUN-TO-RUN REPRODUCIBLE — prefix caching is the cache STATE (20260820)**
+- Measured on this box, `RedHatAI/Qwen3-8B-NVFP4` promoted final, config unchanged. Repeat an
+  identical 32-prompt greedy pass through `/v1/completions` and compare the completions byte for
+  byte:
+
+  ```
+  deployed (enable_prefix_caching=True, kv_cache_dtype=fp8_e4m3):   7/32 byte-identical
+  same config with prefix caching OFF:                             32/32 byte-identical
+  ```
+
+- **It is not general nondeterminism.** A *single* prompt repeated 5× is deterministic either way.
+  It is cache STATE: where a prefix-cache hit lands varies with eviction pressure, and an fp8 KV hit
+  reuses quantised KV instead of recomputing it, so two runs of the same batch take different
+  numerical paths through the same weights.
+- **Operational consequence: anything that needs bit-reproducibility must serve
+  `--no-enable-prefix-caching`.** That includes a differential debug session, a paired item-level
+  eval, and any claim of the form "these two runs produced the same output".
+- **STATE THE LIMIT HONESTLY — this is ONE controlled A/B on ONE config, and the journal does NOT
+  corroborate a feature-conditional accuracy tolerance.** It is tempting to read it as the mechanism
+  behind the mmlu-drift item, and all three `mmlu@5,700` replicate brackets do sit on configs
+  carrying prefix caching + fp8 KV + MTP together. But an auditor found the direct counter-example
+  in our own record: the gemma `20260614_kvfp8_tuned.sh` bracket has **no prefix caching** and moved
+  **3 of 100 items (3.0% net flip)** — higher than the prefix-cache 35B's 0.93%. n=3 on one side,
+  n=2 on the other, the three features confounded with each other and with MTP, and the determinism
+  probe measures the **serving** path, not lm-eval's scoring path. **Corroboration, not proof.** Do
+  not generalise it into a rule until POWER-analysis §7.2's arms C and D have run.
+
+**CONCURRENCY CHANGES THE TOKENS, NOT MEASURABLY THE SCORE (20260820)**
+- Same box, same serve, `gsm8k LIMIT=100 THINK=off`, greedy, one serve session, `CONC=1` then
+  `CONC=32`. Both halves matter and neither is the headline on its own.
+- **The tokens: batch-dependent, demonstrated.** 32-prompt determinism probe with prefix caching
+  disabled so the cache effect above cannot confound it — **c1 vs c1 = 32/32 byte-identical**
+  (the control), **c1 vs c32 = 1/32**. Thirty-one of thirty-two completions differ. The mechanism
+  the open follow-up hypothesised is real: batch size changes what the model emits.
+- **The score: no detectable difference, and the design could not have found one.** 56.0 at c1 vs
+  58.0 at c32, n=100, SE ≈ 4.9 per arm. `gsm8k@100` resolves ~14 points at 80% power, so "no
+  difference" here means "nothing bigger than 14 points", which is not the same sentence.
+- **Say both halves or it is a lie by omission.** "Concurrency doesn't affect quality" is not
+  supported by this; "concurrency changes what the model emits, and we have no evidence it changes
+  how often the model is right" is. Resolving it properly needs `mmlu@5,700` rather than
+  `gsm8k@100`, or a paired item-level test — which needs `--log_samples` (open follow-up).
+
+**THINK=off CAN COLLAPSE A MODEL, AND GATE 2 PASSES IT `validity=ok` (20260820)**
+- `RedHatAI/Qwen3-8B-NVFP4`, same day, same config: **think-on gsm8k = 90–92** (87.64 at full limit,
+  20260613/14) versus **think-off gsm8k = 56–58**. A 34-point collapse, with **17–19% of items
+  returning null content**.
+- **Gate 2 reports it clean.** lm-eval substitutes `LMEVAL_MODEL_NONE_ANSWER_PLACEHOLDER` for a null
+  completion and **counts the item as answered**, so `samples=100/100`, the score is finite and
+  non-zero, and `eval_validity.py` returns `validity=ok`. The predicate is not wrong — it cannot see
+  per-item content without `--log_samples` — but the row looks like a measurement.
+- **This is live, not hypothetical:** `suite.sh` auto-applies think-off to **every** runbook carrying
+  `--reasoning-parser`, so for this model the Gate-2 result silently becomes 56 instead of 90.
+- It is the NemotronH failure (`enable_thinking=false` rendering a pre-closed `<think></think>`)
+  appearing **partially rather than totally, which is worse**: a total failure scores 0.0 and trips
+  `zero_score`, and a partial one scores plausibly and trips nothing.
+- **The "Thinking-OFF generative eval" note under "Standard test suite → Gate 2" must not be read
+  as "the fix always helps".** The 35B went 40→90 with thinking off; this model goes 90→56.
+  **The direction is model-dependent.** Probe a new reasoning arch's think-off serve — is `content`
+  non-empty? — before trusting any generative score from it.
 
 **PARALLEL AGENTS — disjoint file ownership prevents MERGE conflicts and does nothing about INTERFACE drift (20260819)**
 - Ten agents built the validity layer in ten worktrees with strictly disjoint file ownership. The
@@ -773,14 +1173,15 @@ saying otherwise (20260820)**
   Nothing in the VCS can see that, and none of the six would have been caught by review of either
   file alone.
 - What actually caught them: a **hermetic acceptance suite written against the contract rather than
-  against any implementation** (`tests/run.sh`, **206 tests**, stdlib only, no GPU/network/container),
+  against any implementation** (`tests/run.sh`, **279 tests**, stdlib only, no GPU/network/container),
   run with `AHL_TEST_STRICT=1` so a SKIP fails — because pre-merge those tests skip with a message
   naming exactly what is missing, and post-merge a skip means "this contract rule was not checked",
   which is indistinguishable from a hole.
 - Rules for the next fan-out: (1) fix the interface in a written contract *before* the fan-out, and
   version it — v1.0 → v1.1 was eleven evidence-driven amendments, v1.1 → v1.2 another ten from four
-  independent verifiers, and two of those ten were then re-adjudicated after measuring; having a
-  version number is what let ten branches be told, unambiguously, what they now had to match; (2) exactly one
+  independent verifiers (two of those ten re-adjudicated after measuring), and v1.2 → v1.3 the
+  status vocabulary; having a version number is what let ten branches be told, unambiguously, what
+  they now had to match; (2) exactly one
   agent owns each shared API and everyone else consumes it, never re-implements it; (3) budget an
   explicit integration pass — the merge is where parallel work costs its time, not the writing;
   (4) write the seam tests against the spec, not against the code that exists.

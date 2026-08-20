@@ -7,10 +7,10 @@ A multi-agent research workflow that mines the *best-known* vLLM serving setting
 ## Principle: research proposes, the empirical loop disposes
 
 Research finds **candidates** (what's *claimed* to help). The empirical loop
-(`run_experiment.sh` → median c16 → keep/discard) is the **arbiter** — nothing is adopted until it
-beats the current best on real tok/s on *this* box. Online advice is routinely wrong for the exact
-version/hardware (we already caught "cu130-nightly is newer" → it was 0.19.2-dev). So every
-candidate is version- and sm_121-vetted before it ever costs a benchmark run.
+(`run_experiment.sh` → median c16 over VALID rows → keep or drop the config) is the **arbiter** —
+nothing is adopted until it beats the current best on real tok/s on *this* box. Online advice is
+routinely wrong for the exact version/hardware (we already caught "cu130-nightly is newer" → it was
+0.19.2-dev). So every candidate is version- and sm_121-vetted before it ever costs a benchmark run.
 
 ## Phases
 
@@ -36,8 +36,10 @@ scope (doesn't affect tok/s).
 ## Output → how it feeds the loop
 
 The returned `queue` drives Phase-2: for each item, `new_variant.sh <best> <slug>` → apply
-`change` → commit → `run_experiment.sh` → keep/discard. Provenance is recorded in the runbook
-header and logbook.
+`change` → commit → `run_experiment.sh` → keep or drop. **Read `cite=` on the `MEDIAN` line before
+the median** — a candidate whose rows came back `void`/`suspect` is unmeasured, not rejected.
+Provenance is recorded in the runbook header and logbook; the verdict is recorded there too, never
+in a row's `status` (AGENTS.md → "Status vocabulary").
 
 ## Cost & invocation
 

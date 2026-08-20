@@ -29,8 +29,25 @@ serving/quant config degrade the model vs. the SAME model's reference?* We compa
 recovery**, no single-task cliff. Tunable.
 
 > **Matched settings required:** recovery is valid only when variant and reference use the **same**
-> eval settings (same `LIMIT` / task set). Full-vs-sampled mmlu are different question sets — that
+> eval settings (same `LIMIT`, task set **and** `conc`, all three now recorded in `accuracy.tsv`),
+> measured in the **same session**. Full-vs-sampled mmlu are different question sets — that
 > comparison yields a *spurious* regression. Compare LIMIT=100↔LIMIT=100 or full↔full.
+> Measured on the one model run both ways (`Qwen3-8B-NVFP4`, `20260613_kvfp8_tuned.sh`), `LIMIT=100`
+> is **not** a random subsample: `--limit` takes the *first* L docs of each leaf, and those first
+> docs are systematically easier — mmlu 73.25@100 vs 70.99@full (**−2.26 pt**), gsm8k 92.0 vs 87.64
+> (**−4.36 pt**). In-loop and finalize numbers for the same config are not interchangeable.
+
+> **And know what the bar can resolve, because `LIMIT` applies PER LEAF SUBTASK.** `mmlu` has 57
+> leaves and `mmlu_pro` 14, so at `LIMIT=100`: **`gsm8k` = n 100** (SE 2.7 pt; MDE ~14 points — a
+> breakage detector, nothing finer), **`mmlu_pro` = n 1,400** (SE 1.22 pt), **`mmlu` = n 5,700**
+> (SE 0.509 pt, against lm-eval's own recorded median `acc_stderr` of **0.494** over the 24 kept
+> `mmlu@100` bundles — the instrument has been publishing its own precision all along). `eval.sh general`
+> computes gsm8k and mmlu in one run and the decision has historically read the **coarser** one off
+> the row. The "~1% absolute" bar above is **not achievable unpaired at any limit on any task in
+> this suite** — it needs 23,668 items per arm and `mmlu` has 14,042 in total — so treat it as an
+> aspiration and use the **observed same-config repeat spread (~0.6 pt typical, ~0.9 pt seen over
+> three brackets)** as the working band, cited on `mmlu@5,700`. Full derivation, and the open
+> decisions it implies: `research/review/POWER-analysis.md`.
 
 ### Why relative framing matters: benchmark contamination
 Static benchmarks (MMLU, GSM8K, HumanEval, MBPP) are widely scraped and almost certainly in most
@@ -51,9 +68,14 @@ differentially affect memorized vs reasoned items — mitigated by the resistant
    **LiveCodeBench** (code) via `scripts/eval_live.sh`, **date-gated to AFTER the model's training
    cutoff** (`--livebench-release-option <date>`) so the questions can't have been trained on. This
    is the trustworthy *absolute-ish* signal; use it for the promotion decision on models we care about.
-4. **Private held-out (future):** a small eval we author and never publish — the only truly
-   uncontaminated set we fully control. Record the model's training cutoff + each benchmark's
-   release date in `accuracy.tsv` for auditability.
+4. **Private held-out (mechanism built 20260820, no items authored yet):** a small eval we author
+   and never publish — the only truly uncontaminated set we fully control. Runner
+   `scripts/eval_private.sh`, threat model and operating rules
+   [docs/private-eval.md](private-eval.md). Two things to know before using it: the committed
+   `accuracy.tsv` row carries **no score**, only the set fingerprint (the score itself would be a
+   public signal about private items), and the bundle records a **salted digest** of each prompt
+   rather than its text. Record the model's training cutoff + each benchmark's release date in
+   `accuracy.tsv` for auditability.
 
 ### Gate 2 has an acceptance predicate — `scripts/eval_validity.py` (contract A9, 20260819)
 
@@ -93,15 +115,26 @@ motivating case (37/14,042 = 0.26%) by two orders of magnitude. The evidence lan
 different threshold.
 
 > **What this predicate deliberately does NOT do: compare a score to a reference or to a floor.**
-> At the in-loop `LIMIT=100` the binomial standard error is ~4.3 points at p≈0.9 — wider than the
-> KEEP rule's ~1% tolerance — so any threshold on the *value* would imply a precision the sample
-> size cannot deliver. Every rule above is structural. It answers "is this a number?", never "is
-> this number good?"; the relative-regression reasoning at the top of this section is still how you
-> decide whether the number is *good*, and it still needs a matched-settings reference.
+> Every rule above is structural. It answers "is this a number?", never "is this number good?"; the
+> relative-regression reasoning at the top of this section is how you decide whether the number is
+> *good*, and it still needs a matched-settings reference. (An earlier version of this sentence
+> justified the exclusion with *"at `LIMIT=100` the binomial SE is ~4.3 points"*. **That is true for
+> `gsm8k` and wrong for `mmlu` by 2.8× in SE** — see the per-leaf arithmetic above. The exclusion
+> stands on its own: a validity predicate and a tolerance test are different objects.)
 
-Residual gaps, stated rather than papered over: lm-eval publishes no per-request error count, so
-there is no `errored`-style visibility on this gate, and a zero-token generation is detectable only
-through its 0.0 score (the bundle carries no output-token count without `--log_samples`).
+Residual gaps, stated rather than papered over.
+
+- lm-eval publishes **no per-request error count**, so there is no `errored`-style visibility here.
+- A zero-token generation is detectable only through its 0.0 score.
+- **Worst of the three: lm-eval substitutes `LMEVAL_MODEL_NONE_ANSWER_PLACEHOLDER` for a null
+  completion and COUNTS THE ITEM AS ANSWERED.** So a serve returning empty content on a fifth of the
+  set still records `samples=100/100`, a finite non-zero score, and `validity=ok`. Measured live on
+  this box 20260820: `RedHatAI/Qwen3-8B-NVFP4` under the auto-applied thinking-OFF serve returned
+  null content on **17–19%** of gsm8k items and scored **56 against a think-on 90** — Gate 2 passed
+  it. A total failure would have scored 0.0 and tripped `zero_score`; a partial one scores plausibly
+  and trips nothing. Until `--log_samples` is wired in (open follow-up), **look at the completions
+  whenever a generative score drops sharply**, especially on a think-off serve.
+
 `accuracy.tsv` is **16 columns** and finally carries `conc` — schema in AGENTS.md → "Results model";
 operator triage in program.md → "Gate 2: when the SCORE is not a measurement".
 
@@ -125,20 +158,21 @@ None raised an error. The mechanism is always the same — GuideLLM's
 `output_tokens_per_second.successful.mean` averages the requests that **finished**, and the
 interesting failures are exactly the ones that do not finish.
 
-Rules and thresholds are binding in [validity-contract.md](validity-contract.md) **v1.2** §3–5 —
-read its amendment blocks and its closing "v1.2 status" section, which win over anything earlier in
-that file; the
-schema and status vocabulary are in AGENTS.md → "Results model"; what the invariants say about every
-number this project has already published is in `research/review/AUDIT-measurement-validity.md`.
+Rules and thresholds are binding in [validity-contract.md](validity-contract.md) **v1.3** §3–5 —
+read its amendment blocks and its closing "v1.2 status" and "v1.3" sections, which win over anything
+earlier in that file; the schema and status vocabulary are in AGENTS.md → "Results model"; what the
+invariants say about every number this project has already published is in
+`research/review/AUDIT-measurement-validity.md`, and what those numbers can *resolve* is in
+`research/review/POWER-analysis.md`.
 What follows is how to apply the same reasoning **by hand** to a number you are suspicious of.
 
 ### The verdicts, and what each one is actually detecting
 
 Verdict tokens **carry the level they refer to** — `low_sample@c1`, `no_data@c32`,
-`survivorship@c16` — so gate on the level you are actually citing. Only `ok` and `nonmonotonic` are
-row-wide. This is what keeps a structurally thin c1 sentinel from condemning a campaign's c16
-objective: **298 of the 315 published rows (94.6%) carry no token tagged at c16** — recomputed
-under final v1.2, where the corpus reads 283 `ok` / 10 suspect-floor / 22 void-floor / 1 `na`.
+`survivorship@c16` — so gate on the level you are actually citing. Only `ok`, `nonmonotonic` and
+`incomplete_run` are row-wide. This is what keeps a structurally thin c1 sentinel from condemning a
+campaign's c16 objective: **300 of the 317 published rows (94.6%) carry no token tagged at c16** —
+recomputed 20260820, where the corpus reads 284 `ok` / 9 suspect-floor / 23 void-floor / 1 `na`.
 
 | verdict | trips when | severity | what it is really catching |
 |---|---|---|---|
@@ -150,6 +184,7 @@ under final v1.2, where the corpus reads 283 `ok` / 10 suspect-floor / 22 void-f
 | `nonmonotonic` | a run level >**10%** below the **immediately preceding** run level | suspect | a curve shape no scheduler produces |
 | `errored` | `errored` is **10–50%** of `successful + errored` | suspect | the config half-works; the survivors are a biased sample |
 | `errored_fatal` | `errored` is **above 50%** | **fatal** | the endpoint is refusing, not serving — the fingerprint of a dead endpoint whose tok/s happens to land under the roofline |
+| `incomplete_run` | the sweep was cut short (signal, session limit, reboot). **Row-wide** | suspect | the levels that landed are real, the *run* is not a completed measurement — see below |
 | `na` | the rules could not be evaluated (no bundle) | — | absence of evidence — **never** reported as `ok` |
 
 Fatal → the row's `status` becomes `void` (not data, must not be cited). Suspect → `suspect` (not
@@ -163,7 +198,7 @@ crash; crash wins if both happen. Exit 4 means *"the row is written but not cita
 not *"abort"*; the distinction between 3 and 4 is worth preserving because "the box broke" and "the
 numbers are not citable" call for completely different responses (program.md → "Invalid runs").
 
-Four design choices worth understanding before you argue with a verdict:
+Five design choices worth understanding before you argue with a verdict:
 
 - **Sample adequacy is a bare structural floor — and it was a token budget for exactly one day.**
   The rule has been calibrated wrong twice, so the measurements matter more than the story. v1.0's
@@ -214,6 +249,17 @@ Four design choices worth understanding before you argue with a verdict:
   inverted only 2.8% (c8 70.88 > c16 68.88) is caught by `no_data`, **not** by `nonmonotonic`. If
   you catch a suspicious curve by eye, look at the counts first — and now at `survivorship`, which
   is usually the real answer.
+- **`incomplete_run` is ROW-WIDE, and that is the whole point of it.** An interrupted sweep is a
+  property of the *run*, not of one concurrency level, so voiding the levels that did land would be
+  the mirror-image lie. But there is a harder reason it cannot be level-tagged: `citability.py`
+  deliberately **ignores `status` at level scope** (a downgrade caused by a token at some other
+  level must not condemn the level you cite), so before this token existed an interrupted row read
+  as *citable*, and the promotion gate printed `suspect=0` on a sweep that never finished. Only a
+  row-wide token survives a level-scoped reading. It is suspect rather than fatal — the completed
+  levels are data, they are just not citable until adjudicated — and any fatal verdict still
+  outranks it. Recovery for the interrupts too hard for a trap (`SIGKILL`, kernel OOM, power cut):
+  `scripts/reconcile_bundles.py`, which finds bundles no row references and appends a plainly
+  marked reconstructed row (never `status=measured`; provenance columns `na`, never guessed).
 - **Unrun levels are skipped, never scored as zero.** The routine matrix is `LEVELS_SET=1,16`, so
   `tps_c4`/`tps_c8`/`tps_c32` are legitimately `na` on most rows. `na` is absence of measurement;
   `hang` is the level that wedged; `0` would be a measurement of zero throughput and never comes
@@ -279,7 +325,13 @@ of it is the hardware, not the config.
    anything. If a third of the requests were dropped, the number is not a throughput measurement of
    the config, it is a measurement of its fastest requests — and it is biased, not noisy, so
    repeating it reproduces the same bias.
-4. **The median is over valid rows only.** `run_experiment.sh` publishes this directly on its
+4. **Read the promotion gate's summary line, do not assume it blocked.** `promote.sh` gates the
+   objective it cites: a fatal-at-the-objective row or a `crash` blocks absolutely, and so does
+   having no citable objective row — but a *suspect* objective row is counted and reported
+   (`suspect=N`), not blocking, while another objective row is citable. Rows outside the objective
+   are reported and written into the promoted header. So a green promote is not a claim that every
+   supporting row was clean.
+5. **The median is over valid rows only.** `run_experiment.sh` publishes this directly on its
    `MEDIAN` line as `cite=ok|partial|insufficient|no_valid_data` alongside `valid=k/rows` —
    `ok` = all N rows valid, `partial` = 2 ≤ k < N (reported, weaker, and visibly short),
    `insufficient` = k == 1 (no median is printed at all; the lone value is reported as
