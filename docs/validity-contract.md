@@ -1,4 +1,4 @@
-# Measurement-validity contract (v1.3)
+# Measurement-validity contract (v1.4)
 
 The binding spec for the §1 work of [issue #1](https://github.com/josephkern/autohomelab/issues/1).
 v1.0 authored 2026-08-19 as the fixed interface ten parallel agents built against; **v1.1 (same
@@ -407,3 +407,86 @@ touched, no `status` changed.
 `apply_status()` still downgrades a hand-set `discard` on the WRITE path (fatal → `void`, suspect →
 `suspect`). The §7 hand adjudication is the deliberate exception to that, and the stamp is its
 record — which is why the two can disagree in the journal without either being a defect.
+
+
+---
+
+# v1.4 (2026-08-20) — the spec catches up with the implementation
+
+A documentation pass found this file behind the code **by exactly the mechanism the project exists
+to prevent**: §3's table lacked two verdicts that had been shipping since v1.2, and two later
+additions were not here at all. The v1.2/v1.3 blocks describe the reasoning; the tables did not
+follow. That is the 16-vs-20-column drift, in the binding spec, three weeks after we wrote the
+lab note about it. It is recorded rather than quietly fixed.
+
+## The complete verdict vocabulary (supersedes §3's table)
+
+| token | rule | severity | scope |
+|---|---|---|---|
+| `ok` | all checks pass | — | row-wide |
+| `na` | rules could not be evaluated — **never `ok`** | — | row-wide |
+| `no_data` | a run level has `successful < AHL_MIN_DATA` (5), or its json is missing/unparseable | fatal | per level |
+| `over_roofline` | tok/s above the §4 ceiling | fatal | per level |
+| `no_output` | `successful > 0` but tok/s null / non-finite / `<= 0` | fatal | per level |
+| `errored_fatal` | `errored > 50%` of `successful + errored` | fatal | per level |
+| `low_sample` | `successful < max(AHL_MIN_DATA, min(20, 4*level))` | suspect | per level |
+| `errored` | `errored` between 10% and 50% | suspect | per level |
+| `survivorship` | `ok > 0 and incomplete > ok` (majority discard) | suspect | per level |
+| `nonmonotonic` | a run level >10% below the immediately preceding one | suspect | row-wide |
+| `incomplete_run` | the sweep was interrupted before it finished | suspect | **row-wide** |
+
+`errored_fatal` is a distinct base token, not a re-grading of `errored`: severity has to be
+readable from the persisted `validity` string alone.
+
+**`incomplete_run` must be row-wide**, and the reason is a defect it was created to fix.
+`citability.classify_row` places its `status` checks inside `if level is None`, so at level scope
+`status` is ignored entirely — an interrupted sweep with `status=suspect` classified **valid at
+c16**, and the promotion gate reported `suspect=0`, leaving no trace of the interruption in the
+artifact. Only a row-wide token survives the level-scoped reading a gate uses. It is `suspect`,
+not fatal: the levels that landed are real data, and voiding them would be the mirror-image lie.
+
+Callers must not hand-assemble a verdict string. `add_verdict()` (shim: `ahl_add_verdict`) owns
+ordering, dedupe and the `ok`/`na` placeholder rule; it refuses an unknown token and refuses to
+level-tag a row-wide one, and the shim fails closed.
+
+## `config_hash` for host-process backends: the `hp3-` scheme
+
+A vLLM row's `config_hash` is still `sha256` of the runbook. A **host-process** row's is
+`hp3-<8hex>` over a canonical document built from the served process: argv from
+`/proc/<pid>/cmdline` (NUL-safe; repeated flags carry ordinals because llama.cpp's
+`--override-tensor` is first-match-wins), the tuning environment from `/proc/<pid>/environ`, and
+the engine binary via `/proc/<pid>/exe` — **not** a git SHA of a source tree, which identifies a
+directory that may not be what is running. Model files are identified by content, not by basename:
+`snapshots/rev-AAAA/model.gguf` and `rev-BBBB/model.gguf` are different configs.
+
+`eval.sh` computes the same identity for a host stub, so a config's Gate-2 and Gate-3 rows join.
+A stub with **no engine found on the port** records `stub-<8hex>` — labelled and warned, never a
+bare hex that could group with a served row. Pre-`hp3` rows keep bare hex and never group with
+`hp3-` rows; that is correct, because they were never *proven* to be the same config.
+
+## §5's promotion sentence is WITHDRAWN
+
+§5 said: *"`promote.sh` refuses void/suspect supporting rows."* That has been false since the gate
+became objective-scoped. What it actually does: **block** on any row fatal at the cited level, on
+any `crash` at that level, or on zero valid rows; **report** everything else — including `suspect`
+rows and problems at other levels — without blocking. Do not restate the withdrawn sentence; it is
+precisely the kind of stale claim that convinces a reader a hole cannot exist.
+
+## Corrections to earlier sections
+
+- v1.3's "12 runbook pairs collapse to 6" is wrong: **12 pairs — 24 files — collapse onto 12
+  configs.** (`research/review/POWER-analysis.md` §7.1(8) repeats the error.)
+- The claim that two ds4 GGUFs share a byte size and differ only in content is **unverifiable from
+  this repo** and is not what the code keys on. The demonstrated defect is basename collision.
+
+## Standing scope limits
+
+Gate 2's predicate cannot see **placeholder-filled** items: lm-eval substitutes a placeholder for
+a null response and counts it as answered, so a run where 17-19% of items returned nothing scored
+`samples=100/100`, a finite non-zero score, and `validity=ok` — measured on live hardware
+20260820. Detecting it needs `--log_samples`, which the power analysis wants independently for
+pairing. One flag closes both.
+
+No p-value may enter this contract until the null experiment specified in
+`research/review/POWER-analysis.md` §7.2 has run: the proposed McNemar gate would reject a config
+compared against itself, because the observed same-config drift implies ~53 net flipped items.
