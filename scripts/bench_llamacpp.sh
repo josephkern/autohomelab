@@ -32,11 +32,12 @@
 # -> c8 47.72) that looked like a measurement, was written `measured`, and was caught only by a
 # human reading successful-counts out of the bundle afterwards.
 #
-# `knobs` is where a host-process backend earns its provenance: config_hash is computed from the
-# runbook stub, which carries no launcher settings, so two llama.cpp configs differing in NP/CTX/
-# quant/spec share a hash (AGENTS.md follow-up). The knob string below is read off the RUNNING
-# server's cmdline, including the derived ctx_per_slot that makes the `CTX = CTX_PER_SLOT * NP`
-# trap visible in the journal instead of only in the launcher.
+# PROVENANCE. A host-process backend has no runbook to hash, so `config_hash` used to be computed
+# from the runbook stub, which carries no launcher settings — two llama.cpp configs differing in
+# NP/CTX/quant/spec shared a hash (AGENTS.md follow-up). It is now `scripts/lib/hostcfg.sh`'s
+# `hp2-` hash over the SERVED process's argv, its LLAMA_*/GGML_* tuning environment and the engine
+# build. `knobs` records the same facts in plain text, including the derived ctx_per_slot that
+# makes the `CTX = CTX_PER_SLOT * NP` trap visible in the journal instead of only in the launcher.
 #
 # Env: TAG (required, lands in notes), LEVELS_SET (default 1,16), MAX_SECONDS (180), SEED (42),
 #      TEMP (0 — pinned greedy so A/Bs are de-noised; llama.cpp's own default is the model's),
@@ -91,11 +92,30 @@ BACKEND="llamacpp@${LCPP_SHA}"
 ENGINE="${BACKEND%%@*}"   # `ds4` / `llamacpp` — used by the crash path
 SCRIPT_REL="$(realpath --relative-to="$REPO_ROOT" "$STUB")"
 
-# config_hash: hash the RUNNING server's actual cmdline (captures the GGUF path + every flag).
 SRV_PID="$(pgrep -f "llama-server .*--port ${AHL_PORT:-8000}" | head -1 || true)"
 [ -n "$SRV_PID" ] || { echo "no llama-server running on port ${AHL_PORT:-8000}" >&2; exit 1; }
 SRV_CMD="$(tr '\0' ' ' < "/proc/$SRV_PID/cmdline")"
-CONFIG_HASH="$(printf '%s' "$SRV_CMD" | sha256sum | cut -c1-8)"
+# llama.cpp's out-of-band knobs are LLAMA_*/GGML_* env vars (GGML_CUDA_* kernel selection,
+# LLAMA_ARG_* — llama-server reads a documented LLAMA_ARG_ env for most of its flags, so a config
+# can be set entirely OUTSIDE the cmdline and would otherwise be invisible to the hash).
+HOSTCFG_ENV_RE='^(LLAMA_|GGML_)'
+
+# ── config_hash — scheme `hp2` (scripts/lib/hostcfg.sh) ───────────────────────
+# The identity of a host-process config is not a file: `serve.sh` never runs and the
+# `.smoke-runbook.sh` stub the other gates hash carries no launcher settings, so every config of
+# this engine hashed to the same 8 digits. It is computed instead from what actually determines
+# the run — the served process's argv, the tuning env vars that never reach the cmdline, and the
+# engine build — with pid, host, port, log paths and directories normalised away and both argv
+# pairs and env sorted, so the SAME config re-serves to the SAME hash. The `hp2-` prefix versions
+# the scheme: rows written before this change keep bare 8-hex and are never re-interpreted.
+[ -f "$SCRIPT_DIR/lib/hostcfg.sh" ] || { echo "missing scripts/lib/hostcfg.sh" >&2; exit 1; }
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/hostcfg.sh"
+CONFIG_HASH="$(ahl_hostcfg_hash "$SRV_PID" "$BACKEND" "$HOSTCFG_ENV_RE")" \
+  || { echo "cannot read /proc/$SRV_PID — did the engine exit?" >&2; exit 1; }
+# The tuning environment for the `knobs` column comes from the SAME extraction the hash consumed,
+# so the human-readable knob and the identity can never disagree about what was set.
+SRV_ENV="$(ahl_hostcfg_env_knob "$SRV_PID" "$HOSTCFG_ENV_RE")"
 
 # Record which GGUF is actually loaded — the campaign's primary axis is the quant file itself.
 GGUF="$(printf '%s' "$SRV_CMD" | grep -oP '(?<=-m )\S+' | head -1 || true)"
@@ -110,8 +130,8 @@ if [ -n "$NP" ] && [ "$NP" -lt "$MAXLVL" ]; then
 fi
 
 # ── Effective launcher knobs (the `knobs` column) ─────────────────────────────
-# Same grep-off-the-cmdline style as CONFIG_HASH/NP above, recorded in plain text so a row is
-# readable without re-deriving anything. config_hash says "different"; these say "different HOW".
+# The same served cmdline the hash consumed, recorded in plain text so a row is readable without
+# re-deriving anything. config_hash says "different"; these say "different HOW".
 SRV_CTX="$(printf '%s' "$SRV_CMD" | grep -oP '(?<=-c )\d+|(?<=--ctx-size )\d+' | head -1 || true)"
 SRV_NGL="$(printf '%s' "$SRV_CMD" | grep -oP '(?<=-ngl )\d+|(?<=--n-gpu-layers )\d+' | head -1 || true)"
 SRV_FA="$(printf '%s' "$SRV_CMD" | grep -oP '(?<=-fa )\S+|(?<=--flash-attn )\S+' | head -1 || true)"
@@ -192,6 +212,7 @@ for shape in "${SHAPES[@]}"; do
   knobs+=",temp=$TEMP,stall=na,ltimeout=$LEVEL_TIMEOUT,gllm=${GLLM_VER:-na}"
   knobs+=",quant=$QUANT,np=${NP:-na},ctx=${SRV_CTX:-na},ctx_per_slot=$SRV_CTX_PER_SLOT"
   knobs+=",ngl=${SRV_NGL:-na},fa=${SRV_FA:-na},spec=${SRV_SPEC:-off},draft=${SRV_DRAFT:-na},think=$SRV_THINK"
+  knobs+=",lcpp_env=${SRV_ENV:-none}"
 
   echo "== llamacpp $TAG: $shape (p$prompt/o$output) @ c${LEVELS[*]} (max_s=$MAX_SECONDS, seed=$SEED, temp=$TEMP) ==" >&2
   echo "   gguf: $QUANT${NP:+  np=$NP}" >&2

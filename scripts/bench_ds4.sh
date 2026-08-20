@@ -21,11 +21,13 @@
 # rules live ONLY in scripts/lib/validity.py behind the scripts/lib/validity.sh shim — nothing
 # here re-implements them.
 #
-# `knobs` is where a host-process backend earns its provenance: config_hash is computed from the
-# runbook stub, which carries no launcher settings at all, so two ds4 configs that differ in
-# --dspark/--ctx/--batched-session share a hash (AGENTS.md follow-up). The knob string below is
-# read off the RUNNING server's cmdline AND its DS4_DSPARK*/DS4_MTP* environment (DSpark's runtime
-# knobs are env vars the cmdline never shows), so the row records what actually varied.
+# PROVENANCE. A host-process backend has no runbook to hash, so `config_hash` used to be computed
+# from the `.smoke-runbook.sh` stub — MODEL/SERVED_NAME/parser markers and nothing else — and every
+# ds4 config collided on one value (AGENTS.md follow-up: gsm8k 60.0/76.0/74.0/74.0 all under
+# `10b02344`). It is now `scripts/lib/hostcfg.sh`'s `hp2-` hash over the SERVED process's argv, its
+# DS4_DSPARK*/DS4_MTP* tuning environment (DSpark's runtime knobs are env vars the cmdline never
+# shows) and the engine build. `knobs` records the same facts in plain text: config_hash says
+# "different", the knobs say "different HOW".
 #
 # Env: TAG (required, lands in notes), LEVELS_SET (default 1), MAX_SECONDS (180), SEED (42),
 #      TEMP (0), AHL_HOST/AHL_PORT (127.0.0.1:8000), DS4_DIR (~/code/ds4), NOTES (extra note text).
@@ -73,15 +75,33 @@ BACKEND="ds4@${DS4_SHA}"
 ENGINE="${BACKEND%%@*}"   # `ds4` / `llamacpp` — used by the crash path
 SCRIPT_REL="launchers/DS4-antirez_DeepSeek-V4-Flash_q2-imatrix.sh"
 
-# config_hash: hash the RUNNING server's actual cmdline (captures flags incl. --dspark/--batched-session)
 SRV_PID="$(pgrep -f 'ds4-server .*--port '"${AHL_PORT:-8000}" | head -1 || true)"
 [ -n "$SRV_PID" ] || { echo "no ds4-server running on port ${AHL_PORT:-8000}" >&2; exit 1; }
 SRV_CMD="$(tr '\0' ' ' < "/proc/$SRV_PID/cmdline")"
-CONFIG_HASH="$(printf '%s' "$SRV_CMD" | sha256sum | cut -c1-8)"
+# ds4's speculative-decode knobs live in the environment, not the cmdline — the launcher exports
+# DS4_DSPARK_SCHEDULER_*/DS4_DSPARK_EXEC_TIER/DS4_DSPARK_STATS/DS4_MTP_* and nohup inherits them.
+HOSTCFG_ENV_RE='^(DS4_DSPARK|DS4_MTP)'
+
+# ── config_hash — scheme `hp2` (scripts/lib/hostcfg.sh) ───────────────────────
+# The identity of a host-process config is not a file: `serve.sh` never runs and the
+# `.smoke-runbook.sh` stub the other gates hash carries no launcher settings, so every config of
+# this engine hashed to the same 8 digits. It is computed instead from what actually determines
+# the run — the served process's argv, the tuning env vars that never reach the cmdline, and the
+# engine build — with pid, host, port, log paths and directories normalised away and both argv
+# pairs and env sorted, so the SAME config re-serves to the SAME hash. The `hp2-` prefix versions
+# the scheme: rows written before this change keep bare 8-hex and are never re-interpreted.
+[ -f "$SCRIPT_DIR/lib/hostcfg.sh" ] || { echo "missing scripts/lib/hostcfg.sh" >&2; exit 1; }
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/hostcfg.sh"
+CONFIG_HASH="$(ahl_hostcfg_hash "$SRV_PID" "$BACKEND" "$HOSTCFG_ENV_RE")" \
+  || { echo "cannot read /proc/$SRV_PID — did the engine exit?" >&2; exit 1; }
+# The tuning environment for the `knobs` column comes from the SAME extraction the hash consumed,
+# so the human-readable knob and the identity can never disagree about what was set.
+SRV_ENV="$(ahl_hostcfg_env_knob "$SRV_PID" "$HOSTCFG_ENV_RE")"
 
 # ── Effective launcher knobs (the `knobs` column) ─────────────────────────────
-# Same grep-off-the-cmdline style as CONFIG_HASH above, but recorded in plain text so a row is
-# readable without re-deriving anything. config_hash says "different"; these say "different HOW".
+# The same served cmdline the hash consumed, recorded in plain text so a row is readable without
+# re-deriving anything. config_hash says "different"; these say "different HOW".
 GGUF="$(printf '%s' "$SRV_CMD" | grep -oP '(?<=-m )\S+' | head -1 || true)"
 SRV_QUANT="$(basename "${GGUF:-unknown}" .gguf)"
 SRV_CTX="$(printf '%s' "$SRV_CMD" | grep -oP '(?<=--ctx )\d+' | head -1 || true)"
@@ -93,11 +113,6 @@ SRV_BATCH="$(printf '%s' "$SRV_CMD" | grep -oP '(?<=--batched-session )\d+' | he
 if   printf '%s' "$SRV_CMD" | grep -q -- '--dspark-strict'; then SRV_DSPARK="strict"
 elif printf '%s' "$SRV_CMD" | grep -q -- '--dspark';        then SRV_DSPARK="on"
 else                                                             SRV_DSPARK="off"; fi
-# DSpark's scheduler/exec knobs are ENV vars, invisible to the cmdline (and to config_hash) — the
-# launcher only echoes them to its log. Read them off the served process so the row keeps them.
-# `|` is the list separator inside a knob value, so a value can never contain the `,` that
-# separates knob pairs (contract §2 encoding).
-SRV_ENV="$(tr '\0' '\n' < "/proc/$SRV_PID/environ" 2>/dev/null | grep -E '^(DS4_DSPARK|DS4_MTP)' | sort | tr ',\t' ';:' | paste -sd'|' - || true)"
 
 # GuideLLM version comes from the lockfile (charter: pinned) — no network, no venv resolution.
 GLLM_VER="$(awk '/^name = "guidellm"$/{f=1} f && /^version = /{gsub(/"/,"",$3); print $3; exit}' "$REPO_ROOT/uv.lock" 2>/dev/null || true)"
