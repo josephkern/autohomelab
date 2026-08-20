@@ -22,15 +22,6 @@
 # the level you cite); `otherlvl` counts rows that ARE in the median but carry a verdict at
 # some other level — reported, never blocking, never silent.
 #
-# ── WHY THIS LOOP NEVER WRITES `keep` ─────────────────────────────────────────
-# Same adjudication as run_experiment.sh (20260820), whose header carries the full argument: the
-# row `status` column is a VALIDITY state, not a verdict. `keep` had 0 of 315 rows because the
-# keep/discard decision is known only AFTER the median, is about a config rather than a row, and
-# would sit in the same column the validity layer overwrites. The affirmative keep verdict is the
-# promoted artifact (for a host backend, the launcher with the winning defaults) plus logbook.md.
-# bench_llamacpp.sh does not even read $STATUS — the guard below exists so both runners answer a
-# caller identically, and so this can never quietly become a verdict channel later.
-#
 # ── MEASUREMENT VALIDITY (docs/validity-contract.md §5/§6) ────────────────────
 # Identical policy to run_experiment.sh — the rule is the project's, not the backend's:
 #   void / suspect / crash rows are EXCLUDED from the median (a suspect row is reported loudly and
@@ -41,7 +32,9 @@
 #   cite=no_valid_data. Both refuse a median and exit 4. The set is never topped back up to N
 #   ("don't change N mid-run" — re-benching until 3 rows survive biases the set).
 # Exit codes, in the repo-wide precedence 3 > 4 > 1 > 0 (docs/validity-contract.md §5):
-#   0 citable · 1 serve/smoke failure (PRE-measurement: nothing was benched) · 4 the benches
+#   0 citable · 1 serve/smoke failure (PRE-measurement: nothing was benched) · 2 the
+#   INVOCATION was refused (usage: no stub, no TAG, an unusable launcher, or a STATUS= this loop
+#   may not set — nothing was served or written; see the usage_error block below) · 4 the benches
 #   ran but the result is not citable — too few valid rows, or the summarizer itself failed
 #   (`cite=error`, and the rows are still in results.tsv). A summarizer failure is NEVER 1:
 #   conflating it with "the serve failed" is how a caller concluded nothing had been measured.
@@ -62,22 +55,55 @@ ahl_py() {
   fi
 }
 
-STUB="${1:?usage: TAG=<slug> run_experiment_llamacpp.sh <runbook-stub.sh>}"
-[ -f "$STUB" ] || { echo "stub not found: $STUB" >&2; exit 1; }
-# See "WHY THIS LOOP NEVER WRITES `keep`" above. Refuse, don't silently ignore.
+
+# ── USAGE ERRORS GET THEIR OWN RUNG: exit 2 (docs/validity-contract.md §5, v1.3) ──────────────
+# This file's own header defines 1 as a PRE-MEASUREMENT failure: the serve or the smoke was
+# attempted and it failed. A REJECTED INVOCATION attempted nothing, so reporting it as 1 tells the
+# caller a serve was tried — and the old refusals also exited without printing a `MEDIAN` line at
+# all, so a caller that parses stdout (every run-queue table does) got silence. 2 is therefore its
+# own rung, OUTSIDE the 3 > 4 > 1 > 0 result ladder, which ranks outcomes of work that ran; and
+# every exit from here still prints exactly one MEDIAN line.
+usage_error() {
+  local line
+  for line in "$@"; do echo "!! $line" >&2; done
+  echo "MEDIAN c16=na c1=na n=0 status=usage_error cite=no_valid_data valid=0/0 void=0 suspect=0 crash=0 otherlvl=0 obj=c16"
+  exit 2
+}
+
+# ── §6/§7 (v1.3): a tuning loop does not write verdicts into the journal ──────────────────────
+# `STATUS=keep|discard` used to be the documented way to adjudicate a row at bench time. Neither
+# is legal any more, and this script hard-codes `STATUS=measured` for every bench it runs, so an
+# operator who sets one is asking for something that will silently not happen:
+#   `keep`    is RETIRED (0 of 317 rows ever carried it). A keep verdict is per-CONFIG, decided on
+#             the median of N — which is precisely what this script's MEDIAN line reports, and the
+#             comparison it needs does not exist yet when a row is written.
+#   `discard` is an ORCHESTRATOR adjudication applied to the journal AFTER the fact, carrying
+#             `adjudicated@YYYYMMDD who: reason` in `notes` (contract §7). A loop must not
+#             self-authorize one — the same reason there is no include-anyway switch here.
 case "${STATUS:-}" in
-  keep|discard)
-    {
-      echo "!! STATUS=$STATUS is a VERDICT, not a row state, and this loop will not write one."
-      echo "!! A row's status is its VALIDITY (measured|suspect|void|crash) — decided by the"
-      echo "!! invariants in scripts/lib/validity.py, not by the caller's opinion of the result."
-      echo "!! The keep/discard decision is made AFTER the median (tune_status.py) and recorded"
-      echo "!! where it is durable and correctly grained: the campaign logbook.md, and — for a"
-      echo "!! keep — the promoted launcher whose defaults are the winning config."
-    } >&2
-    exit 1 ;;
+  keep)
+    usage_error "STATUS=keep is RETIRED (contract §6, v1.3): a keep verdict is per-config on a" \
+                "median of N, not a property of one row — it is this script's MEDIAN line and" \
+                "the campaign logbook that record it. Re-run without STATUS." ;;
+  discard)
+    usage_error "STATUS=discard is an ORCHESTRATOR ADJUDICATION (contract §7), applied to the" \
+                "journal after the fact and stamped 'adjudicated@YYYYMMDD who: reason' in notes." \
+                "A tuning loop must not self-authorize one. Re-run without STATUS, then" \
+                "adjudicate the written rows by hand." ;;
+  ""|measured) ;;
+  crash|suspect|void)
+    usage_error "STATUS='${STATUS}' is COMPUTED, not declared: crash comes from the watchdog and" \
+                "suspect/void from the validity floor (contract section 5). Setting it by hand would" \
+                "assert an outcome before the run happened. Re-run without STATUS." ;;
+  *)
+    usage_error "STATUS='${STATUS}' is not in the contract §6 vocabulary" \
+                "(measured discard crash suspect void); this script benches as STATUS=measured." ;;
 esac
-TAG="${TAG:?set TAG=<config-slug> (e.g. q5km-mtp-d3)}"
+
+[ "$#" -ge 1 ] || usage_error "usage: TAG=<slug> run_experiment_llamacpp.sh <runbook-stub.sh>"
+STUB="$1"
+[ -f "$STUB" ] || usage_error "stub not found: $STUB"
+[ -n "${TAG:-}" ] || usage_error "set TAG=<config-slug> (e.g. q5km-mtp-d3)"
 N="${N:-3}"
 export EXP_SHAPE="${EXP_SHAPE:-chat}"
 export LEVELS_SET="${LEVELS_SET:-1,16}"
@@ -96,7 +122,7 @@ echo ">> experiment $EXP_ID [$TAG]: $LAUNCHER (N=$N, shape=$EXP_SHAPE, levels=$L
 
 FAILLINE="cite=no_valid_data valid=0/0 void=0 suspect=0 crash=0 otherlvl=0 obj=c16"
 if [ "${RESTART:-1}" = 1 ]; then
-  [ -x "$LAUNCHER" ] || { echo "launcher not executable: $LAUNCHER" >&2; exit 1; }
+  [ -x "$LAUNCHER" ] || usage_error "launcher not executable: $LAUNCHER"
   "$LAUNCHER" >&2 || { echo "MEDIAN c16=na c1=na n=0 status=serve_fail $FAILLINE"; exit 1; }
   # Weights load asynchronously; poll the endpoint the benchmark will actually hit.
   waited=0

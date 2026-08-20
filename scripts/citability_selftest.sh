@@ -194,6 +194,19 @@ derive(){
   check "$desc — name" "$want " "$got"
 }
 
+# refuses <desc>: promote.sh must REFUSE to name the artifact (exit 2, contract v1.3 usage rung)
+# and must leave no `_final.sh` behind. Refusing is the right answer when the pin cannot name the
+# release: the artifact name is permanent, and the operator's fix is one word (VLLM_TAG=).
+refuses(){
+  local desc="$1" rc got
+  row 20260819-000001-chat 'chat(512/256)' measured ok 40 na na 400 na
+  row 20260819-000002-chat 'chat(512/256)' measured ok 41 na na 402 na
+  rc="$(promote)"
+  check "$desc — refuses (exit 2)" 2 "$rc"
+  got="$(ls "$R/runbooks/Org/Model/" 2>/dev/null | grep -c '_final\.sh$' || true)"
+  check "$desc — wrote no artifact" 0 "$got"
+}
+
 # 1. THE TRACKED BUG: a migration comment in the header, a 0.23.0 digest in the pin.
 mkrepo
 setrb "$(printf '#!/usr/bin/env bash\n# baseline migrated: image v0.22.0 -> v0.23.0\nMODEL=Org/Model\nVLLM_IMAGE="%s"\n' "$IMG_023")"
@@ -211,10 +224,15 @@ mkrepo
 setrb "$(printf '#!/usr/bin/env bash\nMODEL=Org/Model\nVLLM_IMAGE="%s"\n' "$IMG_MTPFIX")"
 derive "VLLM-23-Org_Model_final.sh" "tag-pinned local build (0.23.0-qwen3nextmtp-fix)"
 
-# 4. an image that is NOT in the catalog falls back to its OWN line's trailing comment
+# 4. an uncatalogued DIGEST must REFUSE, even when its own line carries a version comment.
+# Updated 20260820: this case previously asserted the comment was used. A verifier showed that is
+# the ORIGINAL defect narrowed to one line — `VLLM_IMAGE="…@sha256:aaaa"  # was v0.24.0; now
+# v0.28.0` named a 0.28.0 config VLLM-24 — and it fires exactly in the uncatalogued case where an
+# operator is sloppiest. A trailing comment is prose too. The name is permanent, so refusing (and
+# naming the three fixes) beats guessing.
 mkrepo
 setrb "$(printf '#!/usr/bin/env bash\n# migrated off v0.22.0\nMODEL=Org/Model\nVLLM_IMAGE="vllm/vllm-openai@sha256:deadbeef"   # v0.26.2\n')"
-derive "VLLM-26-Org_Model_final.sh" "uncatalogued image uses its own line's comment"
+refuses "uncatalogued digest refuses rather than trusting a trailing comment"
 
 # 5. VLLM_TAG still wins (the documented escape hatch is not removed)
 mkrepo
@@ -230,7 +248,7 @@ mkrepo
 setrb "$(printf '#!/usr/bin/env bash\n# image v0.25.0\nMODEL=Org/Model\nSERVED_NAME=m\n')"
 row 20260819-000001-chat 'chat(512/256)' measured ok 40 na na 400 na
 row 20260819-000002-chat 'chat(512/256)' measured ok 41 na na 402 na
-check "no VLLM_IMAGE -> refuse (exit 1), never VLLM-XX" 1 "$(promote)"
+check "no VLLM_IMAGE -> refuse (exit 2 usage rung), never VLLM-XX" 2 "$(promote)"
 contains "  ...with the actionable message" "cannot derive the vLLM minor" "$R/err"
 [ -z "$(ls "$R/runbooks/Org/Model/" | grep '_final\.sh$')" ] && ok "  ...and wrote no artifact" \
   || bad "  ...but wrote an artifact anyway"
@@ -249,7 +267,7 @@ mkrepo
 setrb "$(printf '#!/usr/bin/env bash\nMODEL=Org/Model\nVLLM_IMAGE="%s"\n' "$IMG_NIGHTLY")"
 row 20260819-000001-chat 'chat(512/256)' measured ok 40 na na 400 na
 row 20260819-000002-chat 'chat(512/256)' measured ok 41 na na 402 na
-check "catalog key 'nightly' is not a version -> refuse" 1 "$(promote)"
+check "catalog key 'nightly' is not a version -> refuse" 2 "$(promote)"
 
 # 9. the derivation is REPORTED, so an operator can see which rule fired
 mkrepo
@@ -417,10 +435,10 @@ chmod +x "$R/scripts/bench.sh"
 
 # 1. a caller's verdict is REFUSED, not silently overridden — an ignored variable is how an
 #    operator comes to believe the journal recorded a decision it never recorded.
-check "STATUS=keep is REFUSED" 1 "$(STATUS=keep runexp)"
-contains "  ...naming where a keep IS recorded" "_final.sh" "$R/err"
+check "STATUS=keep is REFUSED (retired, v1.3)" 2 "$(STATUS=keep runexp)"
+contains "  ...naming where a keep IS recorded" "logbook" "$R/err"
 if grep -q '^serve.sh' "$LOG"; then bad "  ...but it served first"; else ok "  ...before serving anything"; fi
-check "STATUS=discard is REFUSED too" 1 "$(STATUS=discard runexp)"
+check "STATUS=discard is REFUSED too (orchestrator adjudication, not a loop verdict)" 2 "$(STATUS=discard runexp)"
 
 # 2. a validity state is not a verdict, and still works
 check "STATUS=measured is accepted (it is a validity state)" 0 "$(STATUS=measured runexp)"
@@ -438,8 +456,8 @@ STUB2="$R/runbooks/Org/Model/launcher.smoke-runbook.sh"
 printf '#!/usr/bin/env bash\nMODEL=Org/Model\nSERVED_NAME=m\n' > "$STUB2"
 rc=$( cd "$R" && STATUS=keep TAG=t N=2 RESTART=0 SKIP_SMOKE=1 \
         "$R/scripts/run_experiment_llamacpp.sh" "$STUB2" >"$R/out" 2>"$R/err"; echo $? )
-check "llama.cpp runner refuses STATUS=keep identically" 1 "$rc"
-contains "  ...with the same reason" "is a VERDICT, not a row state" "$R/err"
+check "llama.cpp runner refuses STATUS=keep identically" 2 "$rc"
+contains "  ...with the same reason" "is RETIRED" "$R/err"
 
 # 5. the promoted artifact carries the pointer back to its evidence — the replacement for a
 #    per-row `keep` stamp, at the grain the decision was actually made on.

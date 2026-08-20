@@ -65,9 +65,16 @@ ahl_py() {
     python3 "$@"
   fi
 }
-SRC="${1:?usage: promote.sh <winning_runbook.sh> [\"result note\"]}"
+# EXIT CODES (repo-wide ladder, docs/validity-contract.md §5): 0 promoted · 2 the INVOCATION was
+# refused — no runbook, or the vLLM version cannot be derived from the pin (nothing was written;
+# a usage error is not a result, so it is not 1) · 1 the promotion cannot proceed (the artifact
+# already exists) · 4 the measurement-validity gate failed.
+if [ "$#" -lt 1 ]; then
+  echo "usage: promote.sh <winning_runbook.sh> [\"result note\"]" >&2; exit 2
+fi
+SRC="$1"
 NOTE="${2:-}"
-[ -f "$SRC" ] || { echo "not found: $SRC" >&2; exit 1; }
+[ -f "$SRC" ] || { echo "not found: $SRC" >&2; exit 2; }
 
 # Derive the canonical final name: VLLM-<minor>-<HFORG>_<BASEMODEL>_<QUANT>_final.sh
 MODEL=""; VLLM_IMAGE=""
@@ -79,71 +86,83 @@ QUANT=""; BASE="$LEAF"
 for q in NVFP4 MXFP4 FP8 FP4 INT8 INT4 AWQ GPTQ W8A8 W4A16; do
   case "$LEAF" in *-"$q") QUANT="$q"; BASE="${LEAF%-$q}"; break ;; esac
 done
-# ── vLLM minor-version derivation (AGENTS.md follow-up, closed 20260820) ──────────────────────
-# The `VLLM-<minor>` in the name is a claim about which image this config pins, and the name is
-# permanent. It used to be the FIRST `vX.Y.Z` ANYWHERE in the file, so a migration comment
-# ("image v0.22.0 -> v0.23.0") named a 0.23.0 config `VLLM-22`; the workaround was to remember
-# to pass VLLM_TAG by hand, which is not a guard, it is a hope. Derivation is now anchored to
-# the pin itself and never reads unrelated prose:
-#   1. $VLLM_TAG           explicit operator override (the old escape hatch still works).
-#   2. image.lock          the effective $VLLM_IMAGE looked up in the validated-image catalog.
-#                          This is the authority: the catalog is what maps a digest to a release,
-#                          and a digest cannot drift into a different version the way a comment
-#                          can. Covers the tag-pinned local build (`0.23.0-qwen3nextmtp-fix`->23).
-#   3. the VLLM_IMAGE line a version in the image tag, or in that ONE line's trailing comment,
-#                          for an image not yet in the catalog.
-#   4. refuse              `VLLM-XX-...` is not a fallback, it is a permanent wrong claim in a
-#                          filename; the operator's fix is one word (see the message below).
-ahl_lock_version() {   # <image-ref> <image.lock> -> bare version ("0.25.0"), or empty
-  local img="$1" lock="$2" line ver
-  [ -n "$img" ] && [ -f "$lock" ] || { printf ''; return 0; }
-  # A catalog row is `# <version>  <image-ref>  serve=...` on ONE line. Continuation/prose lines
-  # are indented comments that never carry a FULL image ref (they do quote short digests), so
-  # requiring an exact -F match on the whole ref is what keeps this off the notes.
-  line="$(grep -F -- "$img" "$lock" | grep -E '^#' | head -1 || true)"
-  ver="$(printf '%s' "$line" | sed -E 's/^#[[:space:]]*//; s/[[:space:]].*$//; s/^v//')"
-  # Only a real version wins; catalog keys like `nightly`/`ngc-26.04` fall through to step 3.
-  case "$ver" in [0-9]*.[0-9]*) : ;; *) ver="" ;; esac
-  if [ -z "$ver" ]; then
-    # The DEFAULT pin is an assignment whose trailing comment carries the version.
-    line="$(grep -F -- "$img" "$lock" | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' | head -1 || true)"
-    case "$line" in
-      *"#"*) ver="$(printf '%s' "${line#*#}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)" ;;
-    esac
-  fi
-  printf '%s' "$ver"
+# ── vLLM minor version: derived from the PIN, never from PROSE (fixed 20260820) ───────────────
+# The name `VLLM-<minor>-…` is a claim about which vLLM built the numbers behind the promotion, so
+# it must come from the thing that is actually authoritative — the pinned `VLLM_IMAGE` — and it
+# must REFUSE rather than guess.
+#
+# What it used to do: `grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' "$SRC" | head -1`, i.e. the first
+# version-shaped token anywhere in the runbook TEXT. A baseline header reading
+# "image v0.22.0 -> v0.23.0" therefore named a 0.23.0 config `VLLM-22-…`: the file was named after
+# the version being migrated AWAY from. Workaround was `VLLM_TAG=<minor>` by hand.
+#
+# A TRAILING COMMENT ON THE `VLLM_IMAGE=` LINE IS PROSE TOO, and reading it back is the same bug
+# in a smaller window. Verified failing input:
+#     VLLM_IMAGE="vllm/vllm-openai@sha256:aaaa…9999"  # was v0.24.0; now v0.28.0
+#   -> the line yields 0.24.0 and names a 0.28.0 config VLLM-24-… . It fires precisely in the
+#      uncatalogued case, which is where an operator is sloppiest.
+# So this reads `$VLLM_IMAGE`'s VALUE (the runbook is already sourced above, so the comment is
+# gone by construction) in three steps, and stops:
+#   1. VLLM_TAG=<minor>            explicit operator override
+#   2. backends/vllm/image.lock    the catalog entry for this exact digest / ref
+#   3. the image REF's own TAG     `…:v0.24.0` — never a comment
+# A bare digest that is not in image.lock is REFUSED: add it to the catalog (where a validated
+# image belongs anyway) or pass VLLM_TAG. Whatever comes out must be NUMERIC — `cut -d. -f2` on a
+# catalog key like `0.23-fix` yields `23-fix`, and `VLLM_TAG=abc` yielded `VLLM-abc-…`.
+VMINOR=""; VSRC=""
+minor_of() {   # <version-ish token> -> its minor field, or empty
+  printf '%s' "$1" | sed -n 's/^[vV]\?[0-9][0-9]*\.\([0-9][0-9]*\)\..*$/\1/p'
 }
-LOCK="$REPO_ROOT/backends/vllm/image.lock"
-VV=""; VSRC=""
 if [ -n "${VLLM_TAG:-}" ]; then
   VMINOR="$VLLM_TAG"; VSRC="VLLM_TAG"
-else
-  VV="$(ahl_lock_version "${VLLM_IMAGE:-}" "$LOCK")"
-  [ -n "$VV" ] && VSRC="image.lock"
-  if [ -z "$VV" ]; then
-    # Step 3: the VLLM_IMAGE assignment LINE only — its tag or its own trailing comment. The
-    # LAST assignment wins, matching what the shell just did when it sourced the runbook.
-    IMG_LINE="$(grep -E '^[[:space:]]*(export[[:space:]]+)?VLLM_IMAGE=' "$SRC" | tail -1 || true)"
-    VV="$(printf '%s' "$IMG_LINE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-    [ -n "$VV" ] && VSRC="VLLM_IMAGE line"
+elif [ -n "${VLLM_IMAGE:-}" ]; then
+  # (2) the catalog. Look the pin up by its DIGEST when it has one (exact, unambiguous) and by
+  # the whole ref otherwise; take the first version-shaped token on the matching line — which is
+  # the catalog KEY (`# v0.27.1  <ref>  serve=yes`) or the default pin's `# v0.25.0` marker.
+  LOCK="$REPO_ROOT/backends/vllm/image.lock"
+  case "$VLLM_IMAGE" in *@sha256:*) NEEDLE="${VLLM_IMAGE#*@}" ;; *) NEEDLE="$VLLM_IMAGE" ;; esac
+  if [ -f "$LOCK" ]; then
+    LOCK_LINE="$(grep -F -m1 -- "$NEEDLE" "$LOCK" || true)"
+    if [ -n "$LOCK_LINE" ]; then
+      VMINOR="$(minor_of "$(printf '%s' "$LOCK_LINE" | grep -oE '[vV]?[0-9]+\.[0-9]+\.[0-9]+' | head -1)")"
+      if [ -n "$VMINOR" ]; then VSRC="image.lock catalog entry for ${NEEDLE}"; fi
+    fi
   fi
-  VMINOR="$(printf '%s' "$VV" | cut -d. -f2)"
+  if [ -z "$VMINOR" ]; then
+    # (3) the ref's TAG only: strip any digest, then take what follows the last `:` — and only if
+    # that path segment really carries one (`repo:tag`, not `host:5000/repo`).
+    REF_NO_DIGEST="${VLLM_IMAGE%@*}"; LAST_SEG="${REF_NO_DIGEST##*/}"
+    case "$LAST_SEG" in
+      *:*) IMG_TAG="${LAST_SEG##*:}" ;;
+      *)   IMG_TAG="" ;;
+    esac
+    if [ -n "$IMG_TAG" ]; then
+      VMINOR="$(minor_of "$(printf '%s' "$IMG_TAG" | grep -oE '[vV]?[0-9]+\.[0-9]+\.[0-9]+' | head -1)")"
+      if [ -n "$VMINOR" ]; then VSRC="image tag '${IMG_TAG}'"; fi
+    fi
+  fi
 fi
-if [ -z "${VMINOR:-}" ]; then
-  {
-    echo "!! cannot derive the vLLM minor version for the promoted name from $(basename "$SRC")."
-    echo "!!   VLLM_IMAGE = ${VLLM_IMAGE:-<unset>}"
-    echo "!! It is not in $LOCK and carries no version on its own line. VLLM-<minor>-... is a"
-    echo "!! permanent claim about the pinned image, so this refuses to guess — it used to grep the"
-    echo "!! first vX.Y.Z anywhere in the file, which is how a migration comment named a 0.23.0"
-    echo "!! config VLLM-22. Fix one of:"
-    echo "!!   - add the image to backends/vllm/image.lock (the catalog is the authority), or"
-    echo "!!   - put the version in the VLLM_IMAGE= line's trailing comment, or"
-    echo "!!   - VLLM_TAG=<minor> scripts/promote.sh $SRC \"note\""
-  } >&2
-  exit 1
+if [ -z "$VMINOR" ]; then
+  cat >&2 <<EOM
+!! REFUSING to promote: cannot derive the vLLM minor version from the PIN.
+!!   VLLM_IMAGE = ${VLLM_IMAGE:-<unset>}
+!! It is not in $REPO_ROOT/backends/vllm/image.lock and its ref carries no vX.Y.Z tag, so the only
+!! version strings left in the runbook are COMMENTS — and naming a promoted config after a comment
+!! is the bug this derivation exists to stop (a header saying "was v0.24.0; now v0.28.0" named a
+!! 0.28.0 config VLLM-24-…). Fix it at the source:
+!!   * add this image to backends/vllm/image.lock (a promoted config should be on a validated,
+!!     catalogued image anyway), or
+!!   * re-run with VLLM_TAG=<minor>, e.g. VLLM_TAG=28
+EOM
+  exit 2
 fi
-echo ">> vLLM minor: $VMINOR (from ${VSRC:-?}${VV:+ = $VV})" >&2
+case "$VMINOR" in
+  ''|*[!0-9]*)
+    echo "!! REFUSING to promote: derived vLLM minor '$VMINOR' (from $VSRC) is not numeric." >&2
+    echo "!! The name is VLLM-<minor>-…; pass VLLM_TAG=<digits> if the source is a non-standard tag." >&2
+    exit 2 ;;
+esac
+echo ">> vLLM minor: $VMINOR (from $VSRC)" >&2
 NAME="VLLM-${VMINOR}-${ORG}_${BASE}"; [ -n "$QUANT" ] && NAME="${NAME}_${QUANT}"
 OUT="$(dirname "$SRC")/${NAME}_final.sh"
 [ -e "$OUT" ] && { echo "already exists: $OUT (remove it to re-promote)" >&2; exit 1; }
@@ -203,12 +222,10 @@ cp "$SRC" "$OUT"
 DATE="$(date -u +%Y-%m-%d)"
 # The promoted file is SOURCED by serve.sh/bench.sh. Operator-supplied text (justification, note,
 # $USER, the gate detail) is therefore written as COMMENTS ONLY — never as a shell assignment.
-# The evidence pointer, written into every promoted artifact (AGENTS.md follow-up: "no tool can
-# answer 'which rows support this promotion?' from the journal alone"). The answer is not a `keep`
-# status on the rows — that would be a per-row stamp for a per-config decision, in the column the
-# validity layer owns. It is this: the promotion names its journal, its config_hash and its
-# objective, and ships the exact command that re-derives the supporting rows from them.
+# Journal path relative to the repo root, so the recorded command is runnable from a clone.
 REL_TSV="${TSV#"$REPO_ROOT"/}"
+# How a reader gets from this verdict back to the rows it was made on, without trusting a
+# per-row stamp. THIS FILE is the keep verdict (contract v1.3 retired `keep` as a row status).
 CITE_CMD="scripts/citability.py gate --tsv $REL_TSV --cfg $CFG --shape ${AHL_PROMOTE_SHAPE-chat} --level ${AHL_PROMOTE_LEVEL-16}"
 ahl_py - "$OUT" "$SRC" "$DATE" "$NOTE" "$CFG" "$GATE_SUMMARY" "$GATE_DETAIL" "$OVERRIDE" "$GATE_IDS" "$GATE_WARN_IDS" "${USER:-unknown}" "$CITE_CMD" <<'PY'
 import sys
@@ -238,9 +255,8 @@ banner = [
     (f"# Result: {comment(note)}\n" if note else "# Result: <fill in: best metric vs baseline>\n"),
     "# Canonical config to serve. The *_tuned.sh experiment artifacts are kept intact as record.\n",
     f"# Supporting benchmark rows (results.tsv config_hash={comment(cfg, 64)}): {comment(summary)}\n",
-    # The row `status` column is a VALIDITY state, never a keep/discard verdict (see
-    # run_experiment.sh). THIS FILE is the keep verdict; the line below is how a reader gets
-    # from the verdict back to the rows it was made on, without trusting a per-row stamp.
+    # The row `status` column is a VALIDITY state, never a keep/discard verdict. THIS FILE is
+    # the keep verdict; the line below is how a reader gets back to the supporting rows.
     f"# Re-derive those rows: {comment(cite_cmd, 300)}\n",
 ]
 # Non-blocking problems outside the promoted objective are part of the permanent record too:

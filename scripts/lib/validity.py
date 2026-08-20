@@ -40,10 +40,21 @@ Contract v1.2 (2026-08-19, four independent verifiers) is folded in on top:
       authoritative, and only the audit/migration path opts into discovery, explicitly.
       `SAFETY` is resolved on attribute access, so the documented override path works.
 
+Contract v1.3 (2026-08-20) folds in one more, on the SECTION 6 vocabulary:
+  V1. `keep` is RETIRED (0 of 317 rows; a keep verdict is per-CONFIG on a median of N, while
+      `status` is per-ROW and is written before that comparison exists). It is refused, not
+      merely undocumented: check_status()/apply_status() raise on it.
+  V2. `discard` is RETAINED and redefined as an ORCHESTRATOR ADJUDICATION under section 7,
+      applied to the journal after the fact and signed `adjudicated@YYYYMMDD who: reason` in
+      `notes`. See the STATUS_VOCAB block for the evidence behind both halves.
+
 CLI:
     python3 scripts/lib/validity.py check --bundle DIR --levels 1,16 \
         --tps 41.2,na,na,151.5,na [--node-profile P] [--model-gb G] [--discover]
 prints one JSON object: {"validity": ..., "req_counts": ..., "status_floor": ...}
+
+    python3 scripts/lib/validity.py status --status discard [--notes "…"]   # 0 ok, 2 refused
+    python3 scripts/lib/validity.py status --tsv results/*/*/*/results.tsv  # 0 clean, 4 offenders
 """
 
 from __future__ import annotations
@@ -75,8 +86,10 @@ __all__ = [
     "V_NONMONOTONIC", "V_ERRORED", "V_ERRORED_FATAL", "V_SURVIVORSHIP",
     "VERDICT_ORDER", "FATAL_VERDICTS", "SUSPECT_VERDICTS", "UNEVALUATED_VERDICTS",
     "ROW_WIDE_VERDICTS",
-    "STATUS_MEASURED", "STATUS_KEEP", "STATUS_DISCARD", "STATUS_CRASH",
-    "STATUS_SUSPECT", "STATUS_VOID", "STATUS_VOCAB",
+    "STATUS_MEASURED", "STATUS_DISCARD", "STATUS_CRASH",
+    "STATUS_SUSPECT", "STATUS_VOID", "STATUS_VOCAB", "STATUS_RETIRED",
+    "STATUS_ADJUDICATED", "ADJUDICATION_RE", "ADJUDICATION_MIN_REASON",
+    "parse_adjudication", "is_adjudicated", "check_status", "EXIT_USAGE",
     "NA",
 ]
 
@@ -180,15 +193,110 @@ UNEVALUATED_VERDICTS = frozenset({V_NA})
 # Verdicts that describe the ROW, not one level -- these stay bare (untagged).
 ROW_WIDE_VERDICTS = frozenset({V_OK, V_NA, V_NONMONOTONIC})
 
+# ---------------------------------------------------------------------------
+# Section 6 status vocabulary -- v1.3 (2026-08-20), FIVE words. `keep` is RETIRED.
+#
+# `keep` was never written: 0 of 317 rows across 15 campaigns. It failed on both axes a row-level
+# status has to satisfy:
+#   * WRONG GRAIN. A keep verdict is a statement about a CONFIG, decided on the median of N=3
+#     benches. `status` is a property of ONE row. There is no row that is "the kept one".
+#   * WRONG TIME. `bench.sh` writes each row as that row finishes, and section 7 forbids rewriting
+#     a published row afterwards -- so at the only moment the column can be written, the
+#     comparison that would justify `keep` has not happened yet.
+# The keep/discard decision lives where it always actually lived: `run_experiment.sh`'s MEDIAN
+# line, `tune_status.py`'s ranking, and the campaign `logbook.md`.
+#
+# `discard` is RETAINED, and redefined as what the record shows it has always been: an
+# ORCHESTRATOR ADJUDICATION under section 7, applied to the journal AFTER the fact. It is never
+# set at bench time -- `bench_ds4.sh` and `bench_llamacpp.sh` hard-code `status="measured"` and
+# never read `$STATUS` at all, and all six `discard` rows in the corpus were applied by later
+# adjudication commits.
+#
+# It is retained because there is a class of row that only a human can fault, and that class is
+# non-empty: run `20260809-183024-chat` (cfg 653a8d9c, the FF711 `NP=32` bench) classifies
+# **valid at c16 -- the tuning objective** -- carrying only `survivorship@c32`. Nothing in
+# `validity` can see that `NP=32` x `CTX_PER_SLOT=12288` over-committed unified memory into swap,
+# because swap leaves no trace in a GuideLLM level json. Contamination, confounded design and
+# swap are refutations the invariants cannot reach, and `discard` is the only place to record one.
+#
+# Because such a row is rejected on a human's authority alone, the authority must be legible: a
+# hand-set `discard` MUST carry `adjudicated@YYYYMMDD who: reason` in `notes` (see
+# ADJUDICATION_RE / check_status below), so every discard in the journal is dated, attributed and
+# greppable instead of resting on unattributed prose.
+# ---------------------------------------------------------------------------
 STATUS_MEASURED = "measured"
-STATUS_KEEP = "keep"
 STATUS_DISCARD = "discard"
 STATUS_CRASH = "crash"
 STATUS_SUSPECT = "suspect"
 STATUS_VOID = "void"
 STATUS_VOCAB = (
-    STATUS_MEASURED, STATUS_KEEP, STATUS_DISCARD, STATUS_CRASH, STATUS_SUSPECT, STATUS_VOID,
+    STATUS_MEASURED, STATUS_DISCARD, STATUS_CRASH, STATUS_SUSPECT, STATUS_VOID,
 )
+# Words that WERE in the vocabulary and are not any more, with why. Kept so a consumer that meets
+# one in an old script or an old note gets an explanation, not a bare "unknown status".
+STATUS_RETIRED = {
+    "keep": "retired v1.3 (2026-08-20): never written (0 of 317 rows). A keep verdict is "
+            "per-CONFIG on a median of N, while `status` is per-ROW and is written before that "
+            "comparison exists. The decision lives in run_experiment.sh's MEDIAN line, "
+            "tune_status.py's ranking and the campaign logbook.",
+}
+# Statuses a human/orchestrator sets by hand, which therefore require an adjudication stamp in
+# `notes`. `void`/`suspect` are computed by the invariants and `crash` by the watchdog;
+# `measured` is the default. None of those is a human judgement, so none needs a signature.
+STATUS_ADJUDICATED = frozenset({STATUS_DISCARD})
+
+# `adjudicated@YYYYMMDD who: reason` -- the signature a hand-set status carries in `notes`.
+# Deliberately the same shape as promote.sh's AHL_PROMOTE_OVERRIDE rule: an adjudication is an
+# argument, not a flag, so the reason has a minimum length and a bare word does not qualify.
+ADJUDICATION_MIN_REASON = 12
+ADJUDICATION_RE = re.compile(
+    r"adjudicated@(?P<date>\d{8})\s+(?P<who>[^:;\t]{1,64}?)\s*:\s*(?P<reason>\S[^\t]*)")
+
+
+def parse_adjudication(notes: Optional[str]):
+    """`notes` -> (date, who, reason) for the first well-formed stamp, else None.
+
+    Well-formed means: a plausible `YYYYMMDD` (year 2000-2999, month 01-12, day 01-31), a
+    non-empty attribution, and a reason of at least ADJUDICATION_MIN_REASON characters. A stamp
+    that parses but says nothing (`adjudicated@20260820 jk: x`) is not a signature.
+    """
+    for m in ADJUDICATION_RE.finditer(notes or ""):
+        date, who, reason = m.group("date"), m.group("who").strip(), m.group("reason").strip()
+        year, month, day = int(date[:4]), int(date[4:6]), int(date[6:])
+        if not (2000 <= year <= 2999 and 1 <= month <= 12 and 1 <= day <= 31):
+            continue
+        if not who or len(reason) < ADJUDICATION_MIN_REASON:
+            continue
+        return date, who, reason
+    return None
+
+
+def is_adjudicated(notes: Optional[str]) -> bool:
+    """Does `notes` carry a well-formed `adjudicated@YYYYMMDD who: reason` stamp?"""
+    return parse_adjudication(notes) is not None
+
+
+def check_status(status: Optional[str], notes: Optional[str] = None) -> str:
+    """Return `status` if section 6 admits it, else raise ValueError explaining why not.
+
+    Two rules, both section 6 / section 7:
+      * the word must be in STATUS_VOCAB -- `keep` gets its retirement notice by name;
+      * a status in STATUS_ADJUDICATED (`discard`) must carry an adjudication stamp in `notes`,
+        because it is a rejection the invariants did not make. `notes=None` skips that half, for
+        callers validating a word rather than a row.
+    """
+    s = (status or "").strip()
+    if s in STATUS_RETIRED:
+        raise ValueError("status %r is retired -- %s" % (s, STATUS_RETIRED[s]))
+    if s not in STATUS_VOCAB:
+        raise ValueError("status %r is not in the section 6 vocabulary (%s)"
+                         % (s, " ".join(STATUS_VOCAB)))
+    if notes is not None and s in STATUS_ADJUDICATED and not is_adjudicated(notes):
+        raise ValueError(
+            "status %r is an orchestrator adjudication (section 7) and must carry "
+            "`adjudicated@YYYYMMDD who: reason` (reason >= %d chars) in `notes`; got: %r"
+            % (s, ADJUDICATION_MIN_REASON, (notes or "")[:200]))
+    return s
 
 # ---------------------------------------------------------------------------
 # Level-tagged verdict tokens (amendment 3):  low_sample@c1, no_data@c32
@@ -696,8 +804,15 @@ def apply_status(current_status: Optional[str], floor: str) -> str:
     """Contract section 5 precedence. A crash ALWAYS wins: an already-`crash` row keeps
     status=crash and records its verdict in `validity` instead (now level-tagged, so the
     row says which level wedged). Otherwise a fatal floor forces `void`, a suspect floor
-    forces `suspect`, and an `ok` floor leaves the caller's status untouched."""
-    cur = (current_status or "").strip() or STATUS_MEASURED
+    forces `suspect`, and an `ok` floor leaves the caller's status untouched.
+
+    v1.3: the caller's status is CHECKED against the section 6 vocabulary first, so a retired
+    word (`keep`) or a typo raises instead of being laundered into the journal by the `ok`-floor
+    pass-through. The `notes` half of check_status is not applied here -- apply_status is handed
+    a status, not a row -- so a hand-set `discard` is stamp-checked by its writer (the
+    orchestrator adjudicating the row), not by the precedence rule.
+    """
+    cur = check_status((current_status or "").strip() or STATUS_MEASURED)
     if cur == STATUS_CRASH:
         return STATUS_CRASH
     if floor == "void":
@@ -894,6 +1009,59 @@ def _cmd_knobs(args) -> int:
     return 0
 
 
+def _cmd_status(args) -> int:
+    """Validate a status word, or scan a results.tsv for §6/§7 violations.
+
+    `--status W [--notes N]`  one word (and optionally the row's notes): 0 admissible,
+                              EXIT_USAGE the word or the missing stamp is refused.
+    `--tsv PATH ...`          every row of each journal: 0 clean, EXIT_INVALID if any row
+                              carries a retired word or an unstamped hand-set status. This is
+                              how the §7 rule is enforced over the committed record -- the
+                              acceptance suite is hermetic and never reads the live results tree.
+    """
+    if args.status is not None:
+        try:
+            check_status(args.status, args.notes)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return EXIT_USAGE
+        return EXIT_OK
+
+    bad = 0
+    for path in args.tsv:
+        p = Path(path)
+        try:
+            lines = p.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            print("unreadable: %s: %s" % (p, exc), file=sys.stderr)
+            bad += 1
+            continue
+        if not lines:
+            continue
+        header = lines[0].split("\t")
+        try:
+            si, ni, ri = header.index("status"), header.index("notes"), header.index("run_id")
+        except ValueError:
+            print("no status/notes/run_id column: %s" % p, file=sys.stderr)
+            bad += 1
+            continue
+        for line in lines[1:]:
+            if not line.strip():
+                continue
+            f = line.split("\t")
+            if len(f) <= max(si, ni, ri):
+                continue
+            try:
+                check_status(f[si], f[ni])
+            except ValueError as exc:
+                bad += 1
+                print("%s\t%s\t%s" % (p, f[ri], exc), file=sys.stderr)
+    if bad:
+        print("%d row(s) violate the section 6/7 status rules" % bad, file=sys.stderr)
+        return EXIT_INVALID
+    return EXIT_OK
+
+
 def _cmd_split(args) -> int:
     base, lvl = split_verdict(args.token)
     print("%s\t%s" % (base, NA if lvl is None else lvl))
@@ -908,6 +1076,11 @@ def _cmd_split(args) -> int:
 EXIT_OK = 0
 EXIT_CRASH = 3        # the box broke
 EXIT_INVALID = 4      # the row is written but not citable (contract §5)
+# v1.3: a USAGE error gets its own rung. It is NOT part of the 3 > 4 > 1 > 0 result ladder, which
+# ranks outcomes of work that ran: 1 means "pre-measurement failure" (the serve or the smoke), and
+# reporting a rejected INVOCATION as 1 told the caller a serve had been attempted and failed.
+# 2 means the call was refused before anything was served, benched or written.
+EXIT_USAGE = 2
 
 # Public aliases. The names on the right are canonical; these are the shorter spellings
 # consumers reach for first.
@@ -1014,6 +1187,14 @@ def main(argv: Optional[Sequence] = None) -> int:
     k = sub.add_parser("knobs", help="normalize k=v pairs into the knobs string")
     k.add_argument("pairs", nargs="*")
     k.set_defaults(func=_cmd_knobs)
+
+    st = sub.add_parser("status", help="validate a §6 status word, or scan a results.tsv")
+    st.add_argument("--status", default=None, help="the status word to validate")
+    st.add_argument("--notes", default=None,
+                    help="the row's notes, so a hand-set `discard` is checked for its "
+                         "`adjudicated@YYYYMMDD who: reason` stamp (§7)")
+    st.add_argument("--tsv", nargs="*", default=[], help="results.tsv files to scan instead")
+    st.set_defaults(func=_cmd_status)
 
     sp = sub.add_parser("split", help="split a verdict token into base + level")
     sp.add_argument("token")

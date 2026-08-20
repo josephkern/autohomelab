@@ -73,8 +73,12 @@ class TestHealthyRun(BenchTestCase):
         self.assertEqual("c1:41/0/0;c16:118/4/0", row["req_counts"], self.show(proc, row))
 
     def test_the_caller_status_survives_a_clean_run(self):
-        repo, proc, row = self.run_bench(STATUS="keep")
-        self.assertEqual("keep", row["status"], self.show(proc, row))
+        """§5: an `ok` floor leaves the caller's `STATUS=` alone. `discard` stands in for "any
+        caller status" here — §6 v1.3 retired `keep`, so it is the only non-default word left,
+        and the runners refuse to pass even that one (it is an adjudication, made after the
+        fact, not a bench-time verdict)."""
+        repo, proc, row = self.run_bench(STATUS="discard")
+        self.assertEqual("discard", row["status"], self.show(proc, row))
         self.assertEqual(0, proc.returncode, self.show(proc, row))
 
     def test_knobs_records_the_resolved_values_with_the_list_separator(self):
@@ -134,11 +138,11 @@ class TestSuspectVerdictEnforcement(BenchTestCase):
         self.assertEqual(4, proc.returncode,
                          "suspect alone is still not citable (§5 v1.1)\n" + self.show(proc, row))
 
-    def test_a_suspect_verdict_downgrades_even_an_explicit_keep(self):
+    def test_a_suspect_verdict_downgrades_even_an_explicit_caller_status(self):
         """§5 downgrades; it does not merely fill in an unset status."""
         repo, proc, row = self.run_bench(
             {1: {"ok": 41, "tps": 20.0}, 16: {"ok": 10, "tps": 200.0}},
-            mem_bw=None, STATUS="keep")
+            mem_bw=None, STATUS="discard")
         self.assertEqual("suspect", row["status"], self.show(proc, row))
 
 
