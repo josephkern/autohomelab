@@ -267,3 +267,50 @@ audit that after the fact, including the sample counts and the long-standing mis
   precisely the mechanism by which a project comes to believe it is protected when it is not.
 - `SAFETY = AHL_ROOFLINE_SAFETY` binds at import, so the documented override path silently fails
   to move the public alias.
+
+
+---
+
+## v1.2 status (2026-08-20) — implemented, with two corrections to the amendments themselves
+
+All ten v1.2 amendments are implemented and merged. Two were wrong as written and were
+re-adjudicated **after measuring**, which is the process this contract now expects of itself:
+
+- **A2 was inert.** `incomplete > level` is unsatisfiable — GuideLLM bounds its in-flight set by
+  the concurrency level (88.8% of levels sit at exactly `level-1`, max ratio 1.000), so the rule
+  fired **zero times on 690 levels** and missed all 53 level-instances it was written to catch.
+  The shipped rule is **`ok > 0 and incomplete > ok`** (majority discard: the published mean is an
+  average over a minority of the work started). The alternative was measured first — a 30% discard
+  threshold flags 19 of 23 coder rows, which is a claim about the measurement METHOD, not a
+  per-row defect signal. The systemic 30-48% coder discard is recorded in the AGENTS.md lab notes
+  and the audit instead of being flagged every campaign. **What the rule does not catch is stated,
+  not implied.**
+- **A4 needed a distinct token.** Severity must be readable from the persisted `validity` string
+  alone, so the fatal error band is its own base token `errored_fatal`, not `errored` re-graded.
+
+**A9 (Gate 2) is implemented.** `scripts/eval_validity.py` supplies the predicate: `no_score`,
+`nonfinite`, `short_sample` (effective < 99% of requested) fatal; `zero_score`, `no_samples`
+suspect. Task-tagged tokens (`nonfinite@mmlu`) mirroring Gate 3's level tags, the same
+void/suspect vocabulary, the same 3 > 4 > 1 > 0 exit ladder. Verified: a `nan` score, a
+37-of-14,042 run, and a missing results file each now record a row and **fail** Gate 2, where all
+three previously reported PASS. `accuracy.tsv` is 16 columns and finally carries `conc`.
+
+Deliberately excluded from the Gate-2 predicate: any comparison of a score against a reference or
+a floor. At `LIMIT=100` the binomial SE is ~4.3 points, wider than the ~1% KEEP tolerance, so a
+threshold on the VALUE would imply a precision the sample size cannot deliver. This is a validity
+check, not a tolerance test.
+
+### Corpus under final v1.2
+
+315 rows: **283 ok / 10 suspect / 22 void floor / 6 unauditable**; `status` remains
+`291 measured / 12 crash / 6 discard / 6 void`, the six being hand-adjudicated per §7.
+76 accuracy rows: 73 ok, 3 `zero_score@gsm8k`, and `conc` backfilled from each bundle
+(74 at c16, **2 at c4** — see below).
+
+### A correction to the record, found by implementing A9
+
+The AGENTS.md follow-up asserted every accuracy row is c16 because nothing ever overrode `CONC`.
+The bundles refute it: two ds4 rows ran at `num_concurrent=4`. This matters beyond bookkeeping —
+those two rows are the 60.0 and 76.0 gsm8k scores in the tracked `config_hash` collision, and both
+sit at **c4**, so concurrency does not explain that 3.7-sigma spread. `conc` was backfilled from
+each bundle's own `model_args`, never stamped.
