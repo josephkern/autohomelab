@@ -73,11 +73,29 @@ class TestReqCounts(EncodingTestCase):
 
 class TestKnobs(EncodingTestCase):
     def test_documented_example_round_trips(self):
-        """NOTE (flagged as a spec ambiguity): the §2 example is `k=v` COMMA-joined while one of
-        its own values (`levels=1|16`) contains a comma. A naive `split(',')` decoder cannot
-        recover it. The encoding must survive its own documented example."""
+        """§2 value encoding (v1.1): 'No value may contain the pair separator. List values use
+        `|` (`levels=1|16`), so a naive `split(",")` is always correct. v1.0's `levels=1,16`
+        example was not round-trippable and is withdrawn.'"""
         fmt, parse = self.fns("knobs")
         self.assertEqual(KNOBS_EXAMPLE, fmt(parse(KNOBS_EXAMPLE)))
+
+    def test_a_list_value_is_joined_with_the_pipe(self):
+        """The encoder's side of the rule, with a real Python list — the round-trip tests below
+        only ever hand it a pre-joined STRING, so they pass unchanged even if the joiner is put
+        back to a comma. That is how `_LIST_SEP` went untested."""
+        fmt, _ = self.fns("knobs")
+        self.assertEqual("levels=1|16", fmt({"levels": [1, 16]}))
+        self.assertEqual("levels=1|4|8|16|32", fmt({"levels": (1, 4, 8, 16, 32)}))
+
+    def test_a_comma_inside_a_value_never_reaches_the_column(self):
+        """Whatever the encoder does with a comma-bearing value, `split(",")` on the result must
+        still recover every pair — that is the guarantee §2 buys."""
+        fmt, _ = self.fns("knobs")
+        out = fmt({"levels": "1,16", "max_s": 180})
+        pairs = [c for c in out.split(",") if c]
+        self.assertTrue(all("=" in c for c in pairs),
+                        f"a naive split(',') must yield only k=v pairs; got {out!r}")
+        self.assertEqual(2, len(pairs), f"two knobs, two pairs; got {out!r}")
 
     def test_levels_value_with_a_comma_survives(self):
         fmt, parse = self.fns("knobs")

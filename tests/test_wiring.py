@@ -1,9 +1,21 @@
-"""Structural checks on §1 (single source of truth) and §5 (enforcement wiring).
+"""Structural LINTS on §1, plus the suite's own hygiene rules.
 
-These are static reads of the scripts, never executions: `bench.sh` needs docker, a live vLLM
-endpoint and the GPU, and this box is a shared single-GPU lab that may be serving right now
-(contract §8). Static is the only honest way to assert this wiring from a test — the checks are
-deliberately shallow, and say so, rather than pretending to be end-to-end.
+**What this module is not.** It used to be where the §5 enforcement wiring was "asserted", by
+grepping the scripts for substrings. Every one of those assertions was satisfiable by a comment:
+
+    assertRegex(src, r"knobs")                      # passes on the word `knobs` in a docstring
+    _needs("scripts/promote.sh", "void", "suspect") # passes on "# void and suspect are unhandled"
+
+and nothing checked that `bench.sh` passed `--node-profile`, so the entire §4 roofline check sat
+dead on the primary bencher while the suite reported 121/121 green (contract v1.2 A6/A8). Those
+tests are gone. The wiring is now asserted by EXECUTING it:
+
+    test_bench_enforcement.py   bench.sh — status downgrade, exit 3/4, --node-profile, fail-closed
+    test_consumers.py           aggregate.py's default view; the header's single definition
+    test_reachability.py        promote.sh / suite.sh / validate.sh / run_experiment*.sh
+
+What remains here is what a lint can honestly answer: does a second copy of the schema literal
+exist anywhere, and does the suite itself obey the charter.
 """
 from __future__ import annotations
 
@@ -20,14 +32,20 @@ BENCH_SCRIPTS = ["scripts/bench.sh", "scripts/bench_ds4.sh", "scripts/bench_llam
 HEADER_CONSUMERS = BENCH_SCRIPTS + ["scripts/aggregate.py"]
 
 
-def source(rel: str) -> str | None:
+def source(rel: str):
     p = api.REPO_ROOT / rel
     return p.read_text().replace("\\t", "\t") if p.exists() else None
 
 
-class TestHeaderExistsOnce(unittest.TestCase):
-    """§1: 'Four files currently hard-code the header string ... after this work the header
-    exists once, in the library, and is consumed from there.'"""
+class TestNoSecondCopyOfTheSchema(unittest.TestCase):
+    """§1: 'The header string previously existed in four hard-coded copies ... all four now
+    consume it from the library.'
+
+    A lint, deliberately: `test_consumers.py` proves the consumers *read* the library by moving
+    the library and watching them follow. This catches the other half — a stale duplicate left
+    lying around that nothing reads yet, which is how the four copies drifted apart in the first
+    place (the schema went 16 -> 20 columns and only the documentation disagreed).
+    """
 
     def setUp(self):
         api.require_validity(self)
@@ -47,84 +65,23 @@ class TestHeaderExistsOnce(unittest.TestCase):
         self.assertRegex(api.VALIDITY_PY.read_text().replace("\\t", "\t"), HEADER_LITERAL,
                          "scripts/lib/validity.py must be where the schema lives (§1)")
 
-    def test_the_shell_shim_does_not_reimplement_a_rule(self):
-        """§1: 'a thin bash shim ... it must not re-implement any rule.' A shim that carries its
-        own thresholds is the exact failure this contract is trying to prevent."""
+    def test_the_shim_delegates_to_the_library(self):
         if not api.VALIDITY_SH.exists():
-            self.skipTest("scripts/lib/validity.sh not implemented yet (A1 owns it)")
-        src = api.VALIDITY_SH.read_text()
-        code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+            self.skipTest("scripts/lib/validity.sh not implemented yet (F3 owns it)")
+        code = "\n".join(l for l in api.VALIDITY_SH.read_text().splitlines()
+                         if not l.lstrip().startswith("#"))
         self.assertRegex(code, r"validity\.py|python",
                          "the shim must delegate to scripts/lib/validity.py")
-        for pattern, rule in ((r"-lt\s+5\b|<\s*5\b", "MIN_DATA"),
-                              (r"-lt\s+20\b|<\s*20\b", "MIN_SUCCESSFUL")):
-            self.assertNotRegex(code, pattern,
-                                f"validity.sh appears to re-implement the {rule} rule (§1)")
-
-
-class TestBenchWiring(unittest.TestCase):
-    """§5: bench.sh records, flags, and exits 4."""
-
-    def setUp(self):
-        api.require_validity(self)
-        self.src = source("scripts/bench.sh")
-        if self.src is None:
-            self.skipTest("scripts/bench.sh missing")
-        if "validity" not in self.src:
-            self.skipTest("scripts/bench.sh not wired to the validity layer yet (A2 owns it)")
-
-    def test_bench_consumes_the_library(self):
-        self.assertRegex(self.src, r"lib/validity\.(sh|py)",
-                         "bench.sh must consume scripts/lib/validity.{sh,py}, not its own copy")
-
-    def test_bench_has_a_validity_exit_path_of_4(self):
-        self.assertRegex(
-            self.src, r"exit[^\n]*\b4\b|EXIT_INVALID|EXIT_VALIDITY|VALIDITY_EXIT",
-            "§5 pins the validity failure exit code at 4, distinct from 3 = crash/hang")
-
-    def test_bench_keeps_the_crash_exit_path_of_3(self):
-        self.assertRegex(self.src, r"(exit|return|rc_all=)\s*=?\s*3\b",
-                         "the crash exit code 3 must survive the rewrite (§5)")
-
-    def test_the_failing_row_is_still_written(self):
-        """§5: 'A failing run is still written to results.tsv — the evidence must survive in the
-        committed journal, not only in the gitignored bundle.'"""
-        self.assertIn("emit_row", self.src, "bench.sh no longer emits a row")
-
-    def test_bench_records_the_knobs_it_actually_used(self):
-        """§2 rationale: a MAX_SECONDS=600 baseline and a 180 finalize were indistinguishable."""
-        self.assertRegex(self.src, r"knobs", "bench.sh must populate the `knobs` column")
-
-
-class TestDownstreamConsumers(unittest.TestCase):
-    """§5: 'Downstream consumers must treat void as non-existent data and suspect as
-    non-citable.' Three separate promises, three separate tests."""
-
-    def setUp(self):
-        api.require_validity(self)
-
-    def _needs(self, rel, *words):
-        src = source(rel)
-        if src is None:
-            self.skipTest(f"{rel} missing")
-        if not any(w in src for w in ("validity", "suspect", "void")):
-            self.skipTest(f"{rel} not wired to the validity layer yet")
-        for w in words:
-            self.assertIn(w, src, f"{rel} must know about {w!r} (§5)")
-
-    def test_promote_refuses_void_and_suspect(self):
-        self._needs("scripts/promote.sh", "void", "suspect")
-
-    def test_run_experiment_refuses_to_median_over_them(self):
-        self._needs("scripts/run_experiment.sh", "void", "suspect")
-
-    def test_aggregate_filters_them_from_the_default_view(self):
-        self._needs("scripts/aggregate.py", "void", "suspect")
 
 
 class TestProbeRecordsBandwidth(unittest.TestCase):
-    """§4: 'mem_bw_GB_s comes from node_profile.json -> gpu.mem_bw_gbs (new field; the probe
-    must record it — 273 for GB10/LPDDR5X).'"""
+    """§4: '`mem_bw_GB_s` <- `node_profile.json` -> `gpu.mem_bw_gbs`.'
+
+    A lint too, and the only one left that cannot be executed: `probe.sh` reads the GPU, and no
+    test on this box may (contract §8). The behaviour that matters — an absent figure SKIPS the
+    check rather than guessing one — is executed in test_roofline.py and
+    test_bench_enforcement.py against both node-profile fixtures.
+    """
 
     def test_probe_emits_mem_bw_gbs(self):
         src = source("scripts/probe.sh")
@@ -140,6 +97,7 @@ class TestCharterCompliance(unittest.TestCase):
 
     def test_new_shell_scripts_set_euo_pipefail(self):
         for p in [api.VALIDITY_SH, api.TESTS_DIR / "run.sh",
+                  api.TESTS_DIR / "mutate.sh",
                   api.TESTS_DIR / "tools" / "minimize_bundle.sh"]:
             if not p.exists():
                 continue
@@ -176,11 +134,25 @@ class TestCharterCompliance(unittest.TestCase):
         if not run.exists():
             self.skipTest("tests/run.sh missing")
         body = "\n".join(l for l in run.read_text().splitlines()
-                          if not l.lstrip().startswith("#"))
+                         if not l.lstrip().startswith("#"))
         for banned in ("docker", "nvidia-smi", "vllm", "curl", "wget"):
             with self.subTest(banned=banned):
                 self.assertNotIn(banned, body,
                                  f"tests/run.sh must stay offline and hardware-free ({banned})")
+
+    def test_the_stubs_the_wiring_tests_install_can_never_be_the_real_thing(self):
+        """The executing wiring tests put `docker`, `uv` and an adapter on PATH. If one of those
+        stubs ever fell through to the real binary, a test run would touch the lab's single
+        shared GPU. Assert the stub sources contain no path to a real one."""
+        scratch = api.TESTS_DIR / "ahl_test" / "scratch.py"
+        if not scratch.exists():
+            self.skipTest("tests/ahl_test/scratch.py missing")
+        body = scratch.read_text()
+        for banned in ("/usr/bin/docker", "docker run", "docker exec", "nvidia-smi",
+                       "vllm serve", "lm_eval"):
+            with self.subTest(banned=banned):
+                self.assertNotIn(banned, body,
+                                 f"the scratch harness must never reach {banned}")
 
 
 if __name__ == "__main__":

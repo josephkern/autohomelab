@@ -81,10 +81,18 @@ class TestRealDefectB(RealBundleTestCase):
         _, v = self.load("real_dead_endpoint", [1, 16])
         self.assertIn("over_roofline", v.tokens, f"got {v}")
 
-    def test_dead_endpoint_c16_is_also_flagged_errored(self):
-        """ok=16 against errored=112069 — 99.99% errored."""
+    def test_dead_endpoint_c16_is_flagged_errored_fatal(self):
+        """ok=16 against errored=112069 — 99.99% errored.
+
+        v1.2 A4 gives the >50% band its own BASE token (`errored_fatal`) rather than the same
+        `errored` token at a different severity, so severity is readable from the persisted
+        `validity` string alone — a consumer reading a committed row has nothing else to go on.
+        """
         _, v = self.load("real_dead_endpoint", [1, 16])
-        self.assertIn("errored", v.tokens, f"got {v}")
+        self.assertIn("errored_fatal", v.tokens, f"got {v}")
+        self.assertNotIn("errored", v.tokens,
+                         f"the two bands are mutually exclusive; got {v}")
+        self.assertIn("errored_fatal@c16", v.tagged, f"got {v.tagged}")
 
     def test_dead_endpoint_c16_is_also_low_sample(self):
         _, v = self.load("real_dead_endpoint", [1, 16])
