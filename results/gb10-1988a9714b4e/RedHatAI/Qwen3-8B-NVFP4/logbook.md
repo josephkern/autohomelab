@@ -228,3 +228,60 @@ Consumers verified on these rows: `aggregate.py` hides the void row by default a
 existed before 20260820.
 
 Teardown clean: GPU back to 0% / 4 W, no `ahl-vllm` container left.
+
+## 20260820 — c1-vs-c32 quality, and a Gate-2 hole found on the way
+
+Closing the repo-wide "quality has only ever been measured at c16" blind spot. Deployed config,
+one serve, `gsm8k LIMIT=100 THINK=off`, `CONC=1` then `CONC=32`.
+
+| arm | gsm8k | samples | validity | null-content items |
+|---|---|---|---|---|
+| `CONC=1` | 56.0 | 100/100 | ok | **17** |
+| `CONC=32` | 58.0 | 100/100 | ok | **19** |
+
+### Finding 1 — concurrency changes the TOKENS, not measurably the SCORE
+
+A determinism probe (32 gsm8k prompts, greedy, `/v1/completions`) with prefix caching disabled:
+
+```
+CONTROL   c1 vs c1 : 32/32 byte-identical
+TREATMENT c1 vs c32:  1/32 byte-identical   (31 differ)
+```
+
+So output IS batch-dependent — the mechanism the follow-up hypothesised is real and now
+demonstrated. But the scored arms differ by 2.0 pts at n=100 (SE≈4.9 each), i.e. **no detectable
+quality difference at this power**. The honest statement: *concurrency changes what the model
+emits; we have no evidence it changes how often the model is right, and this design could not have
+detected a difference smaller than ~14 pts.* A paired item-level test would be needed to say more
+(see `research/review/POWER-analysis.md`).
+
+### Finding 2 — the deployed serve is NOT run-to-run reproducible, and prefix caching is why
+
+Same probe with the deployed config (`enable_prefix_caching=True`, `kv_cache_dtype=fp8_e4m3`):
+**7/32 byte-identical on a repeated identical pass**. Disable prefix caching -> 32/32. A single
+prompt repeated 5x is deterministic either way, so this is not general nondeterminism: it is
+cache STATE. Where a prefix-cache hit lands varies with eviction pressure, and an fp8 KV hit
+reuses quantised KV instead of recomputing it. **This is a candidate mechanism for the tracked
+"mmlu drifts ~1 pt across sessions on identical config+image" follow-up**, which has been open
+without one. Anything that needs bit-reproducibility must serve with `--no-enable-prefix-caching`.
+
+### Finding 3 — THINK=off COLLAPSES this model, and Gate 2 reports `validity=ok`
+
+Same model, same day: **think-on gsm8k = 90-92** (and 87.64 at full limit, 20260613/14);
+**think-off gsm8k = 56-58**. A 34-point collapse. 17-19% of items came back with **null content**
+(lm-eval substitutes `LMEVAL_MODEL_NONE_ANSWER_PLACEHOLDER` and counts them as answered), so
+`samples=100/100`, the score is finite and non-zero, and the Gate-2 predicate passes it.
+
+This is the NemotronH failure documented in AGENTS.md (`enable_thinking=false` renders a pre-closed
+`<think></think>`; that model needed a per-model `AHL_THINK_OFF_KWARGS`) — appearing here PARTIALLY
+rather than totally, which is worse, because a total failure scores 0 and gets noticed.
+
+**Consequence: `suite.sh` auto-applies think-off to any runbook carrying `--reasoning-parser`.**
+For this model that silently substitutes 56 for 90 as the Gate-2 result. The lab note "thinking-off
+generative eval" is model-dependent, and the direction is not always the same: the 35B went 40->90
+with thinking off; Qwen3-8B goes 90->56.
+
+**The predicate gap:** `eval_validity.py` cannot see this today. `n-samples` counts placeholder-filled
+items as answered. Detecting it needs the per-item outputs — i.e. `--log_samples`, which
+`research/review/POWER-analysis.md` independently recommends adding for the paired McNemar test.
+One flag closes both.
