@@ -33,7 +33,15 @@ class VerdictTestCase(unittest.TestCase):
 
 
 class TestHistoricalDefects(VerdictTestCase):
-    """Contract §0: the three real rows that were written as `status=measured` and were wrong."""
+    """Contract §0: the real rows that were written as `status=measured` and were wrong.
+
+    Only defects (a) and (b) live here. **Defect (c) — the spec-decode config scored by a
+    loglikelihood task returning NaN for 56,168 requests — is a GATE 2 failure and NOTHING in
+    this module can catch it** (§0 "Scope limit"; v1.2 A9 brings it into scope for `eval.sh`).
+    Three tests used to be named `test_c_*` here while actually testing a missing level JSON,
+    so a reader running the suite saw all three motivating defects green. They are renamed
+    below to say what they test. Gate-2 coverage for (c) is F5's, in its own module.
+    """
 
     def test_a_two_completed_requests_is_no_data(self):
         """(a) a c32 averaged over 2 completed requests -> no_data, status floor void."""
@@ -41,6 +49,8 @@ class TestHistoricalDefects(VerdictTestCase):
                         [1, 32])
         self.assertIn("no_data", v.tokens, f"2 successful requests must be no_data; got {v}")
         self.assertEqual("void", v.status, f"no_data is fatal -> void (§5); got {v}")
+        self.assertIn("no_data@c32", v.tagged,
+                      f"§3: the token names the level it refers to; got {v.tagged}")
 
     def test_b_impossible_throughput_is_over_roofline(self):
         """(b) 449,358 tok/s on a 273 GB/s node -> over_roofline, status floor void."""
@@ -48,25 +58,38 @@ class TestHistoricalDefects(VerdictTestCase):
                          16: api.level_json(16, 112069, 0, 449358.18, rate=16)},
                         [1, 16])
         self.assertIn("over_roofline", v.tokens,
-                      f"449358 tok/s implies 0.0006 GB/token on a 273 GB/s box; got {v}")
+                      f"449358 tok/s implies 0.0097 GB/token on a 273 GB/s box; got {v}")
         self.assertEqual("void", v.status, f"over_roofline is fatal -> void (§5); got {v}")
+        self.assertIn("over_roofline@c16", v.tagged, f"got {v.tagged}")
 
-    def test_c_missing_level_json_is_no_data(self):
-        """(c) a level that was RUN but whose level_c<N>.json never landed -> no_data / void."""
+
+class TestMissingLevelJson(VerdictTestCase):
+    """§3: 'a run level whose `level_c<N>.json` is missing/unparseable' -> `no_data`, fatal.
+
+    NOT contract §0 defect (c) — that is the Gate-2 NaN eval, which no rule in this file reads.
+    """
+
+    def test_missing_level_json_is_no_data(self):
         v = self.assess({1: self.healthy()}, [1, 16])  # c16 declared run, file absent
         self.assertIn("no_data", v.tokens,
                       f"a run level with no level_c16.json must be no_data; got {v}")
         self.assertEqual("void", v.status)
+        self.assertIn("no_data@c16", v.tagged, f"got {v.tagged}")
 
-    def test_c_unparseable_level_json_is_no_data(self):
+    def test_unparseable_level_json_is_no_data(self):
         v = self.assess({1: self.healthy(), 16: '{"benchmarks": [truncated'}, [1, 16])
         self.assertIn("no_data", v.tokens, f"unparseable JSON must be no_data; got {v}")
         self.assertEqual("void", v.status)
 
-    def test_c_empty_level_json_is_no_data(self):
+    def test_empty_level_json_is_no_data(self):
         v = self.assess({1: self.healthy(), 16: ""}, [1, 16])
         self.assertIn("no_data", v.tokens, f"a zero-byte level json must be no_data; got {v}")
         self.assertEqual("void", v.status)
+
+    def test_missing_level_renders_as_na_in_req_counts(self):
+        """§2: 'A level that ran but produced no parseable JSON renders `c16:na`.'"""
+        v = self.assess({1: self.healthy()}, [1, 16])
+        self.assertIn("c16:na", str(v.req_counts), f"got {v}")
 
 
 class TestSampleCountBoundaries(VerdictTestCase):
@@ -225,6 +248,143 @@ class TestUnrunLevelsAreSkipped(VerdictTestCase):
                          16: api.level_json(118, 0, 4, 200.0, rate=16)}, [1, 16])
         self.assertEqual("ok", v.validity,
                          f"only declared run levels are scored; got {v}")
+
+
+class TestLevelTagging(VerdictTestCase):
+    """§3 v1.1: 'Tokens carry the level they refer to: `low_sample@c1`, `no_data@c32`,
+    `survivorship@c16`. Only `ok` and `nonmonotonic` are row-wide and untagged.'
+
+    Asserted on `.tagged` — the tokens EXACTLY as emitted. The old suite only ever asserted on
+    a helper that returned the tagged token *and* its bare base, so deleting `tag_verdict`
+    entirely left all 121 tests green (v1.2 A8). Every assertion here fails if tagging goes.
+    """
+
+    def test_a_thin_low_level_is_tagged_there_not_at_c16(self):
+        """c4's floor is min(20, 4*4) = 16, so 15 requests is thin at c4 and the healthy c16
+        objective beside it must stay unflagged."""
+        v = self.assess({4: api.level_json(15, 0, 0, 60.0, rate=4),
+                         16: api.level_json(200, 0, 0, 300.0, rate=16)}, [4, 16])
+        self.assertEqual({"low_sample@c4"}, v.tagged,
+                         f"the c4 stage is thin, the c16 objective is not; got {v.tagged}")
+
+    def test_the_same_rule_at_c16_is_tagged_c16(self):
+        v = self.assess({1: api.level_json(41, 0, 0, 20.0, rate=1),
+                         16: api.level_json(19, 0, 0, 300.0, rate=16)}, [1, 16])
+        self.assertEqual({"low_sample@c16"}, v.tagged, f"got {v.tagged}")
+
+    def test_two_levels_produce_two_distinct_tokens(self):
+        v = self.assess({1: api.level_json(2, 0, 0, 20.0, rate=1),
+                         16: api.level_json(19, 0, 0, 300.0, rate=16)}, [1, 16])
+        self.assertEqual({"no_data@c1", "low_sample@c16"}, v.tagged, f"got {v.tagged}")
+        self.assertEqual({1}, v.levels_of("no_data"), f"got {v.tagged}")
+        self.assertEqual({16}, v.levels_of("low_sample"), f"got {v.tagged}")
+
+    def test_nonmonotonic_stays_bare(self):
+        """§3: `nonmonotonic` is row-wide, so tagging it would be wrong in the other direction."""
+        v = self.assess({8: api.level_json(60, 0, 0, 100.0, rate=8),
+                         16: api.level_json(60, 0, 0, 50.0, rate=16)}, [8, 16])
+        self.assertIn("nonmonotonic", v.tagged,
+                      f"a row-wide verdict is emitted untagged; got {v.tagged}")
+        self.assertEqual({None}, v.levels_of("nonmonotonic"), f"got {v.tagged}")
+
+    def test_a_hung_level_is_named_by_its_token(self):
+        """§3: 'A hung level is scored (and its token names it), not skipped' — this is what
+        makes a crash row say WHICH level wedged."""
+        v = self.assess({1: api.level_json(41, 0, 0, 20.0, rate=1)}, [1, 16],
+                        tps={1: "20.0", 16: "hang"}, status="crash")
+        self.assertIn("no_data@c16", v.tagged,
+                      f"the wedged level must be named in the verdict; got {v.tagged}")
+
+    def test_tagging_survives_the_format_parse_round_trip(self):
+        """The tag has to reach results.tsv, not just the in-memory verdict."""
+        fmt = api.attr(self, self.mod, "format_validity", what="the §2 validity encoding")
+        parse = api.attr(self, self.mod, "parse_validity", what="the §2 validity decoding")
+        self.assertEqual(["low_sample@c1", "no_data@c32"],
+                         sorted(parse(fmt(["no_data@c32", "low_sample@c1"]))))
+
+
+class TestAdjacencyOnly(VerdictTestCase):
+    """§3 v1.1: '`nonmonotonic` is adjacent-only — each run level against the previous run
+    level, NEVER pairwise across the whole curve. This box legitimately plateaus at high
+    concurrency; pairwise-all would flag gentle decay as an inversion.'
+
+    Every case here needs 3+ levels: at two levels adjacent and pairwise-all are identical, so
+    a suite that only ever tested two levels could not tell the two semantics apart — which is
+    exactly how reverting to `itertools.combinations` stayed green.
+    """
+
+    def curve(self, *tps):
+        levels = (1, 4, 8, 16, 32)[: len(tps)]
+        return self.assess(
+            {lv: api.level_json(60, 0, 0, t, rate=lv) for lv, t in zip(levels, tps)},
+            list(levels))
+
+    def test_gentle_decay_across_three_levels_is_not_nonmonotonic(self):
+        """100 -> 95 -> 88: every ADJACENT step is inside the 10% band, but c8 vs c1 is a
+        12% drop, so pairwise-all fires and adjacent-only does not."""
+        v = self.curve(100.0, 95.0, 88.0)
+        self.assertNotIn("nonmonotonic", v.tokens,
+                         f"adjacent steps are -5.0% and -7.4%, both legal; got {v}")
+        self.assertEqual("ok", str(v.validity), f"got {v}")
+
+    def test_gentle_decay_across_five_levels_is_not_nonmonotonic(self):
+        """The real plateau shape on a bandwidth-bound box: the c1-vs-c32 pair is -32%."""
+        v = self.curve(100.0, 95.0, 90.5, 86.0, 82.0)
+        self.assertNotIn("nonmonotonic", v.tokens,
+                         f"no adjacent step exceeds 10%; got {v}")
+
+    def test_one_adjacent_inversion_is_still_caught(self):
+        """Adjacent-only must not become 'never fires': a real 15% step still trips it."""
+        v = self.curve(100.0, 95.0, 80.0)
+        self.assertIn("nonmonotonic", v.tokens,
+                      f"c8 is 15.8% below c4, an adjacent inversion; got {v}")
+        self.assertEqual("suspect", v.status, f"got {v}")
+
+    def test_a_recovered_dip_is_caught_at_the_dip(self):
+        """100 -> 80 -> 100: pairwise c1-vs-c16 is fine, the adjacent c4 step is not."""
+        v = self.curve(100.0, 80.0, 100.0)
+        self.assertIn("nonmonotonic", v.tokens, f"got {v}")
+
+
+class TestUnrunVersusHung(VerdictTestCase):
+    """§3: 'A level is RUN if the journal published a cell OR a bundle file exists — the union.
+    Unrun levels are skipped, never scored as zero. A hung level IS scored.'
+
+    The distinction rides entirely on whether the results.tsv cell is `na` or `hang`, so these
+    tests pass the raw cells the way bench.sh does. Collapsing the two (a `_cell_published`
+    that always answers True) turns a never-attempted level into a fatal `no_data`, which would
+    void every lean `LEVELS_SET=1,16` row in the project.
+    """
+
+    ONLY_C1 = {1: api.level_json(41, 0, 0, 20.0, rate=1)}
+
+    def test_na_cell_with_no_json_is_dropped(self):
+        v = self.assess(dict(self.ONLY_C1), [1, 4, 8, 16, 32],
+                        tps={1: "20.0", 4: "na", 8: "na", 16: "na", 32: "na"})
+        self.assertEqual("ok", str(v.validity),
+                         f"c4/c8/c16/c32 were never attempted; got {v}")
+        self.assertEqual("c1:41/0/0", str(v.req_counts), f"got {v}")
+
+    def test_hang_cell_with_no_json_is_scored(self):
+        v = self.assess(dict(self.ONLY_C1), [1, 16],
+                        tps={1: "20.0", 16: "hang"})
+        self.assertIn("no_data", v.tokens,
+                      f"a level that wedged left no json but WAS run; got {v}")
+        self.assertIn("c16:na", str(v.req_counts), f"got {v}")
+
+    def test_the_two_cases_differ(self):
+        """Same bundle, same declared levels — only the cell differs. If these two agree, the
+        `na` vs `hang` distinction has been collapsed."""
+        unrun = self.assess(dict(self.ONLY_C1), [1, 16], tps={1: "20.0", 16: "na"})
+        hung = self.assess(dict(self.ONLY_C1), [1, 16], tps={1: "20.0", 16: "hang"})
+        self.assertNotEqual(str(unrun.validity), str(hung.validity),
+                            f"`na` and `hang` must not grade alike; both {unrun.validity!r}")
+
+    def test_a_published_number_marks_the_level_run_even_without_json(self):
+        """The union rule's other half: a journal cell carrying a real number means the level
+        ran, so a vanished json is `no_data`, not a silent skip."""
+        v = self.assess(dict(self.ONLY_C1), [1, 16], tps={1: "20.0", 16: "151.5"})
+        self.assertIn("no_data", v.tokens, f"got {v}")
 
 
 class TestVerdictString(VerdictTestCase):

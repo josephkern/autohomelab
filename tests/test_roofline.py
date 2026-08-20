@@ -1,11 +1,16 @@
 """Contract §4 — the physical ceiling.
 
     ceiling(level) = SAFETY * level * (mem_bw_GB_s / bytes_per_token_GB)
-    SAFETY = 2.0, bytes_per_token_GB falls back to AHL_MIN_MODEL_GB = 1.0
+    SAFETY = 3.0 (v1.1, raised from 2.0), bytes_per_token_GB falls back to AHL_MIN_MODEL_GB = 1.0
 
-On the GB10 fixture (273 GB/s) that is 546 tok/s at c1 and 8736 at c16 — deliberately loose. The
+On the GB10 fixture (273 GB/s) that is 819 tok/s at c1 and 13104 at c16 — deliberately loose. The
 bound exists to refute the physically impossible, so the tests here check both that it catches
 449,358 and that it does NOT touch an absurd-but-under-ceiling number.
+
+The `just under` case used to assert 8735 against a comment reading "ceiling = 2.0 * 16 * 273".
+When v1.1 moved SAFETY to 3.0 that number stayed put, leaving the low half of the boundary pair
+sitting 33% below the threshold it was supposed to bracket — a pass that constrained nothing.
+Boundary pairs are only worth having when both halves move with the constant.
 """
 from __future__ import annotations
 
@@ -36,17 +41,29 @@ class RooflineTestCase(unittest.TestCase):
 
 class TestCeiling(RooflineTestCase):
     def test_just_under_c16_ceiling_passes(self):
-        v = self.at(16, 8735.0)   # ceiling = 2.0 * 16 * 273 / 1.0 = 8736
+        v = self.at(16, 13103.0)   # ceiling = 3.0 * 16 * 273 / 1.0 = 13104
         self.assertNotIn("over_roofline", v.tokens,
-                         f"8735 < 8736 must pass — the bound is loose on purpose; got {v}")
+                         f"13103 < 13104 must pass — the bound is loose on purpose; got {v}")
 
     def test_just_over_c16_ceiling_fails(self):
         v = self.at(16, 13105.0)
         self.assertIn("over_roofline", v.tokens, f"13105 > 13104 (SAFETY 3.0); got {v}")
 
+    def test_the_boundary_pair_brackets_the_constant_it_names(self):
+        """The guard on the guard: whatever SAFETY is, the two cases above must sit either side
+        of `SAFETY * 16 * 273`, one tok/s apart. If a future amendment moves SAFETY again, this
+        fails immediately instead of silently loosening the pair."""
+        safety = float(api.attr(self, self.mod, "SAFETY", "AHL_ROOFLINE_SAFETY",
+                                what="the §4 SAFETY factor"))
+        ceiling = safety * 16 * 273 / 1.0
+        self.assertLess(13103.0, ceiling, f"the `under` case must be under; ceiling={ceiling}")
+        self.assertGreater(13105.0, ceiling, f"the `over` case must be over; ceiling={ceiling}")
+        self.assertLess(ceiling - 13103.0, 2.0,
+                        f"a boundary pair must hug the boundary; ceiling={ceiling}")
+
     def test_c1_ceiling_scales_with_level(self):
-        """The ceiling is per-level: 819 at c1 (SAFETY 3.0), so 900 tok/s at c1 is impossible
-        while the same 900 at c16 is merely implausible."""
+        """The ceiling is per-level: 3.0 * 1 * 273 = 819 at c1, so 900 tok/s at c1 is
+        impossible while the same 900 at c16 is merely implausible."""
         self.assertIn("over_roofline", self.at(1, 900.0).tokens)
         self.assertNotIn("over_roofline", self.at(16, 900.0).tokens)
 

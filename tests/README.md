@@ -1,14 +1,23 @@
 # tests/ — the acceptance suite for the measurement-validity layer
 
-The binding spec is [`docs/validity-contract.md`](../docs/validity-contract.md). **Every threshold
-in its §3 and §4 is a test case here**, both sides of every boundary. This suite is the acceptance
-gate for issue #1 §1: if it is green with no skips, the layer does what the contract says.
+The binding spec is [`docs/validity-contract.md`](../docs/validity-contract.md) — **v1.2**, whose
+amendment block wins wherever it differs from v1.1. **Every threshold in its §3 and §4 is a test
+case here**, both sides of every boundary. This suite is the acceptance gate for issue #1 §1: if
+it is green with no skips *and `tests/mutate.sh` reports no survivors*, the layer does what the
+contract says.
+
+Those are two different claims, and the second one is why the harness exists. Mutation testing of
+the v1.1 suite found **16 surviving mutations**: every v1.1 amendment and every enforcement path
+could be deleted or inverted with 121/121 still green. A suite that agrees with the library is not
+a test of the library.
 
 This is the repo's first test suite, so it also sets the convention. Two rules shaped it:
 
 - **Hermetic.** No network, no container runtime, no server, no accelerator. The box is a shared
   single-GPU lab that may be serving right now (contract §8), and a benchmark harness whose tests
-  need the hardware they are testing can never be run when it matters. The whole suite is ~0.5 s.
+  need the hardware they are testing can never be run when it matters. The whole suite is ~12 s,
+  most of it the wiring tests, which run the real `bench.sh`/`aggregate.py`/`promote.sh` against
+  stubbed children rather than reading them as text.
 - **Zero dependencies.** Python's stdlib `unittest`, driven by bash. Charter rule 4 allows bash or
   python via `uv`/`uvx`; nothing is installed, nothing is pinned, nothing can rot.
 
@@ -19,7 +28,15 @@ tests/run.sh                              # everything, verbose
 tests/run.sh -q                           # dots only
 tests/run.sh test_roofline test_status    # named modules
 AHL_TEST_STRICT=1 tests/run.sh            # a SKIP fails the run  <- use this post-merge
+
+tests/mutate.sh                           # the mutation harness: break each rule, expect RED
+tests/mutate.sh -l                        # list the mutations
+tests/mutate.sh survivorship_deleted      # just one
 ```
+
+**The acceptance run is both.** `AHL_TEST_STRICT=1 tests/run.sh` says the rules hold;
+`tests/mutate.sh` says the suite would notice if they stopped holding. The harness takes a few
+minutes because it is deliberately serial (see below); the suite itself is ~12 s.
 
 `run.sh` uses `uv run --no-project --offline python` (falling back to `python3`), so it never
 touches the network and never pulls the project's heavy `guidellm`/`lm-eval` dependencies.
@@ -40,13 +57,35 @@ any skip into a failure and prints the reasons. **The acceptance run is the stri
 
 | module | pins down |
 |---|---|
-| `test_verdicts.py` | §3 verdict tokens. The three historical defects as fixtures; the `MIN_DATA=5` / `MIN_SUCCESSFUL=20` boundaries at 4/5/19/20; `no_data` ⊻ `low_sample`; the 9.9% vs 10.1% monotonicity edge; the 10% errored-ratio edge and its denominator; and the subtlest rule in the contract — **unrun (`na`) levels are skipped, never scored as zero**, so a lean `LEVELS_SET=1,16` run is `ok`, not `no_data` for c4/c8/c32. |
-| `test_roofline.py` | §4. The ceiling at 8735 vs 8737 tok/s at c16 on a 273 GB/s node; that it scales per level; that a known bytes/token tightens it; and that a node profile **without** `gpu.mem_bw_gbs` **skips** the check rather than failing it or inventing a bandwidth. Plus the named defaults (SAFETY 2.0, MIN_MODEL_GB 1.0, MIN_DATA 5, MIN_SUCCESSFUL 20). |
-| `test_encodings.py` | §2 `req_counts` and `knobs`. Round-trip stability (`parse -> format -> parse`), ascending level order, `na` for unknown, the documented `ok/incomplete/errored` triple order, and that no value can carry a tab or a newline into a TSV. |
+| `test_verdicts.py` | §3 verdict tokens. §0 defects (a) and (b) as fixtures; the `MIN_DATA=5` / `MIN_SUCCESSFUL=20` boundaries at 4/5/19/20; `no_data` ⊻ `low_sample`; the 9.9% vs 10.1% monotonicity edge; the 10% errored edge and its denominator; **level tagging asserted on `.tagged`**; **adjacency at 3+ levels** (at two levels adjacent and pairwise-all are indistinguishable, which is how reverting to `itertools.combinations` stayed green); the `na` (never attempted) vs `hang` (wedged) distinction; and the subtlest rule in the contract — **unrun levels are skipped, never scored as zero**. |
+| `test_v12_amendments.py` | The v1.2 block. A1 the token clause is **gone** (an absurd `AHL_MIN_TOKENS` must change nothing) · A2 `survivorship` as finally adjudicated — majority discard, `incomplete > ok`, with the `incomplete == ok` boundary and the two withdrawn forms asserted NOT to fire · A3 `no_output` (zero / negative / missing / NaN tok/s with successful requests) · A4 `errored_fatal` as a distinct base token above 50%, both sides of the boundary · A5 `na` is never `ok`, including `parse_validity("na")` and an empty bundle · A10 the CLI and `assess_bundle` agree on the same evidence, including a stale `level_c8.json`. |
+| `test_roofline.py` | §4. The ceiling at **13103 vs 13105** tok/s at c16 on a 273 GB/s node (SAFETY **3.0**), plus a guard asserting the pair still brackets `SAFETY * 16 * 273` — the old pair said 8735 with a comment reading `2.0 * 16 * 273`, so half of it sat 33% below the real threshold and constrained nothing. Per-level scaling; a known bytes/token tightening it; and a profile **without** `gpu.mem_bw_gbs` **skipping** the check rather than guessing. |
+| `test_encodings.py` | §2 `req_counts` and `knobs`. Round-trip stability, ascending level order, `na` for unknown, the `ok/incomplete/errored` triple order, and that no value can carry a tab or newline into a TSV. Plus the `|` list separator asserted on an actual Python list — the round-trip tests only ever hand the encoder a pre-joined string, so they pass unchanged with the joiner set back to a comma. |
 | `test_status.py` | §5/§6 precedence. `void` outranks `suspect`; `crash` outranks both and still records its verdict; a clean row keeps the caller's `STATUS`; the vocabulary is exactly the six words of §6; the validity exit code is 4. |
-| `test_schema.py` | §2 header (exactly 23 columns, contract order, `status notes data` tail intact) and §7 migration: a legacy 20-column row keeps **every original value byte-identically in its new position**, historical `status` is not rewritten, and the migration is idempotent. |
-| `test_real_bundles.py` | The reality check. Real minimized bundles from this node: a healthy run must come back **`ok`** (a layer that flags good runs gets switched off within a week), the 2-request c32 must be `void`, the 449,358 row must be `over_roofline`. Plus fixture-integrity guards so a silently edited fixture cannot make the suite lie. |
-| `test_wiring.py` | §1/§5 structure, read statically because `bench.sh` cannot be executed here: the header no longer exists in `bench*.sh`/`aggregate.py`, the bash shim delegates instead of re-implementing, `bench.sh` keeps exit 3 for crash and gains exit 4 for invalid, the failing row is still written, and `promote.sh`/`run_experiment.sh`/`aggregate.py` know the new statuses. |
+| `test_schema.py` | §2 header (exactly 23 columns, contract order) and §7 migration: a legacy 20-column row keeps every original value byte-identically in its new position, historical `status` is not rewritten, and the migration is idempotent. |
+| `test_real_bundles.py` | The reality check on minimized real bundles from this node. **Five healthy fixtures** — chat, coder, a five-level sweep, llama.cpp and ds4 — must all come back `ok`; the 2-request c32 must be `void`; the 449,358 row must be `over_roofline` and `errored_fatal`. Plus fixture-integrity guards so a silently edited fixture cannot make the suite lie. |
+| `test_bench_enforcement.py` | §5 and A6 **executed**: the real `bench.sh` runs in a scratch repo with stubbed children, and the assertions are on the emitted row, the exit code and the call log — status downgrade, exit 3 vs 4, `suspect` alone still exiting 4, the row surviving its own verdict, `--node-profile` reaching the library, the roofline firing on the vLLM path and being skipped without a bandwidth figure, and failing **closed** when the library errors. |
+| `test_consumers.py` | §1 and §5 **executed**: the header's single definition (rename the library's last column and watch `validity.sh` and `bench.sh` follow), and `aggregate.py`'s default view holding back void / suspect / crash / `na` / *and a `measured` row whose `validity` is fatal* — the status-only filter's blind spot. |
+| `test_reachability.py` | Runs `scripts/citability_selftest.sh` (68 checks) as part of the suite. It already exercised `promote.sh`, `suite.sh`, `validate.sh` and both runners the right way — by executing them — but nothing ran it, which is why four enforcement mutations survived. |
+| `tools/mutations.py`, `mutate.sh` | The harness (contract A8). 26 mutations: every §3/§4 rule and every enforcement link. |
+
+## The mutation harness
+
+`tests/mutate.sh` copies the repo into a scratch directory **per mutation**, applies one mutation
+to the copy, runs `tests/run.sh` there, and reports any mutation the suite failed to notice.
+
+Three properties are deliberate:
+
+- **The working tree is never mutated.** Every edit lands on a `tar`-piped copy under `$TMPDIR`.
+- **It compares failing-test SETS against an unmutated baseline**, not exit codes. If the baseline
+  is red for an unrelated reason, an exit-code comparison scores every mutation "killed" and prints
+  a clean sheet — the same false green the whole exercise is about.
+- **It is serial.** The first attempt at this raced two mutators over one directory and reported
+  everything red, which is that artifact wearing the opposite colour.
+
+A mutation whose pattern no longer matches is reported **N/A**, never green: that means the
+implementation spells the rule differently and the pattern needs updating, not that the rule is
+covered.
 
 ## Adding a case — the convention
 
@@ -68,6 +107,20 @@ any skip into a failure and prints the reasons. **The acceptance run is the stri
 6. **Never read `results/**/data/`.** It is gitignored, absent from a fresh clone, and changes
    whenever the lab runs. `test_wiring.py` enforces this.
 7. **Never invoke docker, a server, `guidellm`, `lm-eval`, or the GPU.** Also enforced.
+8. **A wiring test EXECUTES the path.** A substring grep is not a test: `assertRegex(src, "knobs")`
+   passes on a docstring, and `_needs("promote.sh", "void", "suspect")` passed on a comment saying
+   they were unhandled. Use `ahl_test.scratch.ScratchRepo` — it runs the real script against
+   logging stubs — and assert on the emitted row, the exit code, and the call log.
+9. **Assert on `.tagged` whenever the LEVEL matters.** `Verdict.tokens` returns base names only,
+   on purpose: it used to return the tagged token *and* its bare base, which made the suite
+   structurally unable to notice whether level tagging existed at all.
+10. **Name the test after what it tests.** Three tests were called `test_c_*` after §0 defect (c),
+    the NaN loglikelihood eval, while testing a missing level JSON — so a reader running the suite
+    saw all three motivating defects green. Nothing in this module can catch defect (c); it is a
+    Gate-2 failure (§0 scope limit, v1.2 A9). They are now `TestMissingLevelJson`. **This is the
+    exact mechanism by which a project comes to believe it is protected when it is not.**
+11. **Add a mutation with the rule.** A1.2/A8: if breaking your rule does not turn the suite red,
+    the rule is untested. Add it to `tests/tools/mutations.py` and run `tests/mutate.sh <name>`.
 
 ## If the implementation's API does not match
 
@@ -80,13 +133,15 @@ tables there — not the tests. The surface the suite prefers:
 # scripts/lib/validity.py
 COLUMNS: list[str]        # 23 names, contract §2 order
 HEADER:  str              # "\t".join(COLUMNS)
-MIN_DATA = 5 ; MIN_SUCCESSFUL = 20 ; SAFETY = 2.0 ; MIN_MODEL_GB = 1.0
+MIN_DATA = 5 ; MIN_SUCCESSFUL = 20 ; SAFETY = 3.0 ; MIN_MODEL_GB = 1.0
 STATUSES = {"measured", "keep", "discard", "crash", "suspect", "void"}
 EXIT_INVALID = 4
 
-def assess_bundle(bundle_dir, levels, node_profile=None, status="measured",
+def assess_bundle(bundle_dir, levels, tps=None, node_profile=None, status="measured",
                   bytes_per_token_gb=None):
-    """bundle_dir holds level_c<N>.json; `levels` is the list of levels that were RUN.
+    """bundle_dir holds level_c<N>.json; `levels` is the list of levels that were RUN; `tps`
+    maps level -> the RAW results.tsv cell, which is the only thing that distinguishes a level
+    that was never attempted (`na`) from one that wedged (`hang`).
     Returns an object (or dict) with .validity, .status (post-downgrade) and .req_counts."""
 
 def format_req_counts(mapping) -> str ;  def parse_req_counts(s) -> mapping

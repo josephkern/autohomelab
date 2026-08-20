@@ -124,6 +124,10 @@ _PARAM_ALIASES = {
     "status": ("status", "base_status", "caller_status"),
     "bytes_per_token_gb": ("bytes_per_token_gb", "bytes_per_token", "model_gb",
                            "active_weight_gb", "weight_gb"),
+    # The RAW results.tsv tps_c* cells, keyed by level. This is what lets the library tell a
+    # level that was never attempted (`na`) from one that wedged (`hang`) — contract §3,
+    # "unrun levels are skipped, never scored as zero" vs "a hung level IS scored".
+    "tps": ("tps", "cells", "tps_cells", "journal_tps", "published"),
 }
 
 _ASSESS_NAMES = ("assess_bundle", "assess", "evaluate_bundle", "validate_bundle",
@@ -153,16 +157,25 @@ class Verdict:
 
     @property
     def tokens(self) -> set[str]:
-        """Tagged tokens PLUS their bare base names.
+        """The BASE names only: {"low_sample"} for `low_sample@c1`.
 
-        v1.1 tags a token with the level it refers to (`low_sample@c1`) so a thin c1
-        sentinel cannot condemn a campaign's c16 objective. Tests that assert on the rule
-        ("this is low_sample") stay valid; tests that assert on the level use `.tagged`.
+        v1.2 A8: this used to return the tagged tokens AND their bare bases, which made the
+        suite structurally unable to notice whether level tagging existed at all — deleting
+        `tag_verdict` left every assertion green. It now returns bases only, so a test that
+        cares about the LEVEL must say so by using `.tagged` (or `.levels_of`), and no test
+        can pass merely because both spellings were on offer.
         """
+        return {t.split("@", 1)[0] for t in self.tagged}
+
+    def levels_of(self, base: str) -> set:
+        """Levels a base verdict is tagged at. `None` in the set means the token was emitted
+        bare — correct only for the row-wide verdicts (`ok`, `nonmonotonic`), contract §3."""
         out = set()
         for t in self.tagged:
-            out.add(t)
-            out.add(t.split("@", 1)[0])
+            b, _, lvl = t.partition("@")
+            if b != base:
+                continue
+            out.add(int(lvl[1:]) if lvl.startswith("c") and lvl[1:].isdigit() else None)
         return out
 
     def __repr__(self):  # shows up in assertion failure messages
@@ -181,7 +194,7 @@ def _pick(raw, *names):
 
 
 def assess(test: unittest.TestCase, mod, bundle_dir, levels, *,
-           node_profile=None, status="measured", bytes_per_token_gb=None) -> Verdict:
+           node_profile=None, status="measured", bytes_per_token_gb=None, tps=None) -> Verdict:
     """Call the implementation's bundle assessor, mapping our kwargs onto its parameter names."""
     fn = attr(test, mod, *_ASSESS_NAMES, what="the per-row verdict (contract §3/§5)")
     try:
@@ -195,6 +208,7 @@ def assess(test: unittest.TestCase, mod, bundle_dir, levels, *,
         "node_profile": node_profile,
         "status": status,
         "bytes_per_token_gb": bytes_per_token_gb,
+        "tps": tps,
     }
 
     if sig is None:
@@ -205,7 +219,7 @@ def assess(test: unittest.TestCase, mod, bundle_dir, levels, *,
     kwargs: dict[str, object] = {}
     unmapped: list[str] = []
     for key, value in canonical.items():
-        if value is None and key in ("node_profile", "bytes_per_token_gb"):
+        if value is None and key in ("node_profile", "bytes_per_token_gb", "tps"):
             continue
         name = next((a for a in _PARAM_ALIASES[key] if a in params), None)
         if name is None and accepts_kwargs:
@@ -242,15 +256,30 @@ def _profile_arg(param_name: str, profile, test):
 
 
 # ── fixture helpers ───────────────────────────────────────────────────────────────────────────
+# Mean output tokens per successful request, cycled across synthetic levels. v1.2 A8: the
+# helper used to hard-code 256.0 for EVERY level, so v1.1's token clause
+# (successful * mean_output_tokens < 2048) and its request clause agreed on 100% of fixtures
+# and neither could be tested apart from the other. Real bundles on this node range from ~32
+# (a dead endpoint) through ~250 (chat) to ~1250 (coder); the table spans that.
+_OUT_TOKENS_CYCLE = (251.75, 1005.95, 31.81, 700.5, 128.0, 3.0, 512.0, 253.44)
+
+
 def level_json(successful: int, errored: int = 0, incomplete: int = 0, tps: float = 100.0,
-               rate: int = 1, max_seconds: float = 180.0) -> dict:
+               rate: int = 1, max_seconds: float = 180.0, out_tokens=None) -> dict:
     """A synthetic GuideLLM 0.6.0 level bundle carrying the fields the layer reads.
 
     Counts are written in BOTH places real bundles carry them — `metrics.request_totals` and
     `metrics.<m>.{successful,errored,incomplete}.count` — so the test does not depend on which
     one the implementation happens to read.
+
+    `out_tokens` is `output_token_count.successful.mean`. Left unset it VARIES with the level
+    and the request count (see `_OUT_TOKENS_CYCLE`) rather than being pinned at 256.0, so a
+    fixture set never accidentally makes two independent rules agree. Pass it explicitly when
+    the value is what is under test (e.g. the A3 `no_output` zero-token serve).
     """
     total = successful + errored + incomplete
+    if out_tokens is None:
+        out_tokens = _OUT_TOKENS_CYCLE[(int(rate) * 3 + int(successful)) % len(_OUT_TOKENS_CYCLE)]
 
     def stat(mean, count):
         return {"mean": mean, "median": mean, "mode": mean, "variance": 0.0, "std_dev": 0.0,
@@ -275,7 +304,7 @@ def level_json(successful: int, errored: int = 0, incomplete: int = 0, tps: floa
                                    "incomplete": incomplete, "total": total},
                 "output_tokens_per_second": metric(tps),
                 "request_concurrency": metric(float(rate)),
-                "output_token_count": metric(256.0),
+                "output_token_count": metric(float(out_tokens)),
                 "prompt_token_count": metric(512.0),
                 "requests_per_second": metric(tps / 256.0 if tps else 0.0),
                 "request_latency": metric(1.0),
@@ -335,3 +364,55 @@ def run_python(script: Path, *args, cwd: Path | None = None):
 def _uv():
     from shutil import which
     return which("uv")
+
+
+# ── executing the real scripts (contract A8: "wiring tests EXECUTE the code path") ─────────────
+# A substring grep is not a test. `_needs("promote.sh", "void", "suspect")` passed on a comment
+# saying they were unhandled, and nothing asserted that bench.sh passed --node-profile, which is
+# why §4 was dead code on the primary bencher while the suite stayed 121/121 green.
+#
+# Everything below runs a REAL repo script inside a throwaway directory whose children (docker,
+# uv/guidellm, the adapter, the samplers) are logging stubs. No docker, no server, no guidellm,
+# no lm-eval, no GPU — contract §8.
+
+def run_bash(script: Path, *args, cwd: Path, env: dict | None = None, timeout: int = 120):
+    """Run a repo bash script with a controlled environment. Returns CompletedProcess."""
+    e = dict(os.environ)
+    e.setdefault("AHL_PYTHON", sys.executable)     # keep validity.sh off `uv` (and the network)
+    e.update(env or {})
+    return subprocess.run(["bash", str(script), *[str(a) for a in args]], cwd=str(cwd),
+                          capture_output=True, text=True, timeout=timeout, env=e)
+
+
+def cli_check(test: unittest.TestCase, bundle, levels, *, tps=None, node_profile=None,
+              model_gb=None, timeout: int = 60) -> dict:
+    """`validity.py check ...` as a subprocess — the path bench.sh actually executes.
+
+    Contract A10: the CLI and `assess_bundle()` must agree on the same evidence. They did not
+    (the CLI discovered stray level files, the library did not), and the comment in the code
+    stated the inverse of what the code did. Tests compare the two.
+    """
+    require_file(test, VALIDITY_PY, "F3 owns scripts/lib/validity.py")
+    argv = [sys.executable, str(VALIDITY_PY), "check", "--bundle", str(bundle),
+            "--levels", ",".join(str(x) for x in levels)]
+    if tps is not None:
+        argv += ["--tps", tps]
+    if node_profile is not None:
+        argv += ["--node-profile", str(node_profile)]
+    if model_gb is not None:
+        argv += ["--model-gb", str(model_gb)]
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    if proc.returncode != 0:
+        test.fail(f"validity.py check exited {proc.returncode}\nstdout: {proc.stdout}\n"
+                  f"stderr: {proc.stderr}")
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        test.fail(f"validity.py check did not print one JSON object; got {proc.stdout!r}")
+
+
+def read_tsv(path: Path) -> list[dict]:
+    """results.tsv -> list of dicts keyed by its own header row."""
+    import csv
+    with Path(path).open(newline="") as fh:
+        return list(csv.DictReader(fh, delimiter="\t"))
