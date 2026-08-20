@@ -196,3 +196,35 @@ The valid matched-L100 comparison passes cleanly.
 Follow-up: a matched *full* native baseline eval would make the full-recovery rigorous (optional).
 
 <!-- YYYYMMDD: what changed, tok/s effect, keep/discard, anomalies. Run drop_caches before each. -->
+
+## 20260820 — live-path validation of the measurement-validity layer (issue #1 §1)
+
+Not a tuning campaign. The validity layer (contract v1.2) was built and verified entirely against
+fixtures and retained bundles — **no agent was allowed near the GPU** — so this run exists to prove
+the live path works on real hardware. Config: the promoted `VLLM-23` final, unchanged.
+
+| run | knobs | result |
+|---|---|---|
+| `20260820-032057-chat` | `levels=1\|16, max_s=180` | c1 **41.26** / c16 **535.62**, `req_counts=c1:29/0/0;c16:368/15/0`, `validity=ok`, exit 0 |
+| `20260820-0321xx-chat` | `levels=1, max_s=20` (deliberate starvation) | c1 **63.34**, `c1:3/0/0`, `no_data@c1`, **status=void**, **exit 4** |
+| `20260820-032908-eval` | gsm8k, LIMIT=20 | gsm8k **90.0**, `samples=gsm8k=20/20`, `conc=16`, `validity=ok`, exit 0 |
+
+**The starvation run is the finding.** Same config, minutes apart: a 20-second stage drained 3
+requests and reported **63.34 tok/s — 54% above the 41.26 the healthy run measured**. Before this
+layer that row was written `status=measured` and was indistinguishable from a real result. It is
+now `void`, exit 4, with the counts printed at the moment it happened. That is §0 defect (a)
+reproduced live and caught.
+
+Corroboration that the numbers are real, not harness artefacts:
+- c1 = 41.26 against the 20260613 first-green-run reference of ≈42 (0.22.0) and 41.87 (the 0.23.0
+  full sweep) — three vLLM versions and two months apart, `min_ok=29` at c1 every time.
+- c16 = 535.62 vs the promoted header's recorded 563 — within this box's documented ~10%
+  cross-session c16 drift; c1 is the stable column and it matched to 1.5%.
+- `incomplete` at c16 was **15 = level − 1**, exactly the steady-state in-flight set that made
+  contract v1.2 A2's first form (`incomplete > level`) unsatisfiable. Measured again live.
+
+Consumers verified on these rows: `aggregate.py` hides the void row by default and shows it marked
+`x` with `min_ok=3` under `--include-void`. Gate 2 recorded `samples` and `conc`, neither of which
+existed before 20260820.
+
+Teardown clean: GPU back to 0% / 4 W, no `ahl-vllm` container left.
