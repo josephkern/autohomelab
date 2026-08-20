@@ -82,14 +82,18 @@ SRV_CMD="$(tr '\0' ' ' < "/proc/$SRV_PID/cmdline")"
 # DS4_DSPARK_SCHEDULER_*/DS4_DSPARK_EXEC_TIER/DS4_DSPARK_STATS/DS4_MTP_* and nohup inherits them.
 HOSTCFG_ENV_RE='^(DS4_DSPARK|DS4_MTP)'
 
-# ── config_hash — scheme `hp2` (scripts/lib/hostcfg.sh) ───────────────────────
+# ── config_hash — scheme `hp3` (scripts/lib/hostcfg.sh) ───────────────────────
 # The identity of a host-process config is not a file: `serve.sh` never runs and the
 # `.smoke-runbook.sh` stub the other gates hash carries no launcher settings, so every config of
 # this engine hashed to the same 8 digits. It is computed instead from what actually determines
 # the run — the served process's argv, the tuning env vars that never reach the cmdline, and the
-# engine build — with pid, host, port, log paths and directories normalised away and both argv
-# pairs and env sorted, so the SAME config re-serves to the SAME hash. The `hp2-` prefix versions
-# the scheme: rows written before this change keep bare 8-hex and are never re-interpreted.
+# RUNNING BINARY behind /proc/<pid>/exe (identified by content, not by `git -C <engine src> rev-parse`,
+# which is a claim about a directory rather than about the process) — with pid, host, port and log
+# destinations dropped, file values identified by content so a relocated GGUF is one config while
+# two same-named checkpoints are two, and items sorted, so the SAME config re-serves to the SAME
+# hash. `scripts/eval.sh` computes the identical value for the same process, so a Gate-2 row and a
+# Gate-3 row can be joined. The `hp3-` prefix versions the scheme: rows written before this change
+# keep bare 8-hex and are never re-interpreted.
 [ -f "$SCRIPT_DIR/lib/hostcfg.sh" ] || { echo "missing scripts/lib/hostcfg.sh" >&2; exit 1; }
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/hostcfg.sh"
