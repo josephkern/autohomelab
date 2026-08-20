@@ -41,6 +41,8 @@ from pathlib import Path
 LIB = "scripts/lib/validity.py"
 SHIM = "scripts/lib/validity.sh"
 BENCH = "scripts/bench.sh"
+BENCH_LLAMACPP = "scripts/bench_llamacpp.sh"
+RECONCILE = "scripts/reconcile_bundles.py"
 PROMOTE = "scripts/promote.sh"
 SUITE = "scripts/suite.sh"
 AGGREGATE = "scripts/aggregate.py"
@@ -254,6 +256,130 @@ mutation(
     "suite_maps_exit4_to_ok", SUITE,
     "§5: Gate 3 reports PASS on an invalid measurement.",
     [(r"4\)\s*_v=invalid ;;", "4)  _v=ok ;;")],
+)
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# INTERRUPT SAFETY — the mechanism that keeps evidence and the journal in agreement
+#
+# The first 26 mutations covered the validity library, bench.sh's validity wiring and the
+# consumers. None touched the trap, `SHAPE_IN_FLIGHT`, `emit_interrupted_row`, the stall-watchdog
+# or `reconcile_bundles.py` — so by A8's own standard ("a rule with no mutation that turns the
+# suite red is an untested rule") every one of those was untested, including the two HIGH defects
+# that a later verifier found by hand.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+mutation(
+    "traps_never_registered", BENCH,
+    "The whole mechanism: unregister the signal traps, so a Ctrl-C, a session limit or a "
+    "supervisor's `kill` ends the run with the bundle on disk and NO row referencing it — the "
+    "original hole, invisible to aggregate.py, to the audit and to every gate.",
+    [(r"trap 'on_signal INT' INT\ntrap 'on_signal TERM' TERM\ntrap 'on_signal HUP' HUP\n"
+      r"trap on_exit EXIT", "true")],
+)
+
+mutation(
+    "emit_row_flag_cleared_early", BENCH,
+    "F1, the defect that inverted the headline claim: make the FLAG the atomic unit again "
+    "instead of the WRITE. `SHAPE_IN_FLIGHT` comes down before the append and the critical "
+    "section stops deferring, so a signal at any of the six command boundaries inside emit_row "
+    "finds the flag already down — and a fully COMPLETED sweep leaves its bundle on disk with "
+    "nothing in the journal, while stderr says it is recording the partial shape.",
+    [(r"^  IR_CRITICAL=1$", "  IR_CRITICAL=1\n  SHAPE_IN_FLIGHT=0"),
+     (r"^  SHAPE_IN_FLIGHT=0                 # LAST statement[^\n]*\n", ""),
+     (r'  if \[ "\$IR_CRITICAL" = 1 \]; then IR_PENDING_SIG="\$sig"; return 0; fi',
+      '  if false; then IR_PENDING_SIG="$sig"; return 0; fi')],
+)
+
+mutation(
+    "critical_section_never_defers", BENCH,
+    "The half of F1 that survives on its own: stop deferring a signal that lands mid-append, so "
+    "the interrupted writer races the normal one and a COMPLETED sweep is journalled `suspect` "
+    "with an `interrupted(...)` note. The row exists, so a count-only test passes; what is lost "
+    "is a real measurement, permanently downgraded.",
+    [(r'  if \[ "\$IR_CRITICAL" = 1 \]; then IR_PENDING_SIG="\$sig"; return 0; fi',
+      '  if false; then IR_PENDING_SIG="$sig"; return 0; fi')],
+)
+
+mutation(
+    "level_in_foreground", BENCH,
+    "Run the GuideLLM level in the FOREGROUND instead of backgrounding it and `wait`ing. bash "
+    "defers a trap until the current foreground command finishes, so a targeted `kill -TERM` — a "
+    "session limit, a CI timeout, a supervisor — would not reach the handler until the level "
+    "ended or LEVEL_TIMEOUT expired, by which time the killer has followed up with SIGKILL and "
+    "the row is lost. Only a terminal Ctrl-C (which signals the whole group) ever worked.",
+    [(r'--output-path "\$json" \) >"\$bundle/level_c\$level\.log" 2>&1 &\n  IR_LEVEL_PID=\$!',
+      '--output-path "$json" ) >"$bundle/level_c$level.log" 2>&1\n  IR_LEVEL_PID=""'),
+     (r'  wait "\$IR_LEVEL_PID"\n  local rc=\$\?', "  local rc=$?")],
+)
+
+mutation(
+    "partial_row_claims_measured", BENCH,
+    "§6: the interrupted row reports the operator's status (`measured` by default). Since v1.2 "
+    "`measured` means 'the invariants passed' on a completed sweep, so a partial shape would be "
+    "citable — and `promote.sh` would happily promote on it.",
+    [(r'  status="suspect"; \[ "\$STATUS_FLOOR" = "void" \] && status="void"',
+      '  status="${STATUS:-measured}"')],
+)
+
+mutation(
+    "interrupted_row_erases_the_wedge", BENCH,
+    "F5: the interrupted writer stops honouring an already-detected crash, so a signal in the "
+    "~0.5 s between 'c$N hung' and the crash row replaces `status=crash` with `suspect`. The "
+    "wedge leaves this node's #43885 record silently — the mirror image of the phantom wedge the "
+    "rest of the mechanism exists to prevent.",
+    [(r'  if \[ "\$IR_CRASHED" = 1 \]; then\n    status="crash"', "  if false; then\n    status=\"crash\"")],
+)
+
+mutation(
+    "watchdog_not_reaped", BENCH,
+    "F2: the interrupt path stops reaping the stall-watchdog, orphaning it with PPID 1. It goes "
+    "on polling `docker logs ahl-vllm` every 15 s forever and eventually fires its kill at a "
+    "LATER run's GuideLLM, whose row then records `status=crash hang@cN` — a PHANTOM WEDGE in "
+    "the record that feeds research/upstream/vllm-43885-gb10-wedge.md.",
+    [(r'  \[ -n "\$IR_WATCHDOG_PID" \] && \{ ahl_kill_tree "\$IR_WATCHDOG_PID" TERM; \\\n'
+      r'                                 wait "\$IR_WATCHDOG_PID" 2>/dev/null \|\| true; IR_WATCHDOG_PID=""; \}',
+      "  true")],
+)
+
+mutation(
+    "watchdog_kill_unscoped", BENCH,
+    "F2's other half: the watchdog reaps by PATTERN again (`pkill -f 'guidellm benchmark run'`) "
+    "instead of by the pid it was given. This box is shared; a pattern kill reaps whatever else "
+    "is benchmarking, and the victim's run records the wedge.",
+    [(r'        ahl_kill_tree "\$victim" TERM',
+      "        pkill -f 'guidellm benchmark run' 2>/dev/null || true")],
+)
+
+mutation(
+    "handler_disarms_itself", BENCH,
+    "F6: the handler restores the DEFAULT disposition instead of ignoring further signals while "
+    "it records. A supervisor escalating in that window — SIGINT then SIGTERM, or SIGTERM twice, "
+    "ordinary process-manager behaviour — kills the script with the row unwritten.",
+    [(r"  trap '' INT TERM HUP  ", "  trap - INT TERM HUP  ")],
+)
+
+mutation(
+    "host_bencher_has_no_trap", BENCH_LLAMACPP,
+    "F4: the fix covers 1 of 3 benchers again. The orphan bundle that motivated the whole "
+    "mechanism (`20260809-184015-chat`) sits between two rows BOTH written by this script.",
+    [(r"trap 'on_signal INT' INT\ntrap 'on_signal TERM' TERM\ntrap 'on_signal HUP' HUP\n"
+      r"trap on_exit EXIT", "true")],
+)
+
+mutation(
+    "reconcile_eval_scope_narrowed", RECONCILE,
+    "F7: a non-throughput bundle is reconstructed into results.tsv. `-eval-<task>` and `-private` "
+    "run-ids belong to accuracy.tsv and to Gate 2's rules, which are not these rules.",
+    [(r"NON_THROUGHPUT_KINDS = frozenset\(\{[^}]*\}\)", "NON_THROUGHPUT_KINDS = frozenset()")],
+)
+
+mutation(
+    "reconcile_affirms_a_level_it_cannot_show", RECONCILE,
+    "F7: drop the guard, so a bundle whose only evidence is off the five fixed tps columns (a "
+    "hand-run `--rate 7`) grades `validity=ok` beside five `na` cells — an affirmative "
+    "'the invariants passed' over a number the row does not contain (A5, read backwards).",
+    [(r"    if not bundle\.on_grid:\n[^\n]*\n        validity, req_counts, status = NA, NA, STATUS_SUSPECT",
+      "    if False:\n        validity, req_counts, status = NA, NA, STATUS_SUSPECT")],
 )
 
 

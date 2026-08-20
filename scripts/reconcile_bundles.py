@@ -45,8 +45,13 @@ Safety
 * A bundle modified within `--min-age` seconds (default 1800) is treated as IN FLIGHT and left
   alone: a bench may be running right now, and its row is not late, it is pending.
 * Bundles are read-only evidence. Nothing is written inside one, not even a scratch file.
-* `-eval` bundles belong to `accuracy.tsv` and Gate 2 (`scripts/eval_validity.py`), whose rules
-  are not these rules. They are reported under their own heading and never reconstructed here.
+* Non-throughput bundles belong to other journals and other rules: `-eval` (and `-eval-<task>`) to
+  `accuracy.tsv` and Gate 2 (`scripts/eval_validity.py`), `-private` to the held-out set, and the
+  tier-3 runners' own suffixes. They are matched on the FIRST token of the run_id suffix, reported
+  under their own heading, and never reconstructed into the throughput journal.
+* A row only ever carries a verdict over levels it has a cell for. `results.tsv` has five tps
+  columns; evidence at any other level (a hand-run `--rate 7`) is named in the notes and left
+  unscored, because `validity=ok` beside five `na` cells asserts something the row cannot show.
 
 Exit codes (repo ladder 3 > 4 > 1 > 0): 4 = recoverable orphans found and not yet written;
 1 = an error; 0 = nothing to do, or the write succeeded.
@@ -80,7 +85,28 @@ DEFAULT_MIN_AGE = 1800          # seconds; a bundle younger than this may still 
 
 _LEVEL_FILE = re.compile(r"^level_c(\d+)\.json$")
 _LEVEL_LOG = re.compile(r"^level_c(\d+)\.log$")
-_RUN_ID = re.compile(r"^\d{8}-\d{6}-(?P<shape>[A-Za-z0-9_]+)$")
+# A run_id suffix may contain hyphens. `[A-Za-z0-9_]+` did not match `20260101-000000-eval-mmlu`
+# at all, so the whole id failed to parse, the `shape == "eval"` test could not fire, and the
+# bundle would have been reconstructed into the THROUGHPUT journal with `shape=na`. Custom
+# `bench.sh <runbook> <shape>` names can carry hyphens too.
+_RUN_ID = re.compile(r"^\d{8}-\d{6}-(?P<shape>[A-Za-z0-9_][A-Za-z0-9_.-]*)$")
+
+# Suffixes that belong to a DIFFERENT journal and a different rule set. Matched on the FIRST
+# hyphen-separated token of the suffix, so `-eval-mmlu` is as much Gate 2 as `-eval` is.
+# `eval_private.sh` writes `-private`, and the three tier-3 runners write `-livebench` / `-bfcl` /
+# `-lcb`; none of them is a throughput sweep. They are safe today only because their bundles hold
+# no `level_c*.json` — but `--include-empty` exists and would write them into results.tsv.
+NON_THROUGHPUT_KINDS = frozenset({"eval", "private", "livebench", "bfcl", "lcb"})
+
+# The five fixed tps_c* columns of contract §2. A bundle can hold a `level_c7.json`; the row has
+# nowhere to put its number, so the row must not carry an affirmative verdict over it.
+CANONICAL_LEVELS = (1, 4, 8, 16, 32)
+
+
+def run_kind(run_id: str) -> str:
+    """The first token of a run_id's suffix: `chat`, `coder`, `eval`, `private`, ... or ``."""
+    m = _RUN_ID.match(run_id)
+    return m.group("shape").split("-")[0] if m else ""
 
 # The provenance a bundle cannot carry. Named in the row's `notes` so the `na`s are explained
 # rather than merely present.
@@ -108,6 +134,11 @@ class Bundle:
         # node looks like a clean two-level sweep until you notice its `level_c32.log`.)
         self.started_only = sorted(
             {int(m.group(1)) for m in (_LEVEL_LOG.match(n) for n in names) if m} - set(self.levels))
+        # A level outside the five fixed columns (a hand-run `--rate 7`) has real evidence and no
+        # cell to put it in. Kept separate so the row can say so instead of scoring a number it
+        # does not contain.
+        self.off_grid = [x for x in self.levels if x not in CANONICAL_LEVELS]
+        self.on_grid = [x for x in self.levels if x in CANONICAL_LEVELS]
 
     @property
     def run_id(self) -> str:
@@ -188,10 +219,9 @@ def scan(results_dir: Path, min_age: float) -> list:
             if name in bench_refs:
                 found.append(Bundle(path, journal, "referenced"))
                 continue
-            m = _RUN_ID.match(name)
-            shape = m.group("shape") if m else ""
-            if name in eval_refs or shape == "eval":
-                # Gate 2's tree. Different journal, different rules (scripts/eval_validity.py).
+            if name in eval_refs or run_kind(name) in NON_THROUGHPUT_KINDS:
+                # Gate 2's tree (or a tier-3 runner's). Different journal, different rules
+                # (scripts/eval_validity.py) — never reconstructed into results.tsv from here.
                 kind = "eval" if name in eval_refs else "eval_orphan"
                 found.append(Bundle(path, journal, kind))
                 continue
@@ -270,10 +300,19 @@ def reconstruct(bundle: Bundle, results_dir: Path, node_profile: Path | None) ->
     """
     meta = _meta(bundle)
     model_dir = bundle.path.parent.parent
-    a = assess_bundle(bundle.path, bundle.levels, None,
+    # SCORE ONLY WHAT THE ROW CAN CARRY. `results.tsv` has five tps cells (c1/c4/c8/c16/c32), so a
+    # bundle holding `level_c7.json` produced a number with nowhere to go. Assessing it anyway put
+    # `validity=ok` on a row whose every `tps_c*` reads `na` — an affirmative "the invariants
+    # passed" over a measurement the row does not contain, which is contract A5's "`na` is never
+    # `ok`" read backwards. Off-grid levels are named in the notes instead.
+    a = assess_bundle(bundle.path, bundle.on_grid, None,
                       node_profile=str(node_profile) if node_profile else None,
                       discover=True)
     status = STATUS_VOID if a.status_floor == STATUS_VOID else STATUS_SUSPECT
+    validity, req_counts = a.validity, a.req_counts
+    if not bundle.on_grid:
+        # Nothing the row can show. `na` = "the rules could not be evaluated", never `ok`.
+        validity, req_counts, status = NA, NA, STATUS_SUSPECT
 
     tps = {lvl: _fmt_tps(getattr(c, "tps", None)) for lvl, c in a.levels.items()}
     knobs = format_knobs({
@@ -290,9 +329,12 @@ def reconstruct(bundle: Bundle, results_dir: Path, node_profile: Path | None) ->
     today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d")
     started = ("; level(s) started but left no JSON, so the sweep did not finish: %s"
                % ",".join("c%d" % x for x in bundle.started_only)) if bundle.started_only else ""
+    offgrid = ("; level(s) outside the five fixed tps_c* columns, so this row has no cell for them "
+               "and states no verdict over them: %s"
+               % ",".join("c%d" % x for x in bundle.off_grid)) if bundle.off_grid else ""
     notes = ("RECONSTRUCTED %s by scripts/reconcile_bundles.py from the retained bundle; "
-             "no results.tsv row referenced it%s. Not recoverable from a bundle: %s."
-             % (today, started, ", ".join(UNRECOVERABLE)))
+             "no results.tsv row referenced it%s%s. Not recoverable from a bundle: %s."
+             % (today, started, offgrid, ", ".join(UNRECOVERABLE)))
 
     row = {c: NA for c in RESULTS_COLS}
     row.update({
@@ -304,8 +346,8 @@ def reconstruct(bundle: Bundle, results_dir: Path, node_profile: Path | None) ->
         "seed": _num(meta.get("seed")),
         "tps_c1": tps.get(1, NA), "tps_c4": tps.get(4, NA), "tps_c8": tps.get(8, NA),
         "tps_c16": tps.get(16, NA), "tps_c32": tps.get(32, NA),
-        "req_counts": a.req_counts,
-        "validity": a.validity,
+        "req_counts": req_counts,
+        "validity": validity,
         "knobs": knobs,
         "status": status,
         "notes": notes,
