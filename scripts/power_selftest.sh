@@ -60,6 +60,25 @@ expect_rc() {
   if [ "$rc" = "$want" ]; then ok "$what"; else bad "$what" "exit $rc, wanted $want"; fi
 }
 
+# refusal: the wanted exit code AND a reason on STDERR, with no traceback. A ZeroDivisionError
+# also exits non-zero, so "it failed" is not the assertion -- "it refused, and said why" is.
+expect_refusal() {
+  local what="$1" want="$2" re="$3"; shift 3
+  local err rc=0
+  err="$($PY "$POWER" "$@" 2>&1 >/dev/null)" || rc=$?
+  if [ "$rc" != "$want" ]; then bad "$what" "exit $rc, wanted $want"; return; fi
+  if printf '%s' "$err" | grep -q 'Traceback (most recent call last)'; then
+    bad "$what" "crashed instead of refusing: $(printf '%s' "$err" | tail -1)"; return
+  fi
+  if printf '%s' "$err" | $PY -c '
+import re,sys
+sys.exit(0 if re.search(sys.argv[1], sys.stdin.read(), re.S) else 1)' "$re"; then
+    ok "$what"
+  else
+    bad "$what" "stderr did not match /$re/: $(printf '%s' "$err" | tr '\n' '|' | cut -c1-200)"
+  fi
+}
+
 # assert a numeric field of --json output, via a tiny stdlib reader
 expect_json() {
   local what="$1" path="$2" want="$3" tol="$4"; shift 4
@@ -128,8 +147,31 @@ expect_match "estimator is a median of N, not a mean" \
   'estimator SD +0\.6698 x sigma' \
   throughput --level c16 --reps 3
 expect_match "power at the KEEP threshold is 50%" \
-  'power at \+3\.0% +50\.0%' \
+  'power AT the threshold \(\+3\.00%\) +50\.0%' \
   throughput --level c16 --reps 3 --threshold 3
+
+# BUG A6: the two power lines used to share the label "power at +3.0%" and could carry
+# DIFFERENT values under it (threshold 3.00 vs true effect 3.04, both formatted %.1f).
+expect_match "the two power lines are distinguishable, not two 'power at +3.0%' rows" \
+  'power AT the threshold \(\+3\.00%\) +50\.0%.*?power at the true effect \(\+3\.04%\) +50\.7%' \
+  throughput --level c16 --reps 3 --threshold 3.0 --delta 3.04
+
+# --- the warm-up bias is a BIAS, and --drop-first makes that reproducible with the tool ------
+# The first bench of an experiment runs ~1.2% slow at c16; it inflates every bracket's CV and
+# therefore every published MDE. This is the largest single improvement available to Gate 3 and
+# it costs no GPU time, so it has to be checkable, not just asserted in a document.
+expect_match "c16 pooled CV is 2.25% as-is" 'pooled CV 2\.25%' throughput --level c16
+expect_match "c16 pooled CV is 1.55% with the first bench dropped" \
+  'FIRST BENCH DROPPED.*pooled CV 1\.55%' throughput --level c16 --drop-first
+expect_match "variance says loudly when it is dropping the first bench" \
+  'FIRST BENCH OF EACH BRACKET DROPPED' variance --drop-first
+expect_json "dropping the first bench lowers the c16 MDE below 5%" mde_pct 4.17 0.05 \
+  throughput --level c16 --drop-first
+# per-model: the two models whose CV is almost entirely warm-up
+expect_json "Qwen3-8B c16 CV 3.05% -> 0.49% with the first bench dropped" cv 0.0049 0.0002 \
+  throughput --level c16 --model RedHatAI/Qwen3-8B-NVFP4 --min-brackets 5 --drop-first
+expect_json "VibeThinker c16 CV 3.09% -> 0.11%" cv 0.0011 0.0002 \
+  throughput --level c16 --model WeiboAI/VibeThinker-3B --min-brackets 3 --drop-first
 
 # --- refuses to invent a number where the repo has no replicates ----------------------------
 expect_rc "c32 has no replicate brackets -> exit 4, no number" 4 throughput --level c32
@@ -141,7 +183,63 @@ expect_match "with an explicit --cv it will plan for c32 anyway" \
 # --- a thin per-model filter falls back and SAYS SO ------------------------------------------
 expect_match "thin model filter falls back loudly" \
   'FELL BACK' \
-  throughput --level c16 --model VibeThinker --min-brackets 40
+  throughput --level c16 --model WeiboAI/VibeThinker-3B --min-brackets 40
+
+# --- BUG A2: --model is an EXACT, org-qualified match, not a substring -----------------------
+# `Qwen3.6-35B-A3B-NVFP4` without the org also matched unsloth/...-Fast, silently pooling two
+# models into one "per-model" variance estimate: 12 brackets / 0.61% instead of 11 / 0.58%.
+expect_match "exact --model gives the 35B its own 11 brackets at 0.58%" \
+  'pooled CV 0\.58%.*over 11 brackets' \
+  throughput --level c16 --model RedHatAI/Qwen3.6-35B-A3B-NVFP4 --min-brackets 5
+expect_refusal "an org-less model name is refused, not silently pooled with another org" 2 \
+  'matches no row.*EXACT, org-qualified' \
+  throughput --level c16 --model Qwen3.6-35B-A3B-NVFP4 --min-brackets 5
+# the worst case of the old semantics: a substring shared by nine models pooled all of them
+# into one "per-model" CV and reported it as if it belonged to one model.
+expect_refusal "a bare quant suffix ('NVFP4') no longer pools nine models into one estimate" 2 \
+  'matches no row' throughput --level c16 --model NVFP4
+expect_refusal "keep-rule refuses an unknown --model too" 2 'matches no row' \
+  keep-rule --model Qwen3.6-35B-A3B-NVFP4
+expect_refusal "variance refuses an unknown --model too" 2 'matches no row' \
+  variance --model Qwen3.6-35B-A3B-NVFP4
+
+# --- BUG A3/A4: legitimate edge inputs answer; nonsense inputs REFUSE ------------------------
+# p=0 is a real observation (think-off zero-token gsm8k=0.0) but a degenerate proportion.
+expect_refusal "accuracy --p 0 refuses with a reason (was: ZeroDivisionError)" 2 \
+  'degenerate proportion' accuracy --task gsm8k --limit 100 --p 0
+expect_refusal "accuracy --p 1 refuses with a reason" 2 \
+  'degenerate proportion' accuracy --task gsm8k --limit 100 --p 1
+# cv=0 happens whenever two benches match exactly: ANSWER, in the zero-spread limit, with a
+# caveat that a k=3 CV estimate of 0 is not evidence of a noiseless box.
+expect_match "throughput --cv 0 answers in the zero-spread limit (was: ZeroDivisionError)" \
+  'CV IS EXACTLY ZERO.*false-keep' throughput --level c16 --cv 0
+expect_json "throughput --cv 0: false-keep is exactly 0" false_keep_prob 0 0 \
+  throughput --level c16 --cv 0
+expect_refusal "throughput --cv -5 refuses (was: a full report from |log1p(-.05)|)" 2 \
+  'cannot be negative' throughput --level c16 --cv -5
+expect_refusal "mcnemar --n below b+c refuses (was: psi = 3.3333, MDE 206.60 points)" 2 \
+  'smaller than the 10 discordant pairs' mcnemar --b 5 --c 5 --n 3
+expect_refusal "mcnemar with no pairs at all refuses (was: psi = nan)" 2 \
+  'no pairs' mcnemar --b 0 --c 0
+expect_refusal "mcnemar rejects negative counts" 2 'cannot be negative' mcnemar --b -1 --c 2
+expect_refusal "accuracy rejects an out-of-range --discordance" 2 'fraction of items' \
+  accuracy --task mmlu --limit 100 --discordance 1.5
+expect_refusal "accuracy rejects a non-positive --delta" 2 'must be positive' \
+  accuracy --task mmlu --limit 100 --delta 0
+expect_refusal "throughput rejects an out-of-range --power" 2 'must be in .0,1.' \
+  throughput --level c16 --cv 2 --power 1.0
+# b=c=0 with a real n IS legitimate: two configs that agree on every item.
+expect_match "mcnemar b=c=0 at a real n reports psi=0 and says the MDE is undefined" \
+  'psi = 0\.0000.*MDE at this n/psi  undefined' mcnemar --b 0 --c 0 --n 5700
+
+# --- BUG A5: a silently repaired psi must be SAID, not printed as the user's psi -------------
+expect_match "psi<delta repair is announced beside the user's psi" \
+  'psi = 0\.020.*psi RAISED to 0\.050' \
+  accuracy --task mmlu --limit 100 --delta 5.0 --discordance 0.02
+expect_json "the repair is in --json too" paired.discordance_repaired 1 0 \
+  accuracy --task mmlu --limit 100 --delta 5.0 --discordance 0.02
+expect_json "psi is NOT repaired when delta <= psi" paired.discordance_repaired 0 0 \
+  accuracy --task mmlu --limit 100 --delta 1.0 --discordance 0.02
 
 # --- exact McNemar, hand-computable: b=8,c=2 -> 2*P(X<=2|10,.5) = 112/1024 = 0.109375 --------
 expect_json "exact McNemar p(b=8,c=2) = 0.109375" exact_p 0.109375 1e-9 mcnemar --b 8 --c 2
@@ -152,6 +250,62 @@ expect_json "exact McNemar p(b=30,c=5) = 2*384168/2^35" exact_p 2.2361520678e-05
 expect_json "McNemar discordance psi = (b+c)/n" discordance 0.035 1e-12 \
   mcnemar --b 30 --c 5 --n 1000
 
+# --- BUG A1: --log_samples is ONE FILE PER LEAF and doc_id restarts at 0 in every one --------
+# lm-eval writes samples_<leaf>_<timestamp>.jsonl per LEAF subtask, so mmlu@100 is 57 files a
+# side. Keying on doc_id alone made every leaf overwrite the last: a 2-leaf x 5-doc input
+# reported "pairs 5", and on a real run it would report n=100 while the operator believed
+# n=5,700. The fixtures below are that exact shape.
+FIX="$(mktemp -d)"
+trap 'rm -rf "$FIX"' EXIT
+$PY - "$FIX" <<'EOF'
+import json,os,sys
+S=sys.argv[1]; TS="_2026-08-20T01-02-03.000000.jsonl"
+for side in ("A","B"): os.makedirs(os.path.join(S,side))
+def w(p,recs):
+    with open(p,"w") as f:
+        for r in recs: f.write(json.dumps(r)+"\n")
+# doc_id restarts at 0 in BOTH leaves -- that is the whole point
+w(os.path.join(S,"A","samples_mmlu_abstract_algebra"+TS), [{"doc_id":i,"acc":1.0} for i in range(5)])
+w(os.path.join(S,"A","samples_mmlu_anatomy"+TS),          [{"doc_id":i,"acc":1.0} for i in range(5)])
+w(os.path.join(S,"B","samples_mmlu_abstract_algebra"+TS), [{"doc_id":i,"acc":0.0 if i==0 else 1.0} for i in range(5)])
+w(os.path.join(S,"B","samples_mmlu_anatomy"+TS),          [{"doc_id":i,"acc":0.0 if i<2 else 1.0} for i in range(5)])
+# side B missing a leaf, to prove the tool refuses to intersect silently
+w(os.path.join(S,"B_short"+TS), [{"doc_id":i,"acc":1.0} for i in range(5)])
+# what an operator does today to satisfy a two-file CLI: cat the leaves together
+for side in ("A","B"):
+    with open(os.path.join(S,side+"_cat.jsonl"),"w") as f:
+        for leaf in ("abstract_algebra","anatomy"):
+            f.write(open(os.path.join(S,side,"samples_mmlu_"+leaf+TS)).read())
+EOF
+A1="$FIX/A/samples_mmlu_abstract_algebra_2026-08-20T01-02-03.000000.jsonl"
+A2="$FIX/A/samples_mmlu_anatomy_2026-08-20T01-02-03.000000.jsonl"
+B1="$FIX/B/samples_mmlu_abstract_algebra_2026-08-20T01-02-03.000000.jsonl"
+B2="$FIX/B/samples_mmlu_anatomy_2026-08-20T01-02-03.000000.jsonl"
+
+expect_json "N files per side: 2 leaves x 5 docs = 10 pairs, not 5" n 10 0 \
+  mcnemar --samples-a "$A1" "$A2" --samples-b "$B1" "$B2"
+expect_json "the discordant count survives the second leaf (b=3, not 2)" b 3 0 \
+  mcnemar --samples-a "$A1" "$A2" --samples-b "$B1" "$B2"
+expect_match "it names the leaf tasks it pooled" \
+  'over 2 leaf task\(s\): mmlu_abstract_algebra, mmlu_anatomy' \
+  mcnemar --samples-a "$A1" "$A2" --samples-b "$B1" "$B2"
+expect_json "one leaf on its own is still 5 pairs" n 5 0 \
+  mcnemar --samples-a "$A1" --samples-b "$B1"
+expect_json "the legacy two-file --samples form still works" n 5 0 \
+  mcnemar --samples "$A1" "$B1"
+# a hand-concatenated file is a duplicate-key error, not a quietly halved n
+expect_refusal "hand-concatenated leaves are refused, not silently deduplicated" 2 \
+  'duplicate \(task, doc_id\)' \
+  mcnemar --samples-a "$FIX/A_cat.jsonl" --samples-b "$FIX/B_cat.jsonl"
+# BUG A6: mismatched sides used to intersect in silence
+expect_refusal "mismatched sides refuse rather than intersecting silently" 2 \
+  'do not cover the same items' \
+  mcnemar --samples-a "$A1" "$A2" --samples-b "$B1"
+expect_json "--allow-partial tests the shared items and says how many" n 5 0 \
+  mcnemar --allow-partial --samples-a "$A1" "$A2" --samples-b "$B1"
+expect_match "--allow-partial prints a PARTIAL banner" '!! PARTIAL +5 item\(s\) only in A' \
+  mcnemar --allow-partial --samples-a "$A1" "$A2" --samples-b "$B1"
+
 # --- keep-rule and variance render against the live journals ---------------------------------
 expect_match "keep-rule scores both levels" 'c16 +pooled CV' keep-rule
 expect_match "keep-rule states the 50% property" 'fires\s*$|about half the time' keep-rule
@@ -160,15 +314,29 @@ expect_match "variance names the accuracy bracket shortage" \
 expect_match "variance reports cross-day scope" 'cross +c1' variance
 
 # --- `seed` needs the raw bundles, which are gitignored. Skip loudly, never silently. --------
-BUNDLE="$(find "$REPO_ROOT/results" -path '*/data/*-chat/level_c1.json' -print -quit 2>/dev/null || true)"
+# A worktree has no bundles even when the main checkout does, so allow an explicit override:
+#   AHL_POWER_DATA_ROOT=/path/to/checkout-with-results bash scripts/power_selftest.sh
+DATA_ROOT="${AHL_POWER_DATA_ROOT:-$REPO_ROOT}"
+BUNDLE="$(find "$DATA_ROOT/results" -path '*/data/*-chat/level_c1.json' -print -quit 2>/dev/null || true)"
 if [ -n "$BUNDLE" ]; then
   expect_match "seed: reports both variance components and the c16 projection" \
-    'workload SD.*?c16 projection' seed --boot 40
+    'workload SD.*?c16 projection' --root "$DATA_ROOT" seed --boot 40
   expect_json "seed: ragged-tail residual is small but nonzero" ragged_tail_cv 0.0012 0.0012 \
-    seed --boot 40
+    --root "$DATA_ROOT" seed --boot 40
+  # the three caveats item 12 of the audit asked for, asserted rather than promised
+  expect_match "seed: says its bootstrap statistic is NOT the estimator the journal records" \
+    "bootstrap statistic is sum\(tokens\)/sum\(latency\).*token-level mean" \
+    --root "$DATA_ROOT" seed --boot 40
+  expect_match "seed: says a time-limited stage makes n random, which a fixed-n bootstrap misses" \
+    'TIME-limited.*fixed-n bootstrap' --root "$DATA_ROOT" seed --boot 40
+  expect_match "seed: quotes the ragged tail over the WIDE 60-100% window too" \
+    'ragged-tail residual   85-100%.*60-100%' --root "$DATA_ROOT" seed --boot 40
+  expect_match "seed: labels the pooled band MIXED BASIS instead of implying like-for-like" \
+    'planning \(MIXED BASIS\).*MIXED BASIS and is an upper band' \
+    --root "$DATA_ROOT" seed --boot 40
 else
-  echo "  skip seed (raw bundles are gitignored and absent under $REPO_ROOT/results;"
-  echo "             re-run as: scripts/power.py --root <checkout-with-data> seed)"
+  echo "  skip seed (raw bundles are gitignored and absent under $DATA_ROOT/results;"
+  echo "             re-run as: AHL_POWER_DATA_ROOT=<checkout-with-data> bash \$0)"
 fi
 
 # --- json mode is valid json for every subcommand that has one -------------------------------
