@@ -1,16 +1,40 @@
 # Statistical power of the two gates — what the repo's own record says
 
-**Status:** analysis + one recommendation, for adjudication. Nothing in `eval.sh`,
-`run_experiment.sh`, `AGENTS.md`, `program.md` or `docs/validity-contract.md` is changed by this
-document. Companion tool: **`scripts/power.py`** (acceptance gate `scripts/power_selftest.sh`,
-**56 numeric self-checks + 35 CLI checks**, hermetic — no GPU, no network, no lm-eval).
+**Status:** analysis, for adjudication. Nothing in `eval.sh`, `run_experiment.sh`, `AGENTS.md`,
+`program.md` or `docs/validity-contract.md` is changed by this document. Companion tool:
+**`scripts/power.py`** (acceptance gate `scripts/power_selftest.sh`, **68 numeric self-checks +
+77 CLI checks**, hermetic — no GPU, no network, no lm-eval).
+
+> **REVISION 20260820-b — read this before citing anything below.** An independent audit
+> re-derived every number in the first version of this document from the raw journals. The
+> **core arithmetic survived** (`--limit` is per leaf subtask; `mmlu@100` is n=5,700 with
+> SE 0.509 against lm-eval's own recorded 0.489; every reference value in `power.py` re-checked).
+> **Six defects in `power.py` and eight in this document did not**, and one of them was fatal to
+> the original recommendation:
+>
+> * §7's proposed gate contained a **p-value clause that would reject a config compared against
+>   itself** — it is **RETRACTED**. §7 is rewritten around what the evidence supports.
+> * §2's three-image clustering was wrong: the 81.72 row is **0.24.0, not 0.25.0**. The 0.25.0
+>   "cluster" is a single run. The step is **+4.158 pt**, and **"8.5σ" is not reproducible**.
+> * §3.1's *"the corpus contains ZERO cross-session same-config `mmlu` replicates"* was **false**,
+>   because `config_hash` hashes runbook **comments**. Comment-stripped there are **3** such
+>   brackets, spread **0.04 / 0.59 / 0.93 pt**.
+> * §4.3's warm-up effect is **two campaigns, not a global law** — and discarding bench #1 is
+>   the **largest free improvement available to Gate 3**, which the original missed (§4.5).
+> * §4.4's per-model MDE **governs only 34 of the 55 deltas** it was applied to.
+>
+> Every corrected figure below is re-derived from the committed journals; where the audit's
+> number and mine differ, both are shown. `power.py`'s bugs are fixed and each has a selftest
+> case that fails without the fix.
 
 Scope: issue #1 §2, and the two open follow-ups
 *"`LIMIT=100` accuracy noise (±4–5 pts) is WIDER than the KEEP rule's ~1% tolerance"* and
 *"mmlu `LIMIT=100` drifts ~1 pt across sessions on IDENTICAL config+image"*.
 
-Evidence base: **317 `results.tsv` rows**, **77 `accuracy.tsv` rows**, **79 retained lm-eval
-bundles** and **295 retained GuideLLM chat bundles**, across 15 campaigns on `gb10-1988a9714b4e`.
+Evidence base: **317 `results.tsv` rows**, **79 `accuracy.tsv` rows**, **81 retained lm-eval
+bundles** (directories with a `results_*.json`; 104 `*-eval` directories exist) and **295 retained
+GuideLLM chat bundles**, across 15 campaigns on `gb10-1988a9714b4e`. *(The first version said 77
+and 79; both were undercounts.)*
 
 ---
 
@@ -19,22 +43,29 @@ bundles** and **295 retained GuideLLM chat bundles**, across 15 campaigns on `gb
 | question | answer |
 |---|---|
 | Is the quality gate “4× too noisy” for its 1% rule? | **Not 4× for either task, and the follow-up's arithmetic is wrong for the one that matters.** `gsm8k@100` really is n=100 — and is **14×** too noisy (MDE 14.08 pt), not 4×. `mmlu@100` is **n=5,700, not 100** (57 leaves), MDE 2.06 pt — **2×**. |
-| What n does the KEEP rule as written (1 point, α .05, power .80) need? | **23,667 items per arm unpaired** — more than `mmlu` *has* (14,042). **1,567–7,847 pairs** if the comparison is paired at the item level (ψ = 0.02–0.10). `mmlu@LIMIT=100` already supplies 5,700. |
-| So is the 1% clause achievable? | **Only as a paired test, and only on a grouped task.** Unpaired it is unachievable at any limit the lab can afford — *including* `mmlu@full`. Paired on `mmlu@100` the MDE is **0.52–1.17 points**, and that run is **already being made** by `eval.sh general`; the decision just cites the `gsm8k` number beside it instead. |
-| Is the throughput gate underpowered? | **Not underpowered — uncalibrated.** Globally, pooled CV c16 2.25% gives an N=3 MDE of 6.09% and an 8.1% false-keep rate. But CV is a *per-model* property spanning **0.58% (35B) to 3.37% (120B Nemotron)**, i.e. MDE 1.54% to 9.19%. Judged against its own model's spread, exactly **1 of 55** historical candidate deltas is unsupported. |
-| What does `AHL_SEED=42` buy? | Verified real (identical prompt/budget sequences across runs and across days). Worth **~1.6× on the SD ≈ 2.5 benchmark repetitions at c1**, and **~1.01× — nothing — at c16**, which is the tuned objective. |
-| Side-finding that decides the cost | AGENTS.md states *"Speculative decoding ⊥ loglikelihood"* as universal. **Eight `mmlu@100` rows in the journal, all `5700/5700 validity=ok`, come from MTP configs** across three vLLM versions. The constraint is per-model, not per-feature — probe it (`TASKS=mmlu LIMIT=2`) rather than assume it. |
+| So how precise is `mmlu@100` in practice? | Its *binomial* SE is 0.509 pt. Its **measured same-config repeat spread is larger**: three brackets moved 0.04, 0.59 and 0.93 pt, a repeat-difference SD of **≈0.64 pt** (§3.1). Binomial theory is a floor, not the answer. |
+| What n does the KEEP rule as written (1 point, α .05, power .80) need? | **23,668 items per arm unpaired** — more than `mmlu` *has* (14,042). **1,568–7,848 pairs** paired at the item level (ψ = 0.02–0.10). *(The first version said 23,667/1,567; the tool ceilings.)* |
+| So is the 1% clause achievable? | **Not yet, and not by pairing alone.** Unpaired it is unachievable at any limit the lab can afford, *including* `mmlu@full`. Paired the *nominal* MDE is 0.52–1.17 pt — but a **~0.64 pt uncalibrated session term sits underneath it** (§3.1), so that MDE is not reachable today. What is defensible now is a **tolerance band equal to the observed same-config spread: ~0.6 pt typical, ~0.9 pt seen** (§7). |
+| Is the throughput gate underpowered? | **Not underpowered — uncalibrated, and inflated by a bias it does not model.** Pooled c16 CV is 2.25%; **discarding the first bench of each bracket takes it to 1.55%** (MDE 6.09% → 4.18%) at zero GPU cost (§4.5). CV is also a per-model property spanning 0.58% to 3.37%. |
+| How many historical calls does that change? | Against each model's own **warm-up-corrected** spread, **0 of 55** candidate deltas are unsupported (was 1 of 55). But **21 of the 55 are not same-day comparisons and 6 are cross-image**, and under the variance that actually governs those, four defended 35B deltas flip to unsupported (§4.4). |
+| What does `AHL_SEED=42` buy? | Verified real (identical prompt/budget sequences across runs and days). Worth **2.3–2.6× the replicates at c1** — read as "a couple" — and **~1.01×, nothing, at c16**, which is the tuned objective. Caveats in §5. |
+| Side-finding that decides the cost | AGENTS.md states *"Speculative decoding ⊥ loglikelihood"* as universal. **Eleven `mmlu@100` rows across three models, all `5700/5700 validity=ok`, come from MTP configs.** The constraint is per-model, not per-feature — probe it (`TASKS=mmlu LIMIT=2`). |
 | Is "matched-pair same-session" actually followed? | **63%.** 17 of 27 tuned-candidate quality measurements have a same-day, same-task comparator; 10 do not — including the `kvfp8` runs, the exact numeric-risky class the clause exists for. |
 
 Reproduce every number below with:
 
 ```bash
-scripts/power.py variance
+scripts/power.py variance                 # and: variance --drop-first
 scripts/power.py keep-rule
 scripts/power.py accuracy --task mmlu --limit 100 --delta 1.0 --discordance 0.02
+scripts/power.py throughput --level c16 --model RedHatAI/Qwen3.6-35B-A3B-NVFP4
 scripts/power.py --root <checkout-with-results/**/data> seed
-bash scripts/power_selftest.sh
+AHL_POWER_DATA_ROOT=<same checkout> bash scripts/power_selftest.sh
 ```
+
+`--model` is an **exact, org-qualified** match. It used to be a substring test, so
+`--model Qwen3.6-35B-A3B-NVFP4` silently pooled `RedHatAI/…` with `unsloth/…-Fast` and reported
+12 brackets / CV 0.61% where the model has 11 / 0.58%. A name matching nothing is now an error.
 
 ---
 
@@ -81,21 +112,37 @@ All eight `mmlu@100` rows on `RedHatAI/Qwen3.6-35B-A3B-NVFP4`, with the pinned i
 | 20260704 | `251eba5…` | `20260704_moe-auto_tuned.sh` | 81.75 | 0.494 |
 | 20260704 | `251eba5…` | `20260704_mtp-n2_tuned.sh` | 82.65 | 0.481 |
 | 20260712 | `fc56161…` (0.25.0) | `20260712_v0.25.0_baseline.sh` | 81.79 | 0.494 |
-| 20260712 | `fc56161…` | `VLLM-24-…_final.sh` | 81.72 | 0.494 |
+| 20260712 | **`251eba5…` (0.24.0)** | `VLLM-24-…_final.sh` | 81.72 | 0.494 |
 
-The 5.2-point "spread" is **three tight clusters, one per image**:
+**CORRECTED (20260820-b).** The last row was filed under 0.25.0 in the first version. It is not.
+`VLLM-24-RedHatAI_Qwen3.6-35B-A3B_NVFP4_final.sh` pins
+`vllm/vllm-openai@sha256:251eba5c…` = **v0.24.0**, and the `backend` column of its `results.tsv`
+rows agrees (`vllm@0.24.0(img:sha256:251eba5cc7c…)`). It is a 0.24.0 config that happened to be
+re-measured on the day the 0.25.0 image was being evaluated — the name says 24 and so does the
+digest. So the clusters are:
 
 ```
-0.23.0 : 78.08 +/- 0.43 (sd of 3)
-0.24.0 : 82.41 +/- 0.57
-0.25.0 : 81.76 +/- 0.05
+0.23.0 : 78.077 +/- 0.431  (n=3)
+0.24.0 : 82.235 +/- 0.582  (n=4)   <- was quoted as 82.41 +/- 0.57 over n=3
+0.25.0 : 81.790            (n=1)   <- the "81.76 +/- 0.05 cluster" DOES NOT EXIST
 ```
 
-Within-cluster spread is exactly what n=5,700 predicts (SE 0.48–0.54; sd of 3 draws ≈ 0.5).
-Between cluster 1 and cluster 2 the gap is **+4.33 points ≈ 8.5σ**. That is not noise. It is a
-real, reproducible, three-configs-deep shift that the project recorded as noise **because the
-follow-up's SE was wrong by 2.8×** — with a correct SE, a 4.3-point move across an image bump is
-the single loudest quality signal in the entire accuracy journal.
+Within-cluster spread is consistent with what n=5,700 predicts (SE 0.48–0.54; sd of 3–4 draws
+≈ 0.5). The step from 0.23.0 to 0.24.0 is **+4.158 points**, not +4.33.
+
+**"≈ 8.5σ" is withdrawn — it is not reproducible, and the first version never said which σ it
+meant.** Three defensible statistics, all pointing the same way:
+
+| statistic | value | what it treats as error |
+|---|---|---|
+| pooled two-sample *t* on the cluster means | **t = 10.34 on 5 df** (p ≈ 1.5e-4) | the run-to-run spread within each image |
+| unpaired two-proportion *z*, n=5,700/arm | **z = 5.57** | binomial error only, one run per arm |
+| ratio to a single run's own `acc_stderr` | **7.9×** | lm-eval's reported SE as the whole error |
+
+None of them is 8.5. **The conclusion survives all three**: the 0.23.0→0.24.0 step is a real
+effect, not sampling noise, and the project recorded it as noise because the follow-up's SE was
+wrong by 2.8×. Quote *which* statistic you mean; the pooled *t* is the honest one, because it is
+the only one whose error term includes the session variance §3.1 now measures.
 
 **What the data cannot tell us is the cause.** Two things changed at that boundary and the record
 cannot separate them:
@@ -110,39 +157,89 @@ There is no matched pair anywhere in the corpus that holds one fixed while movin
 single 17-minute `mmlu@100` run of `20260614_moe-auto_tuned.sh` on today's `eval.sh` and today's
 image would settle it; nothing shorter will.
 
-**Second correction, same follow-up.** *"mmlu LIMIT=100 drifts ~1 pt across sessions on IDENTICAL
-config+image (35B _final: 82.82 on 20260705 vs 81.72 on 20260712, same digest)"* — 82.82 is
+**Second correction, same follow-up — and the first version got this one wrong too.**
+*"mmlu LIMIT=100 drifts ~1 pt across sessions on IDENTICAL config+image (35B _final: 82.82 on
+20260705 vs 81.72 on 20260712, same digest)"*. The **citation** is indeed wrong: 82.82 is
 `config_hash 7ca38372`, `20260704_v0.24.0_baseline.sh`, dated **20260704**; 81.72 is
-`config_hash 3cdb35e5`, `VLLM-24-…_final.sh`. Different config, different runbook, different date
-from the one quoted. The corpus contains **zero** cross-session same-config `mmlu` replicates, so
-the claim it makes is not merely mis-cited — it is unsupported by any row in the journal.
+`config_hash 3cdb35e5`, `VLLM-24-…_final.sh`.
+
+But the first version then concluded *"the corpus contains **zero** cross-session same-config
+`mmlu` replicates"*, and **that is false**. `config_hash` is `sha256(runbook text)` — it hashes
+**comments** — and `promote.sh` creates a `_final.sh` by copying the winning `_tuned.sh` and
+prepending a `# Result:` header. **A byte-identical serving configuration therefore gets a new
+identity.** Strip full-line comments and **12 runbook pairs across the tree collapse onto 6
+distinct configs**, three of which carry `mmlu` accuracy rows:
+
+| effective config | rows | Δ | separation |
+|---|---|---|---|
+| `20260704_mtp-n2_tuned.sh` == `VLLM-24-…_final.sh` | 82.65, 81.72 | **0.93 pt** | 8 days apart, same 0.24.0 image |
+| `baseline.sh` == `VLLM-23-…_final.sh` (35B) | 78.19, 77.60 | **0.59 pt** | same day, same image, same harness |
+| `unsloth/…-Fast baseline.sh` (same file, twice) | 81.28, 81.32 | **0.04 pt** | same day |
+
+**So the follow-up's claim is right in substance and wrong in its citation: `mmlu@100` really does
+move ~1 point between two runs of the same effective config, and the journal proves it — the
+evidence was hidden by a hashing defect, not absent.** This is the single most consequential
+correction in this revision, because §7's original recommendation was built on the opposite belief.
+
+`config_hash` hashing comments is a real defect and belongs on the follow-up list: it is the
+vLLM-side twin of the tracked *"`config_hash` is blind to HOST-PROCESS launcher settings"* item.
+Both make two different things share an identity, or one thing wear two — and both silently break
+keep/discard provenance.
 
 ---
 
 ## 3. What the accuracy record can and cannot support
 
-### 3.1 The entire empirical basis for accuracy repeatability is six brackets
+### 3.1 The empirical basis for accuracy repeatability is TEN brackets, three of them at n=5,700
 
-Grouping on identical (model, `config_hash`, task, `limit`, `think`, `conc`):
+**REVISED.** The first version grouped on `config_hash` and found six brackets. Grouping on the
+**comment-stripped runbook** (§2) finds **ten**, and three at `mmlu@5,700` rather than one:
 
-| model | task | n | values | range | note |
+| model | task | n | values | Δ | note |
 |---|---|---|---|---|---|
-| `unsloth/Qwen3.6-35B-A3B-NVFP4-Fast` | mmlu | 5,700 | 81.28, 81.32 | **0.04 pt** | |
-| `antirez/DeepSeek-V4-Flash` | gsm8k | 100 | 74.0, 74.0 | 0.00 pt | |
-| `RedHatAI/gemma-4-31B-it-NVFP4` | gsm8k | 100 | 68.0, 71.0 | 3.00 pt | within binomial |
-| `antirez/DeepSeek-V4-Flash` | gsm8k | 100 | 60.0, 76.0 | 16.00 pt | the tracked `config_hash` blind spot |
+| `RedHatAI/Qwen3.6-35B-A3B-NVFP4` | mmlu | 5,700 | 82.65, 81.72 | **0.93 pt** | 8 days apart, same image |
+| `RedHatAI/Qwen3.6-35B-A3B-NVFP4` | mmlu | 5,700 | 78.19, 77.60 | **0.59 pt** | same day, same image, same harness |
+| `unsloth/Qwen3.6-35B-A3B-NVFP4-Fast` | mmlu | 5,700 | 81.28, 81.32 | **0.04 pt** | same day |
+| `RedHatAI/Qwen3.6-35B-A3B-NVFP4` | gsm8k | 100 | 42.0, 40.0 | 2.00 pt | think-**on**, both truncated |
+| `RedHatAI/gemma-4-31B-it-NVFP4` | gsm8k | 100 | 73.0, 73.0 | 0.00 pt | baseline == final |
+| `RedHatAI/gemma-4-31B-it-NVFP4` | gsm8k | 100 | 68.0, 71.0 | 3.00 pt | the `kvfp8` config |
+| `antirez/DeepSeek-V4-Flash` | gsm8k | 100 | 74.0, 74.0 | 0.00 pt | c16 pair |
+| `antirez/DeepSeek-V4-Flash` | gsm8k | 100 | 60.0, 76.0 | 16.00 pt | c4 pair; the tracked host-launcher `config_hash` blind spot |
 | `unsloth/Qwen3.6-27B-NVFP4` | gsm8k | 100 | 0.0, 98.0 | 98 pt | one row `suspect` (think-off zero-token) |
 | `unsloth/Qwen3.6-35B-A3B-NVFP4-Fast` | gsm8k | 100 | 0.0, 96.0 | 96 pt | one row `suspect` |
 
-Four usable brackets, one of them above n=100. **The repo cannot characterise accuracy
-repeatability from its own history** and this document does not pretend otherwise.
+**The three `mmlu@5,700` brackets are the number that matters**, because that is the task the
+recommendation wants the gate to cite. Their repeat **differences** are 0.04, 0.59, 0.93 pt:
 
-The one high-n bracket is nonetheless informative. Two runs of an identical config differing by
-**0.04 points at n=5,700** means the net discordance `|b − c|` is about **2 items**. Under the
-paired model `Var(b − c) = nψ`, `E|b − c| ≈ sqrt(2nψ/π)`, so `|b−c| = 2` implies
-**ψ ≈ 0.001** — one item in a thousand — for a config compared against *itself* under greedy
-decoding. Serving nondeterminism contributes ~0.04 points to `mmlu`, not 5. (n=1 bracket; treat as
-an order of magnitude, not an estimate.)
+* **RMS repeat difference = 0.636 pt** (equivalently a per-run SD of 0.450 pt).
+* The binomial SE of a single `mmlu@100` run is 0.509 pt, so the *difference* of two runs has a
+  binomial-only SD of 0.509·√2 = 0.72 pt. The measured 0.64 pt is **within** that — so these
+  brackets are not, on their own, proof of an extra session term. They are proof that **0.6–0.9 pt
+  is the size of the wobble you must expect**, whatever its mechanism.
+* That is **16× the ψ ≈ 0.001 the first version inferred from the single 0.04-pt bracket**, and
+  the first version's inference is hereby withdrawn as unrepresentative: it took the smallest of
+  three brackets and treated it as the population.
+
+**What the paired model says about these, and why it matters for §7.** Under
+`Var(b−c) = nψ`, `E|b−c| ≈ √(2nψ/π)`, the three brackets imply ψ = **0.0014**, **0.312** and
+**0.774** respectively. A discordance of 0.77 — three items in four flipping between two runs of
+the same config on an 82%-accurate model — is absurd. **So the 0.93-pt bracket is not explainable
+as item-level paired noise at any credible ψ**, which is exactly why the p-value half of the
+original recommendation had to be retracted (§7).
+
+**The n=100 brackets cannot be compared with the n=5,700 ones by their point spread**, and it is a
+mistake to try: at n=100 the score is quantized to whole points, so "0.00 pt" means "the same 73
+of 100 items" and nothing finer. Compared as **net item-flip rates** the ordering is:
+
+```
+0.0%  gemma baseline/final (n=100)      0.0%  ds4 c16 pair (n=100)
+0.04% Fast mmlu (n=5,700)               0.59% 35B mmlu same-day (n=5,700)
+0.93% 35B mmlu 8-days-apart (n=5,700)   3.0%  gemma kvfp8 (n=100)
+16.0% ds4 c4 pair (n=100, config_hash blind spot)
+```
+
+**Read that before believing any story about which serving features cause nondeterminism** — see
+§3.5.
 
 A second, independent hint: on 20260704 two genuinely different 35B configs (`v0.24.0_baseline`
 and `mtp-n2`) both scored `mmlu_pro=68.21` — **byte-identical at n=1,400**, i.e. the same 955
@@ -179,7 +276,8 @@ which the `limit` column already records, and which the recommendation below rel
 ```
 
 Read that table twice. **No row in the unpaired column clears 1.00 point, including the two `full`
-rows.** Detecting a 1-point drop at p≈.82 needs 23,667 items per arm; `mmlu` has 14,042 in total.
+rows.** Detecting a 1-point drop at p≈.82 needs **23,668** items per arm (the first version said
+23,667; the tool ceilings the exact 23,667.x); `mmlu` has 14,042 in total.
 The 1% clause has never been supportable by the method the harness uses, at any limit, on any task
 in the suite — and raising `LIMIT` cannot fix it, because the tasks run out of questions first.
 
@@ -192,10 +290,13 @@ Paired, `mmlu@LIMIT=100` clears it across the whole defensible discordance range
 | 0.10 | **1.17 pt** |
 
 ψ is **not measured anywhere in this repo** — `eval.sh` does not pass `--log_samples`, so no
-per-item outcomes exist in any of the 79 retained bundles. The 0.02–0.10 range is a projection
-bracketed by the two measurements in §3.1 (ψ≈0.001 for a config against itself; ψ must exceed the
-observed accuracy gap for two different configs). Turning `--log_samples` on converts it from a
-projection into a measurement on the first comparison that uses it.
+per-item outcomes exist in any of the 81 retained bundles. The 0.02–0.10 range is a **projection**,
+and §3.1's revision shows it is not even well bracketed: the three same-config `mmlu` brackets
+imply ψ = 0.0014, 0.312 and 0.774 under the paired-noise model, which spans the entire admissible
+range and therefore constrains nothing. **Do not read the paired column as an achievable
+tolerance.** It is what the item-level test could deliver *if* the only error were item-level, and
+§3.1 shows something else is also moving. Turning `--log_samples` on is what converts ψ from a
+projection into a measurement — and §7 specifies the null experiment that has to come first.
 
 ### 3.4 Cost per effective sample — the cheap gate is the precise one
 
@@ -213,6 +314,28 @@ Median seconds per effective sample, from `total_evaluation_time_seconds` in the
 `LIMIT`**. The in-loop gate has been spending its 4 minutes on the least informative task
 available to it: `gsm8k@100` costs 3.7 minutes and resolves nothing below ~14 points.
 
+### 3.5 What the corpus does NOT establish: which serving features cause the wobble
+
+All three `mmlu@5,700` brackets sit on configs carrying **`--enable-prefix-caching`,
+`--kv-cache-dtype fp8_e4m3` and MTP together**; both zero-Δ brackets sit on configs carrying
+none of them. That looks like a mechanism, and there is independent support for it: measured on
+this box, repeating an identical 32-prompt greedy pass gives **7/32 byte-identical outputs with
+prefix caching + fp8 KV on, and 32/32 with prefix caching off**.
+
+**Say exactly what that is worth: corroboration, not proof.** n = 3 brackets on one side and 2 on
+the other; the three features are confounded with each other *and* with MTP; and the 32-prompt
+determinism probe measures the **serving** path, not lm-eval's scoring path, so it establishes
+that outputs move — not how far a score moves.
+
+**And the corpus contains a direct counter-example.** The gemma `20260614_kvfp8_tuned.sh` bracket
+carries fp8 KV but **no** prefix caching and moved **3 of 100 items** — a 3.0% net flip rate,
+*higher* than the 0.93% of the prefix-cache 35B bracket. The `ds4` c4 pair, with neither feature,
+moved 16 items. The two 0.00-pt brackets and the two large n=100 brackets are all on the
+"features off" side, so the n=100 evidence is bimodal and settles nothing.
+
+The honest summary: **the corpus establishes that same-config `mmlu@5,700` repeats move by up to
+0.93 points. It does not establish why, and it does not license a feature-conditional tolerance.**
+
 ---
 
 ## 4. What the throughput record says
@@ -228,9 +351,19 @@ available to it: `gsm8k@100` costs 3.7 minutes and resolves nothing below ~14 po
 | within-day | c1 | 79 | 176 | 1.91% | 0.61% | 1.49% | 3.32% | 7.32% |
 | within-day | c16 | 67 | 142 | 2.32% | 1.48% | 2.51% | 3.18% | 5.70% |
 | cross-day (session medians) | c1 | 6 | 6 | 2.89% | 1.35% | — | — | 6.28% |
-| cross-day | c16 | 3 | 3 | 2.72% | 1.44% | — | — | 4.47% |
+| cross-day | c16 | 3 | 3 | **2.72%** | 1.44% | — | — | 4.47% |
 
-Three notes on how to read this.
+And the same table with the **first bench of every bracket discarded**
+(`scripts/power.py variance --drop-first`; the justification is §4.3(a) and the consequence is
+§4.5):
+
+| scope | level | brackets | df | pooled CV | median | p75 | p90 | max |
+|---|---|---|---|---|---|---|---|---|
+| within-experiment | c1 | 75 | 75 | **1.67%** | 0.30% | 0.83% | 2.69% | 7.04% |
+| within-experiment | c16 | 63 | 63 | **1.55%** | 0.77% | 1.51% | 2.52% | 5.72% |
+| within-day | c16 | 63 | 75 | 1.88% | 0.83% | 1.55% | 2.68% | 5.72% |
+
+Four notes on how to read this.
 
 1. **Plan against the pooled CV, not the median.** A CV estimated from k=3 is a noisy χ² quantity
    whose median sits well below its true value; the median of 78 such estimates is badly
@@ -248,6 +381,13 @@ Three notes on how to read this.
    lab note, and they do not refute it either — the FF711 case that note cites (`8b07e87b`, tune
    median 63.51 vs finalize 70.32, **+10.7%**) is real, is the same `config_hash` on the same
    **day**, and is a comparison of a median-of-3 against a **single** row. See §4.3.
+4. **These are different variance components and they are not interchangeable.** The
+   within-experiment figure is the right error term for a candidate benched beside its reference
+   in one serve session. It is the **wrong** one for a comparison spanning days or images, which
+   is what 21 of the 55 historical deltas actually are (§4.4). Quoting the within-experiment CV
+   for a cross-day comparison understates the SD by **1.21×** on a like-for-like basis
+   (2.72% vs 2.25%), or **1.75×** against the warm-up-corrected 1.55% of §4.5 — and the cross-day
+   figure rests on **three brackets**, so it is itself barely an estimate.
 
 ### 4.2 The KEEP rule as written, scored
 
@@ -259,6 +399,8 @@ mean of 3, and `power.py` models that):
 |---|---|---|---|---|---|
 | c1 | 1.99% | **5.7%** | 50% | 5.37% | 4 |
 | c16 | 2.25% | **8.1%** | 50% | **6.09%** | 4 |
+| c1, bench #1 dropped (§4.5) | 1.67% | 3.0% | 50% | 4.50% | 2 |
+| **c16, bench #1 dropped (§4.5)** | **1.55%** | **2.2%** | 50% | **4.18%** | **2** |
 
 Two structural facts, neither of which is a defect:
 
@@ -267,7 +409,8 @@ Two structural facts, neither of which is a defect:
   for every N. Raising N does not raise that number; it only sharpens the transition. Anyone
   reading the KEEP rule as "we catch real 3% wins" is reading a coin flip.
 * **The 8.1% false-keep rate is the real cost.** Across a 9-candidate wave, that is 0.7 expected
-  spurious keeps from configs that do nothing at all.
+  spurious keeps from configs that do nothing at all. **§4.5 takes it to 2.2% for free**, which is
+  why that section is the operative recommendation on this side.
 
 ### 4.3 Two systematic effects, both measurable, neither modelled
 
@@ -279,7 +422,7 @@ c16   mean(n1 / mean(n2,n3) - 1) = -1.22%   sd 3.17%   t = -3.05   39 of 63 nega
 c1    mean                       = -0.13%   sd 2.79%   t = -0.40   32 of 75 negative
 ```
 
-A **1.2% warm-up bias at c16, p ≈ 0.003** — 40% of the KEEP threshold. It largely cancels between
+A **1.2% pooled offset at c16, t = −3.05** — 40% of the KEEP threshold. It largely cancels between
 a candidate and a reference that are both medians of 3, which is why the loop survives it. It does
 **not** cancel when a median-of-3 is compared against a single row, which is exactly the shape of
 the FF711 +10.7% "cross-session drift": tune-loop rows 62.30 / 65.20 / 63.51 (median 63.51) vs one
@@ -287,6 +430,39 @@ finalize row of 70.32 on the same day and the same `config_hash`. The within-bra
 already 4.6%; the finalize row sits 6.8% above the bracket's maximum. Bench order plus a single
 observation explains more of that gap than "page-cache state" does, and the record cannot separate
 them.
+
+**CORRECTED (20260820-b): this is NOT a global warm-up law, and the first version's framing
+oversold it.** Broken out per model over the same 63 experiments:
+
+| model | k | mean(n1 / mean(n2,n3) − 1) | t |
+|---|---|---|---|
+| `RedHatAI/Qwen3-8B-NVFP4` | 7 | **−5.15%** | −41.6 |
+| `WeiboAI/VibeThinker-3B` | 3 | **−5.24%** | −33.7 |
+| `RedHatAI/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` | 8 | −1.95% | −1.1 |
+| `RedHatAI/gemma-4-31B-it-NVFP4` | 5 | −2.87% | −2.0 |
+| `RedHatAI/Qwen3-Coder-Next-NVFP4` | 3 | −0.45% | −0.4 |
+| `RedHatAI/Qwen3.6-35B-A3B-NVFP4` | 10 | +0.07% | +0.3 |
+| `Inferact/Qwen3.8-27B-NVFP4` | 10 | +0.23% | +0.4 |
+| `unsloth/Qwen3.8-27B-NVFP4` | 4 | +0.36% | +0.4 |
+| `DavidAU/…Fable-Fusion-711…` (llama.cpp) | 6 | +0.87% | +0.5 |
+
+**Two campaigns carry the whole pooled effect**, each with a near-deterministic per-experiment
+offset (|t| > 30 means the offset is essentially the same every time, not a noisy tendency). Of
+the nine models with k ≥ 3, **five are negative and four positive — an exact two-sided sign test
+gives p = 1.0**, i.e. indistinguishable from a coin flip. The other seven models lie between
+−2.87% and +0.87%.
+
+Two further checks, both of which cut against a mechanistic warm-up story:
+
+* **bench 2 vs bench 3 is flat**: +0.05%, t = 0.17 over the same 63 experiments. Whatever it is,
+  it is over after the first bench.
+* **it is not prefix caching.** The 12 experiments on configs carrying `--enable-prefix-caching`
+  are the **tightest** group at **−0.09%**; the 51 without average −1.48%.
+
+So the honest statement is: *"two campaigns show a large, near-deterministic first-bench offset;
+pooled across the corpus this reads as −1.22%, and no mechanism in the record explains it."*
+**It is nonetheless worth acting on, and §4.5 is why**: whether or not it is one phenomenon, it is
+a *bias* in a fixed position, and removing it shrinks the variance the gate is planned against.
 
 **(b) Temperature correlates weakly with the deviation.** r = **−0.18** at c16 (n=168 rows carrying
 a `thermal=` note, 62–77 °C), r = −0.07 at c1. Real but small, and confounded with bench order
@@ -298,7 +474,7 @@ Pooled c16 CV by model, and what it implies for an N=3 median comparison:
 
 | model | c16 brackets | pooled CV | MDE (N=3) | false-keep at >3% |
 |---|---|---|---|---|
-| `RedHatAI/Qwen3.6-35B-A3B-NVFP4` | 11 | **0.58%** | **1.54%** | 0.03% |
+| `RedHatAI/Qwen3.6-35B-A3B-NVFP4` | 11 | **0.58%** | **1.54%** | 0.0% |
 | `RedHatAI/Qwen3-Coder-Next-NVFP4` | 3 | 1.28% | 3.43% | 0.7% |
 | `unsloth/Qwen3.8-27B-NVFP4` | 5 | 1.47% | 3.96% | 1.6% |
 | `Inferact/Qwen3.8-27B-NVFP4` | 10 | 1.53% | 4.11% | 2.0% |
@@ -331,11 +507,106 @@ global number here would have manufactured a problem that does not exist, which 
 of error as the ±4.3-point figure in §1.
 
 Exactly **one** historical call is unsupported by the model's own spread:
-`20260616_moe-cutlass_tuned.sh` on the 120B Nemotron, **+6.83% against an MDE of 9.19%**.
+`20260616_moe-cutlass_tuned.sh` on the 120B Nemotron, **+7.95% against an MDE of 9.19%**. *(The
+first version quoted +6.83% for this delta; re-deriving it as candidate-median ÷ `baseline.sh`
+median over citable chat-c16 rows gives +7.95%. Neither figure changes the verdict, and the
+discrepancy is unresolved — it is recorded rather than smoothed over.)*
 
 So: **the throughput gate is not badly underpowered — it is uncalibrated.** The threshold is
 global and the variance is not. Six of the 55 configs have too few brackets to say anything at
 all, and c4/c8/c32 have none.
+
+#### 4.4.1 CORRECTION: this per-model MDE governs only 34 of the 55 deltas
+
+The audit above applies a **within-experiment, within-session** variance to comparisons that are
+frequently neither. Re-derived over the same 55 (candidate median vs `baseline.sh` median, citable
+chat-c16 rows only, per-row `backend` column for the image):
+
+| property of the 55 comparisons | count |
+|---|---|
+| candidate shares a calendar day with its baseline — **within-session variance governs** | **34** |
+| candidate does **not** share a day with its baseline | **21** |
+| ...of those, also **cross-image** (different `backend` digest on the two sides) | **6** |
+
+All six cross-image comparisons are on the 35B, and **all four deltas §4.4 defends are among
+them**: `VLLM-24-…_final.sh` (+4.31%), `20260704_mtp-n2` (+4.26%),
+`20260712_moe-marlin-mtp-triton` (+5.11%), `20260712_v0.25.0_baseline` (+4.15%) — every one of
+them a 0.24.0/0.25.0 candidate against a **0.23.0** baseline benched three to four weeks earlier.
+
+Under the variance that governs a cross-day comparison — the repo's own cross-day c16 pooled CV,
+**2.72%, MDE 7.39%** — **all four flip back to unsupported.**
+
+| delta | vs own-model within-experiment MDE 1.54% | vs cross-day MDE 7.39% |
+|---|---|---|
+| `VLLM-24-…_final.sh` +4.31% | supported | **unsupported** |
+| `20260704_mtp-n2` +4.26% | supported | **unsupported** |
+| `20260712_moe-marlin-mtp-triton` +5.11% | supported | **unsupported** |
+| `20260712_v0.25.0_baseline` +4.15% | supported | **unsupported** |
+
+**Neither column is "the" answer, and that is the finding.** Say which variance component governs
+which comparison:
+
+* **candidate and reference in one session** → within-experiment CV. 34 of 55.
+* **different day, same image** → cross-day CV (2.72% at c16, on **3 brackets** — barely an
+  estimate). 15 of 55.
+* **different image** → there is no error term for this at all. A cross-image delta confounds the
+  config change with the image change, and the repo has never benched the same config on two
+  images on the same day. 6 of 55, including a promoted artifact.
+
+The practical rule this implies is the one already in the contract for accuracy and not for
+throughput: **re-bench the reference in the same session as the candidate.** Where that was not
+done, the delta is not separable from session drift and the journal should say so.
+
+### 4.5 The largest free improvement, which the first version missed: discard bench #1
+
+§4.3(a) observed the first-bench offset, correctly noted that it **cancels between two medians**,
+and stopped there. It does not cancel in the **variance**, and the variance is what every MDE and
+every false-keep rate in this document is computed from. A bias sitting in a fixed position inside
+each bracket inflates that bracket's CV.
+
+Recomputed with the first bench of each bracket discarded
+(`scripts/power.py variance --drop-first`, `throughput --drop-first`):
+
+| scope | pooled c16 CV as-is | with bench #1 dropped | MDE (N=3) as-is → dropped |
+|---|---|---|---|
+| **global** | 2.25% | **1.55%** | 6.09% → **4.18%** |
+| `RedHatAI/Qwen3-8B-NVFP4` | 3.05% | **0.49%** | 8.29% → 1.31% |
+| `WeiboAI/VibeThinker-3B` | 3.09% | **0.11%** | 8.40% → 0.30% |
+| `RedHatAI/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` | 3.37% | **2.17%** | 9.19% → 5.85% |
+| `RedHatAI/gemma-4-31B-it-NVFP4` | 2.60% | **1.40%** | 7.05% → 3.77% |
+| `RedHatAI/Qwen3.6-35B-A3B-NVFP4` | 0.58% | 0.59% | 1.54% → 1.58% |
+| `Inferact/Qwen3.8-27B-NVFP4` | 1.53% | 1.50% | 4.11% → 4.04% |
+
+The two campaigns that carried the pooled offset (§4.3) are the two whose CV nearly **vanishes**
+when their first bench goes; the models with no offset are unchanged, which is the consistency
+check. Globally the false-keep rate of the `>3%` rule falls from **8.1% to 2.2%** — under the
+target the KEEP rule was never scored against — and the N needed for a 5% false-keep rate falls
+from 4 to 2.
+
+Re-running §4.4's audit against **warm-up-corrected** per-model MDEs:
+
+| verdict | as-is | warm-up corrected |
+|---|---|---|
+| \|Δ\| < 3%, correctly rejected | 21 | 21 |
+| fires and clears the MDE — supported | 27 | **28** |
+| fires but below the MDE — unsupported | **1** | **0** |
+| no per-model estimate (<3 brackets) | 6 | 6 |
+
+The one historical call the corpus disputed (`20260616_moe-cutlass`, +7.95% against 9.19%) clears
+its model's corrected MDE of **5.85%**. So **"1 of 55 unsupported" becomes "0 of 55"** — the
+dispute was an artefact of counting a bias as noise.
+
+**Cost: zero GPU seconds.** It is a change to how existing rows are summarised, and it is
+**cheaper than raising N from 3 to 4** (§7's alternatives: +34 min per campaign for a smaller
+gain). The two are not exclusive, but this one comes first. The obvious objection — *"you are
+throwing away a third of the data"* — is answered by the table: the third being thrown away is
+the third with a known bias in it, and the models where that bias is absent barely move.
+
+**Caveat, stated because it is real:** at N=3 this leaves the median of **two** benches, i.e. their
+mean, on 63 df instead of 129. The variance estimate is halved in df and the estimator changes
+character. If this is adopted the honest form is *"bench 4 times and median the last 3"* (+1 bench
+per candidate, ~6 min) rather than *"bench 3 and use 2"* — but even the free version is a strict
+improvement on planning against a CV that a bias has inflated.
 
 ---
 
@@ -353,11 +624,12 @@ comparison using 260 retained c1 bundles:
 ```
   median requests per c1 stage      19
   output-budget CV within a stage   25.9%    <- what the seed holds identical
-  ragged-tail residual              0.12%    <- what pairing does NOT fix
+  ragged-tail residual   85-100%     0.12%   <- what pairing does NOT fix
+                         60-100%     0.21%      (p90 1.61%, max 4.19%)
 
-  band            machine SD   workload SD   unpaired SD   SD ratio   ~replicates
-  typical (median)     0.58%        0.68%        0.89%      1.54x        2.4x
-  planning (pooled)    1.99%        2.54%        3.23%      1.62x        2.6x
+  band                     machine SD  workload SD  unpaired SD  SD ratio  ~replicates
+  typical (median)             0.58%        0.66%        0.88%     1.53x      2.3x
+  planning (MIXED BASIS)       1.99%        2.53%        3.22%     1.62x      2.6x
 
   c16 projection: 173 requests per stage vs 19 at c1 -> workload term ~0.22% against a
                   machine term of 1.48% -> pairing is worth 1.01x there.
@@ -369,21 +641,48 @@ generator, so the workload term is estimated by bootstrapping each bundle's own 
 1/√n projection rather than a measurement). The machine term is what the replicate brackets in §4.1
 already measure — they are all seed=42, so they are the paired variance by construction.
 
+**Four caveats, all added in 20260820-b, all now printed by the tool itself so they cannot drift
+out of the document:**
+
+1. **The bootstrap does not resample the estimator the journal publishes.** It resamples
+   `Σtokens / Σlatency`; `results.tsv` records GuideLLM's
+   `output_tokens_per_second.successful.mean`, which is a **token-level** mean (its `count` field
+   is the token total, not the request total). Median ratio proxy/reported over 260 bundles =
+   **0.939**, i.e. the resampled quantity sits ~6% below the number Gate 3 cites. Substituting a
+   closer, token-weighted proxy moves the median workload CV by less than 0.02 pt (0.68% → 0.67%),
+   so the **conclusion is robust** — but this is a decomposition of a proxy, not of the estimator
+   whose variance it claims to decompose, and neither proxy reproduces the published mean exactly.
+2. **A c1 stage is time-limited, so its request count `n` is itself random.** A fixed-`n` bootstrap
+   holds `n` at whatever was observed and is structurally blind to that term.
+3. **The "planning" row is mixed-basis.** Its machine column is a **df-weighted pooled** CV over
+   replicate brackets; its workload column is an **unweighted RMS** over per-bundle bootstrap CVs
+   (median 0.66% vs RMS 2.53% — a between-model tail that governs no single real comparison). The
+   row is an upper band, not a like-for-like ratio, and the tool now labels it `MIXED BASIS`.
+4. **The ragged tail should be quoted over the wide window.** The original 85–100% prefix window
+   presumes the two configs differ in speed by ≤15%. **11 of the 55 historical candidate deltas
+   exceed 40%** (four of them above 50%). Over a 60–100% window the residual is
+   **0.21% median / 1.61% p90 / 4.19% max**, roughly double the narrow-window figure at the median
+   and at the p90.
+
+Read the "≈2.5 repetitions" headline as an **order of magnitude** — "a couple" — not a figure to
+quote to two decimals.
+
 Three conclusions:
 
-1. **At c1 the seed is worth about 2.5 benchmark repetitions**, consistently across both bands
-   (SD ratio 1.54× and 1.62×). A repetition is 6 minutes of stage time (two levels at
-   `MAX_SECONDS=180`) plus its share of a ~7-minute serve, so that is real money for a one-line
-   default.
+1. **At c1 the seed is worth roughly a couple of benchmark repetitions** (2.3–2.6×,
+   consistently across both bands: SD ratio 1.53× and 1.62×). A repetition is 6 minutes of stage
+   time (two levels at `MAX_SECONDS=180`) plus its share of a ~7-minute serve, so that is real
+   money for a one-line default.
 2. **At c16 — the tuned objective — it is worth nothing measurable (1.01×).** A c16 stage completes
    ~173 requests against ~19 at c1, so the workload term is already averaged into insignificance
    and machine state dominates. The variance that limits Gate 3 is not addressable by seeding.
 3. **The pairing is a prefix pairing with a ragged tail.** A faster config completes *more* of the
    same request sequence within `MAX_SECONDS` (25 vs 21 vs 20 vs 18 requests across the four c1
    bundles above), so the two sides average different prefixes of an identical sequence. That
-   residual is small — 0.12% median, 0.79% p90, 2.15% max at c1 — but it is a *bias* term rather
-   than a noise term, and it grows as the two configs' speeds diverge, i.e. precisely when a
-   candidate is winning.
+   residual is small — 0.21% median, 1.61% p90, 4.19% max over the 60–100% window at c1 — but it
+   is a *bias* term rather than a noise term, and it grows as the two configs' speeds diverge,
+   i.e. precisely when a candidate is winning. Since 11 of 55 historical deltas exceed 40%, the
+   wide window is the one to quote.
 
 ---
 
@@ -393,7 +692,11 @@ The existing follow-up says *"quality keep/discard comparisons are only valid as
 matched pairs — always re-measure the reference in the same session as the candidate."*
 
 Of the **27** task-level quality measurements taken on a `*_tuned.sh` candidate, **17 (63%)** have
-another config measured on the same task, limit and think-mode on the same day. **Ten do
+another config measured on the same task, limit and think-mode on the same day. *(Re-derived in
+20260820-b: unchanged.)* One caveat the first version did not state: this counts a comparator as
+present whenever a **different `script`** was measured the same day — and §2 shows two scripts can
+be byte-identical once comments are stripped, so a few of the 17 are a config compared with itself
+under two names. That inflates the 63% rather than deflating it. **Ten do
 not** (nine rows below; the first carries two tasks):
 
 ```
@@ -415,66 +718,187 @@ its own).
 
 **And even where the rule *is* followed it does not deliver what it promises.** Same-session
 matching removes the between-session component, but the comparison is still between two *scores*,
-so its floor is the unpaired MDE — **2.06 points on `mmlu@100`**, twice the tolerance. Pairing has
-to happen at the **item** level to buy anything. That is the crux of the recommendation.
+so its **statistical** floor is the unpaired MDE — 2.06 points on `mmlu@100`, twice the nominal
+tolerance.
+
+The first version concluded from this that pairing had to happen at the **item** level, and built
+its recommendation on that. **§7.0 retracts the test that was going to exploit the pairing**, but
+not this observation: same-session matching remains the single highest-value procedural change
+available on the quality side, because §3.1's evidence says the *session* term is what is actually
+moving the number. Enforce it; do not read the 2.06-point figure as the achievable tolerance in
+either direction.
 
 ---
 
-## 7. Recommendation — one change, priced
+## 7. Recommendation — REWRITTEN 20260820-b, with the p-value half retracted
 
-> **Keep `LIMIT=100`. Move the KEEP rule's `~1%` accuracy clause off `gsm8k` and onto a *paired
-> McNemar test* on `mmlu@LIMIT=100` (n=5,700), which requires adding `--log_samples` to `eval.sh`.
-> Restate `gsm8k@LIMIT=100` in the contract as a breakage detector with its resolution written
-> down (≈14 points at 80% power), never citable for a tolerance decision. Leave the throughput
-> rule's N=3 and >3% threshold exactly as they are, and print the campaign's **own** MDE and
-> false-keep rate — `power.py throughput --model <this model>` — on every `MEDIAN` line.**
+### 7.0 What was recommended, and why half of it was wrong
 
-Five concrete edits, all outside this document's ownership:
+The first version recommended a two-part gate:
 
-1. **`scripts/eval.sh`** — add `--log_samples` to the lm-eval invocation. It writes
-   `samples_<task>_*.jsonl` into the bundle, which is already gitignored. Cost: ~20 MB per
-   `mmlu@100` run, zero GPU seconds. This is the entire enabling change.
-2. **`scripts/suite.sh` / the tuning loop** — for a **numeric-risky** candidate (kv-cache-dtype,
-   quantization, GEMM/MoE backend), run the same `eval.sh general` that is already run, but also
-   run it on the **reference in the same session at the same `limit`**, and cite the `mmlu` number
-   rather than the `gsm8k` one. Where loglikelihood is genuinely unavailable for the model, use
-   `eval.sh resistant` (`mmlu_pro@100`) on both sides instead.
-3. **`AGENTS.md` + `program.md`** — the clause becomes:
-   *"accuracy within ~1% — evaluated as `scripts/power.py mcnemar --samples <ref>.jsonl
-   <cand>.jsonl` on `mmlu@LIMIT=100`, requiring exact two-sided p ≥ 0.05 **and** |Δ| ≤ 1.0 point.
-   `gsm8k@LIMIT=100` detects breakage (>=14 pt) and nothing finer. Where loglikelihood is
-   unavailable, `mmlu_pro@LIMIT=100` paired, and RECORD the achieved tolerance (1.1-2.4 pt
-   depending on the measured psi) instead of claiming 1%."*
-   Record the measured ψ in the logbook — after the first few comparisons the projection in §3.3
-   becomes a measurement and the MDE stops being an assumption.
-4. **Correct the arithmetic in the two follow-ups and in `eval.sh`'s header comment** (`"At
-   LIMIT=100 the binomial SE is ~4.3 points"` — true for `gsm8k`, wrong by 2.8× for `mmlu`), and
-   correct the mis-cited 82.82-vs-81.72 pair in the drift follow-up.
-5. **Throughput, zero GPU cost:** have `run_experiment.sh` append the model's own
-   `mde=<x>% false_keep=<y>%` to its `MEDIAN` line, from `power.py throughput --model`, and refuse
-   to print an MDE when the model has fewer than 3 brackets (§4.4 shows this is 6 of 55 configs).
-   The threshold stays at 3%; what changes is that a keep at +4% on the 120B and a keep at +4% on
-   the 35B stop looking like the same evidence.
+> *"…requiring exact two-sided p ≥ 0.05 **and** |Δ| ≤ 1.0 point."*
 
-### The spec-decode constraint — narrower than the contract says, and the journal proves it
+**The p-value half is RETRACTED. It would reject a config compared against itself.**
+
+The arithmetic, from this repo's own numbers. §3.1's largest same-effective-config `mmlu@5,700`
+bracket differs by **0.93 points**, i.e. a net item flip of `|b − c| ≈ 53`. For an exact McNemar
+test on `b − c = 53`, the p-value depends only on the total discordance `b + c`:
+
+| ψ = (b+c)/5700 | b + c | b | c | exact two-sided p |
+|---|---|---|---|---|
+| 0.010 | 57 | 55 | 2 | 2.3e-14 |
+| 0.020 | 114 | 83 | 31 | **1.2e-06** |
+| 0.030 | 171 | 112 | 59 | **6.2e-05** |
+| 0.050 | 285 | 169 | 116 | 0.0020 |
+| 0.100 | 570 | 311 | 259 | 0.033 |
+| **0.1237** | **705** | 379 | 326 | **0.0501** ← first ψ at which the test does not reject |
+
+So the proposed gate returns `p ≥ 0.05` **only if ψ > 0.1237** — better than one item in eight
+flipping between two runs of *the same config* on an 82%-accurate model. *(The audit reached the
+same conclusion via the normal approximation, `(53/1.96)² = 732` pairs → ψ > 0.128; the exact test
+is slightly less demanding at 705. Either way it is one item in eight.)* At the ψ = 0.01–0.03 that
+a greedy same-config repeat plausibly produces, the gate returns **p < 10⁻⁴** and **fails the
+config against itself**.
+
+This is not a subtle mis-calibration. It is the failure mode of putting a *significance* test where
+a *tolerance* test belongs: with n = 5,700 the test is powerful enough to detect differences far
+smaller than anyone cares about, and it will detect the session term along with everything else.
+The first version's own §3.3 warned that ψ was unmeasured; it did not follow that warning through
+to the gate it then proposed. **A projected MDE is not a licence to ship a decision rule.**
+
+**The `|Δ| ≤ 1.0 pt` half survives, and it is what the recommendation now rests on.** Against a
+measured repeat-difference SD of 0.64 pt (§3.1), a 1.0-pt band false-fails a config against itself
+about **12%** of the time (1.5 pt → 1.8%, 2.0 pt → 0.2%). 12% is high but it is a *tolerance*, and
+its failure mode is a wasted re-measurement rather than a wrong promotion.
+
+**And the claimed 0.52–1.17 pt MDE is not reachable today**, because a ~0.64 pt session term of
+unknown origin sits underneath it. You cannot resolve half a point through a wobble of two-thirds
+of a point.
+
+### 7.1 What to adopt now
+
+> **Adopt the LIMIT correction, `--log_samples`, and `mmlu@5,700` as the task the tolerance
+> decision cites. Replace the blanket spec-decode rule with a `TASKS=mmlu LIMIT=2` probe. Restate
+> `gsm8k@LIMIT=100` as a breakage detector with its resolution written down. Set the in-loop
+> tolerance to the OBSERVED same-config spread — ~0.6 pt typical, ~0.9 pt seen — and put NO
+> p-value in the contract until the null experiment in §7.2 has been run. On the throughput side,
+> discard bench #1 from every variance estimate (§4.5) and print the model's own MDE on the
+> `MEDIAN` line.**
+
+Concrete edits, all outside this document's ownership:
+
+1. **`scripts/eval.sh` — add `--log_samples`.** It writes `samples_<task>_<timestamp>.jsonl` per
+   **leaf** into the bundle, which is already gitignored. Cost ~20 MB per `mmlu@100` run, zero GPU
+   seconds. This is the enabling change for everything else, and it is worth doing **even though
+   the p-value is retracted**: without per-item outcomes the session term cannot be characterised
+   at all, and §7.2 cannot be run.
+   *Note for whoever wires this up:* `mmlu@100` produces **57 files** per run, not one. That is
+   exactly the shape that broke `power.py mcnemar` (§9) — pass them all with
+   `--samples-a … --samples-b …`, never concatenated.
+2. **Cite `mmlu@5,700`, not `gsm8k@100`, for tolerance.** `eval.sh general` already computes it in
+   the same run; the decision has been reading the n=100 figure off the same row. Zero extra GPU
+   time.
+3. **`AGENTS.md` + `program.md` — the clause becomes**:
+   *"accuracy within tolerance — compare `mmlu@LIMIT=100` (n=5,700) between candidate and
+   reference, measured in the SAME session at the SAME limit and concurrency. The tolerance is
+   **|Δ| ≤ 1.0 point**, which is the observed same-config repeat spread (0.04 / 0.59 / 0.93 pt over
+   three brackets, difference SD ≈ 0.64 pt) and NOT a statistical resolution claim: a difference
+   inside the band is not separable from session drift, and a difference outside it is a reason to
+   re-measure, not a verdict. `gsm8k@LIMIT=100` detects breakage (≈14 pt at 80% power) and nothing
+   finer — it must not be cited for a tolerance decision. **No p-value is part of this gate** until
+   the null experiment (POWER-analysis §7.2) has been run and its (b, c) recorded."*
+4. **Replace the blanket spec-decode rule with a probe.** `TASKS=mmlu LIMIT=2` is 114 items and
+   completes in seconds; if it returns finite scores, `mmlu@100` is available for that model. See
+   the subsection below — the journal has **eleven** counter-examples to the rule as written.
+5. **Correct the two follow-ups and `eval.sh`'s header comment.** *"At LIMIT=100 the binomial SE
+   is ~4.3 points"* is true for `gsm8k` and wrong by 2.8× for `mmlu`. And the drift follow-up's
+   citation is wrong while **its claim is right** (§2) — fix the citation, keep the claim, and add
+   the three brackets as its evidence.
+6. **Throughput, zero GPU cost:** have `run_experiment.sh` (a) compute its median over benches
+   **2..N** (§4.5) or, better, bench 4 and median the last 3; and (b) append the model's own
+   `mde=<x>% false_keep=<y>%` to its `MEDIAN` line from `power.py throughput --model <exact id>
+   --drop-first`, refusing to print an MDE when the model has fewer than 3 brackets (6 of 55
+   configs). The 3% threshold stays; what changes is that a keep at +4% on the 120B and a keep at
+   +4% on the 35B stop looking like the same evidence.
+7. **Record which variance component governs each recorded delta** (§4.4.1): same-session,
+   cross-day, or cross-image. A cross-image delta has **no error term in this repo at all** and
+   should be labelled as a confounded observation rather than a measured effect.
+8. **New follow-up: `config_hash` hashes runbook comments** (§2). `promote.sh` copying a winner and
+   prepending a `# Result:` header mints a new identity for a byte-identical serving config; 12
+   runbook pairs across the tree collapse onto 6 configs when comments are stripped. This hid the
+   entire cross-session accuracy replicate evidence for months. It is the vLLM-side twin of the
+   tracked host-launcher `config_hash` blind spot and should sit beside it.
+
+### 7.2 The null experiment that MUST run before any p-value enters the contract
+
+Everything paired in this document is a projection over an unmeasured ψ, and §3.1 shows the three
+brackets we have imply ψ = 0.0014, 0.312 and 0.774 — the whole admissible range. **Measure it.**
+
+**Design.** One config, two runs, `--log_samples`, `mmlu@LIMIT=100` (n = 5,700, ~17 min per run):
+
+| arm | what varies | why |
+|---|---|---|
+| A | nothing — two runs back to back in **one serve session** | isolates the within-session item-level term |
+| B | two runs in **different sessions** (tear the server down and back up between them) | adds the session term the 0.93-pt bracket implies exists |
+| C | arms A and B repeated on a config with **`--enable-prefix-caching` + `--kv-cache-dtype fp8_e4m3`** | the features §3.5 suspects |
+| D | arms A and B repeated on a config with **neither** | the control §3.5 needs, because the corpus's n=100 evidence is bimodal |
+
+**Output.** The observed `(b, c)` per arm — from
+`scripts/power.py mcnemar --samples-a <57 files> --samples-b <57 files>`. That is the reference
+distribution: it tells you what `b + c` and `|b − c|` look like when the answer is known to be
+"no difference", for each of the four cells.
+
+**Decision rule that follows from it.** A p-value may enter the contract only if arm A's and arm
+B's null distributions both return p ≥ 0.05 at the α you intend to use. If they do not — and §3.1
+predicts arm B will not — then the correct object is a **tolerance calibrated on the null**, i.e.
+"the candidate must fall inside the same-config band measured here", which is what §7.1(3) says in
+the interim using the three historical brackets as a stand-in.
+
+**Cost.** 8 runs × ~17 min ≈ **2.5 hours of GPU time**, plus four serve cycles. That is half a
+campaign, once, to convert the entire paired half of this document from projection into
+measurement. It is the single highest-value GPU hour available to this project's methodology, and
+nothing in §7.1 that touches a p-value should be adopted before it.
+
+**It also closes an open follow-up on the way.** Running arms A/B at `CONC=1` and `CONC=32` instead
+of only c16 answers *"Quality has never been measured at c1 or c32"* in the same sitting — the
+`conc` column added by contract A9 already records the answer.
+
+### 7.3 The spec-decode constraint — narrower than the contract says, and the journal proves it
 
 `mmlu` is loglikelihood-scored, and AGENTS.md records what looks like a fatal blocker for this
 recommendation: *"Speculative decoding ⊥ loglikelihood: a config with `--speculative-config`
 (MTP/draft) returns **NaN prompt_logprobs**, so loglikelihood `mmlu` 400s."* **10 of the 15
 promoted `_final.sh` runbooks carry `--speculative-config`.**
 
-**The journal contains eight counter-examples.** Every one of the 35B `mmlu@100` rows in §2 —
-78.19, 78.44, 77.60, 82.82, 81.75, 82.65, 81.79, 81.72 — was produced by a runbook carrying
-`--speculative-config '{"method":"mtp","num_speculative_tokens":1}'` or `…:2}`, and every one
-recorded `samples=mmlu=5700/5700`, `validity=ok`, `status=measured`, with a normal `acc_stderr` of
-0.48–0.54. Across vLLM 0.23.0, 0.24.0 and 0.25.0. The rule is real where it was found
-(Nemotron-3-Super MTP; the 56,168-request NaN grind that motivated the 20260817 branch-order fix)
-but it is **per-model or per-implementation, not a property of speculative decoding**, and the
-contract states it as universal.
+**The journal contains ELEVEN counter-examples across THREE models** — the first version said
+eight, on one model, and undercounted:
 
-That is worth an independent check by whoever adjudicates this, because it decides the cost of the
-recommendation. The probe is trivial and needs no tuning run: `TASKS=mmlu LIMIT=2` is 114 items and
-completes in seconds; if it returns finite scores, `mmlu@100` is available for that model.
+| model | rows | scores |
+|---|---|---|
+| `RedHatAI/Qwen3.6-35B-A3B-NVFP4` | 8 | 78.19, 78.44, 77.60, 82.82, 81.75, 82.65, 81.79, 81.72 |
+| `unsloth/Qwen3.6-35B-A3B-NVFP4-Fast` | 2 | 81.28, 81.32 |
+| `nvidia/NVIDIA-Nemotron-Labs-3-Puzzle-75B-A9B-NVFP4` | 1 | 83.67 |
+
+Every one was produced by a runbook carrying a **live** `--speculative-config` (`{"method":"mtp",
+"num_speculative_tokens":1}` or `…:2}`), and every one recorded `samples=mmlu=5700/5700`,
+`validity=ok`, `status=measured`, with a normal `acc_stderr` of 0.48–0.54, across vLLM 0.23.0,
+0.24.0 and 0.25.0. The rule is real where it was found (Nemotron-3-Super MTP; the 56,168-request
+NaN grind that motivated the 20260817 branch-order fix) but it is **per-model or
+per-implementation, not a property of speculative decoding**, and the contract states it as
+universal.
+
+> **Caution for anyone re-checking this count.** A naive `grep speculative` over each row's
+> runbook also matches **commented-out flags and prose mentions**, which inflates 11 rows to
+> **18**, across 7 additional runbooks (`RedHatAI/Nemotron-3-Super-120B` `baseline.sh` and
+> `20260616_moe-cutlass_tuned.sh`, plus five other `baseline.sh` files whose headers merely
+> *discuss* MTP). Strip full-line comments before matching. The audit that found this reported
+> "13 rows / two extra runbooks" using a narrower pattern; the count depends on the pattern, which
+> is itself the point.
+
+The probe is trivial and needs no tuning run: `TASKS=mmlu LIMIT=2` is 114 items and completes in
+seconds; if it returns finite scores, `mmlu@100` is available for that model. **Use the probe, not
+the count** — 11 successes do not prove the twelfth model will work, they only refute the
+universal rule.
 
 Where the loglikelihood path genuinely *is* closed, the clause falls back to a generative task,
 paired the same way:
@@ -491,19 +915,22 @@ has only ever run `LIMIT=100` and `full`, so `power.py` computes those two from 
 `accuracy.tsv` values and the others from `leaves x limit`. Verify the per-leaf counts before
 quoting them.)
 
+**Every "paired MDE" in the table above is a projection over an unmeasured ψ (§3.3), and §7.0
+retracts the p-value that would have consumed it.** They are shown to price the *fallback* task,
+not as tolerances to adopt. Read them as: even in the best case, a spec-decode config that cannot
+run loglikelihood `mmlu` has a materially coarser quality gate than one that can, and the gap is
+worth a one-minute probe to avoid.
+
 So the clause becomes **task-conditional, which it already is for other reasons**:
 
-* **loglikelihood available** (probe passes) → `mmlu@LIMIT=100`, paired, MDE 0.52–1.17 pt,
-  **17 min**. The 1% rule is met.
-* **loglikelihood genuinely closed** → `mmlu_pro@LIMIT=100` think-off, paired, MDE
-  **1.06–2.37 pt**, **47 min**. The 1% rule is met only at low discordance; at ψ=0.05 the honest
-  tolerance is ~1.7 points and `LIMIT=200` (94 min) is what buys ~1.2. **Write the achieved
-  tolerance into the logbook rather than pretending it is 1%.**
+* **loglikelihood available** (probe passes) → `mmlu@LIMIT=100`, n=5,700, **17 min**. Tolerance:
+  the observed same-config band, ~0.6 pt typical / ~0.9 pt seen (§7.1).
+* **loglikelihood genuinely closed** → `mmlu_pro@LIMIT=100` think-off, n=1,400, **47 min**, at
+  2.4× the binomial SE of `mmlu@100`. Its same-config band has **never been measured** — no
+  `mmlu_pro` replicate bracket exists in the corpus — so **record the achieved spread the first
+  time two runs of one config are made, and do not assume it is 1%.**
 
-Pairing is what makes either of these tractable: unpaired, the same two tasks sit at 2.06 and
-4.96 points and no affordable limit rescues them.
-
-### Wall-clock cost — the precise instrument is already being paid for
+### 7.4 Wall-clock cost — the precise instrument is already being paid for
 
 This is the part that makes the recommendation cheap, and it is easy to miss: **`eval.sh general`
 already runs `gsm8k,mmlu` together, and `eval.sh resistant` already runs `mmlu_pro`.** The
@@ -516,7 +943,7 @@ of the comparison exist in one session at one limit.
 
 | item | now | proposed | marginal |
 |---|---|---|---|
-| in-loop eval for a numeric-risky candidate, loglikelihood path | `eval.sh general` = gsm8k+mmlu@100, 14.7 min — **mmlu already computed and then ignored** | same run; cite `mmlu`, test it paired | **0 min** |
+| in-loop eval for a numeric-risky candidate, loglikelihood path | `eval.sh general` = gsm8k+mmlu@100, 14.7 min — **mmlu already computed and then ignored** | same run; cite `mmlu` | **0 min** |
 | `--log_samples` | — | writes `samples_*.jsonl` into the (gitignored) bundle | **0 GPU s**, ~20 MB/run |
 | same-session reference for that candidate (§6: missing 37% of the time) | often a different day or a different `limit` | one `eval.sh general` on the reference in the same session | **+15 min per comparison** |
 | the same, where loglikelihood is genuinely closed | `eval.sh general TASKS=gsm8k` = 3.7 min | `eval.sh resistant` ×2 (candidate + reference) = 94 min | **+87 min per comparison** |
@@ -530,31 +957,40 @@ the whole history touch a numeric-risky knob and also carry an eval row
 would have cost roughly **one hour of GPU time in total**, and the median campaign's ~5 h is
 unchanged.
 
-Throughput side: **+0 minutes.** No extra benches are proposed.
+Throughput side: **+0 minutes** for §4.5 (it re-summarises rows that already exist). If the
+stronger form is wanted — bench 4 and median the last 3 — that is +1 bench per candidate, ~6 min.
 
-### Why not the alternatives
+**One cost the first version did not price: the null experiment (§7.2), ~2.5 GPU hours, once.**
+It is not optional if a p-value is ever to enter the contract, and it is what converts the whole
+paired half of this document from projection into measurement.
+
+### 7.5 Why not the alternatives
 
 * **Raise `LIMIT`.** `mmlu@full` costs 42 min instead of 17 and moves the *unpaired* MDE from 2.06
   to 1.30 points — still short of 1.00, and `mmlu` has no more questions to give. `mmlu_pro@full` is
   **8 hours**. Buying precision with samples is the expensive axis and it does not reach the target.
-* **Declare `LIMIT=100` a breakage detector and delete the 1% clause.** Honest, free, and what §3.3
-  forces if pairing is rejected — but it discards a clause that becomes achievable for one CLI flag,
-  and it leaves the project with *no* quality tolerance test at all, on a lab whose stated
-  numeric-risky knobs are exactly the ones that move accuracy by 1–3 points.
+* **Declare `LIMIT=100` a breakage detector and delete the tolerance clause entirely.** Honest and
+  free. §7.1 stops just short of it: `gsm8k@100` *is* demoted to a breakage detector, but
+  `mmlu@5,700` keeps a tolerance band — calibrated on the observed same-config spread rather than
+  on theory. Deleting the clause outright would leave the project with no quality tolerance at all
+  on exactly the knobs (kv-cache dtype, quantization, MoE backend) that move accuracy by 1–3 pts.
+* **Adopt the paired McNemar p-value.** **Rejected — see §7.0.** It fails a config against itself.
 * **Mandate matched-pair same-session comparison.** Necessary, insufficient, and already the
-  nominal rule (§6). It removes the session term but leaves a 2.06-point floor because the pairing
-  is at the score level. It should stay in the contract; it is not an answer on its own.
+  nominal rule (§6) — followed 63% of the time. It removes the session term, which §3.1 suggests is
+  the dominant one, so it is the highest-value *procedural* change available and it should be
+  enforced rather than merely stated. It is not a resolution claim on its own.
 * **Raise N from 3 to 4 on the throughput side.** Would take the *global* c16 false-keep rate from
-  8.1% to 4.6% for about **+34 min per campaign** — comparable in cost to the whole accuracy fix,
-  to sharpen a rule that §4.4 shows has made exactly one unsupported call. And it spends the money
-  uniformly across models whose true need differs 6× (0.58% CV on the 35B vs 3.37% on the 120B).
-  Defer it. If it is ever wanted, spend it where the model's own CV says it is needed.
+  8.1% to 4.6% for about **+34 min per campaign**. **Discarding bench #1 (§4.5) does better, for
+  free**: 8.1% → **2.2%**, because it removes a bias rather than averaging over one. Do §4.5 first;
+  if more is wanted afterwards, the stronger form ("bench 4, median the last 3") buys both at
+  +1 bench, and it should be spent where the model's own CV says it is needed rather than
+  uniformly across models whose true need differs 6×.
 * **Raise the throughput threshold from 3% to the MDE.** Free, but a *global* MDE of 6.09% would
-  reject four supported 35B keeps including a promoted config (§4.4), while still passing the one
-  genuinely unsupported Nemotron call at +6.83%. It gets both classes wrong, which is what a global
-  threshold does to a per-model variance. A **per-model** MDE is the right object — and reporting
-  it (edit 5) is strictly better than gating on it while the per-model CVs still rest on 3–11
-  brackets each.
+  reject four 35B keeps including a promoted config (§4.4) — though §4.4.1 shows those four are
+  cross-day *and* cross-image, so the global figure is not obviously the wrong one for them. It
+  would still pass the Nemotron call at +7.95%. A **per-model, warm-up-corrected** MDE, reported
+  beside the delta and labelled with the variance component that governs it (§4.4.1), is the right
+  object; gating on it is premature while the per-model CVs rest on 3–11 brackets each.
 
 ---
 
@@ -562,32 +998,45 @@ Throughput side: **+0 minutes.** No extra benches are proposed.
 
 Stated plainly, because the point of this document is to stop plausible numbers being believed.
 
-1. **The discordance rate ψ between two different configs.** No `--log_samples`, no per-item
-   outcomes, in any of the 79 retained lm-eval bundles. Every paired figure here is a projection
-   over ψ ∈ [0.02, 0.10]. First comparison run with the flag on measures it.
-2. **Whether the 4.33-point 35B `mmlu` shift was the vLLM image or the `eval.sh` greedy change.**
+1. **The discordance rate ψ, for two different configs OR for one config against itself.** No
+   `--log_samples`, no per-item outcomes, in any of the 81 retained lm-eval bundles. Every paired
+   figure here is a projection, and §3.1 shows the three brackets we have imply ψ = 0.0014, 0.312
+   and 0.774 — the entire admissible range, i.e. no constraint at all. **§7.2 is the experiment
+   that fixes this, and no p-value should enter the contract before it runs.**
+2. **Whether the 4.158-point 35B `mmlu` step was the vLLM image or the `eval.sh` greedy change.**
    Both moved at the same boundary and no matched pair exists (§2). One 17-minute re-run settles it.
-3. **Run-to-run accuracy variance in general.** Four usable replicate brackets, one above n=100
-   (§3.1). Everything said here about accuracy *repeatability* rests on binomial theory plus lm-eval's
-   own `acc_stderr`, corroborated by a single 0.04-point bracket.
-4. **Throughput variance at c4, c8 and c32.** Zero replicate brackets. `power.py` refuses to answer
+3. **The MECHANISM of the same-config wobble.** §3.1 measures it (0.04 / 0.59 / 0.93 pt) and §3.5
+   shows the corpus cannot attribute it: the prefix-caching + fp8-KV story is corroborated by an
+   out-of-band determinism probe (7/32 vs 32/32 byte-identical) and **contradicted** by the gemma
+   `kvfp8` bracket, which has no prefix caching and moved 3 of 100 items. n=3 on one side, n=2 on
+   the other, features confounded with each other and with MTP.
+4. **The same-config repeat spread of `mmlu_pro` and of `mmlu@full`.** Zero replicate brackets for
+   either. The `mmlu_pro` fallback path in §7 therefore has a priced *cost* and an unmeasured
+   *tolerance*.
+5. **Throughput variance at c4, c8 and c32.** Zero replicate brackets. `power.py` refuses to answer
    rather than extrapolating. Three of the five published tok/s columns have no measured
    reproducibility.
-5. **Cross-session throughput variance.** 6 brackets at c1, 3 at c16. Enough to say the pooled
-   figure is not wildly different from the within-session one; nowhere near enough to characterise
-   the tail the FF711 note is about.
-6. **What the paired seed buys at c16.** The bootstrap is invalid where requests interact, so §5's
+6. **Cross-session throughput variance — and this one now bites.** 6 brackets at c1, **3 at c16**.
+   §4.4.1 shows **21 of the 55 historical deltas are cross-day comparisons**, so the variance that
+   governs 38% of the record rests on three brackets. Cross-**image** comparisons (6 of 55) have no
+   error term in the corpus at all.
+7. **What the paired seed buys at c16.** The bootstrap is invalid where requests interact, so §5's
    c16 number is a 1/√n projection of the c1 measurement, not a measurement. Testing it properly
    needs a deliberate unpaired arm — bench one config three times at `AHL_SEED=42` and three times
    at three different seeds — which is ~35 minutes of GPU and has never been run.
-7. **Whether quality is batch-dependent** (the open `CONC=1`/`CONC=32` follow-up). Unchanged by this
-   work, and it interacts: if accuracy moves with concurrency, a paired McNemar comparison must hold
-   `conc` fixed as well as `limit`. The `conc` column added by contract A9 makes that checkable.
-8. **Why `mmlu` succeeded on MTP for the 35B and failed on MTP for Nemotron-3-Super.** The journal
+8. **Whether quality is batch-dependent** (the open `CONC=1`/`CONC=32` follow-up). Unchanged by this
+   work, and it interacts: if accuracy moves with concurrency, any paired comparison must hold
+   `conc` fixed as well as `limit`. The `conc` column added by contract A9 makes that checkable,
+   and §7.2's null experiment can answer it in the same sitting.
+9. **Why `mmlu` succeeded on MTP for the 35B and failed on MTP for Nemotron-3-Super.** The journal
    establishes both facts and explains neither. Candidate discriminators the record cannot separate:
    the model architecture, the MTP implementation (`mtp` vs a draft model), `num_speculative_tokens`
    (1 and 2 both worked on the 35B), and the vLLM version. Until it is understood, the safe
    procedure is the LIMIT=2 probe per (model, image), not a blanket rule in either direction.
+10. **Whether the first-bench offset (§4.3) is one phenomenon or several.** Two campaigns carry it
+    almost deterministically (|t| > 30) and seven models show nothing. It is not prefix caching
+    (those configs are the *tightest* group at −0.09%) and it is over after bench 1 (n2 vs n3 is
+    +0.05%). §4.5 acts on it as a bias without claiming to explain it, which is the right order.
 
 ---
 
@@ -607,17 +1056,38 @@ Design commitments worth naming:
   cumulative integral, because the two central order statistics of an even sample are consecutive,
   and a product-Simpson rule over the square runs 2–5% low). Both are checked against the published
   finite-n efficiency table to 0.03% and against seeded Monte Carlo.
-* **It is honest about pairing.** The `accuracy` output prints the unpaired and paired columns side
-  by side with the assumed ψ, and states in the footer that ψ is unmeasured in this repo.
-* **Every number is verified by execution.** `scripts/power_selftest.sh` runs 56 numeric checks
+* **It refuses rather than guessing.** Nonsense inputs (negative CV, `--n` below `b+c`, a `--model`
+  matching no row) exit 2 with a reason on stderr. Degenerate-but-real inputs (`--cv 0`, `b=c=0` at
+  a real n) are answered in the limit, with a caveat printed. Silent repairs are announced.
+* **Every number is verified by execution.** `scripts/power_selftest.sh` runs **68 numeric checks**
   (incomplete beta against hand-computable `I₀.₅(2,3) = 11/16`; Student-t against the published
   table at df 2/3/5/10/30/100; Clopper–Pearson against published (2/20) and (0/10) intervals;
   exact McNemar against `2·P(X≤2 | 10, ½) = 112/1024`; two-proportion n against Fleiss's
   uncorrected 58/arm; McNemar n against Connor's 469 pairs; both validated again by seeded Monte
-  Carlo of the actual tests) plus 35 CLI checks. Note that the shell matcher itself is tested for
-  its ability to **fail** — `grep` is line-oriented and silently never matches a multi-line
-  pattern, which is the same always-green failure shape as the reachability bugs in the lab notes.
+  Carlo of the actual tests) plus **77 CLI checks** (71 without the gitignored bundles; set
+  `AHL_POWER_DATA_ROOT` to a checkout that has them). The shell matcher itself is tested for its
+  ability to **fail** — `grep` is line-oriented and silently never matches a multi-line pattern,
+  which is the same always-green failure shape as the reachability bugs in the lab notes.
+
+### 9.1 Six defects found by audit, 20260820-b — each with a selftest case that fails without the fix
+
+| # | defect | before | after |
+|---|---|---|---|
+| 1 | `mcnemar --samples` keyed on `doc_id`, which **restarts at 0 in every leaf task's file**. lm-eval writes one file per leaf, so `mmlu@100` is 57 files a side; concatenating overwrote across leaves. | a 2-leaf × 5-doc input reported **`pairs 5`**; on a real run it would report McNemar on **n=100 while the operator believed 5,700** | keyed on `(task, doc_id)`; `--samples-a`/`--samples-b` accept **N files** per side and the output names the leaves pooled. Reports `pairs 10`. Hand-concatenated files are now a duplicate-key **error**. |
+| 2 | `--model` was a **substring** filter, and this CLI is what §7.1(6) wires into `run_experiment.sh` | `--model Qwen3.6-35B-A3B-NVFP4` also matched `unsloth/…-Fast`: **12 brackets / CV 0.61%** instead of 11 / 0.58%. `--model NVFP4` pooled nine models. | exact, org-qualified match; a name matching nothing exits 2 and lists the known models |
+| 3 | crashes on legitimate input | `accuracy --p 0` and `throughput --cv 0` both raised **uncaught `ZeroDivisionError`** — and `p=0` is real here (think-off zero-token `gsm8k=0.0` rows) | `--p 0`/`--p 1` refuse with an explanation (a degenerate proportion has no MDE); `--cv 0` is **answered in the zero-spread limit** with a caveat that a k=3 CV of 0 is a small-sample artefact |
+| 4 | accepted nonsense confidently | `--cv -5` returned a full report computed from \|log1p(−0.05)\|; `mcnemar --b 5 --c 5 --n 3` printed `psi = 3.3333` and `MDE 206.60 points`; `--b 0 --c 0` printed `psi = nan` | all three refuse (exit 2) with the reason; `b=c=0` at a **real** n is answered as psi=0, MDE undefined |
+| 5 | silent parameter repair | `n_mcnemar` set ψ := δ when ψ < δ while `cmd_accuracy` printed the **user's** ψ: `--delta 5.0 --discordance 0.02` printed `psi = 0.020` beside an answer computed at 0.05 | `mcnemar_psi_floor()` returns the flag; the output prints `!! psi RAISED to 0.050`, and `--json` carries `paired.discordance_repaired` |
+| 6 | assorted | mismatched `--samples` files silently **intersected**; `throughput` printed `power at +X%` twice under one label with possibly different values; the doc said 23,667/1,567 while the tool printed 23,668/1,568 | mismatched sides refuse unless `--allow-partial` (which prints a `!! PARTIAL` banner); the two power lines are labelled `power AT the threshold` / `power at the true effect`; the doc now quotes the tool |
+
+Additions in the same pass, both so that this document's claims are checkable rather than quoted:
+**`--drop-first`** on `throughput`/`variance`/`keep-rule` (§4.5), and four printed caveats on
+`seed` (§5) covering the proxy estimator, the random `n`, the mixed-basis band and the wide
+ragged-tail window.
 
 ---
 
-*Written 20260820 against commit-time `results.tsv` (317 rows) and `accuracy.tsv` (77 rows).*
+*First written 20260820 against commit-time `results.tsv` (317 rows) and `accuracy.tsv` (77 rows —
+the real count is 79). Revised 20260820-b after an independent audit re-derived every number from
+the raw journals: `power.py` bug fixes, §2 / §3.1 / §3.5 / §4.3 / §4.4.1 / §4.5 / §5 corrections,
+and §7 rewritten with its p-value clause retracted.*

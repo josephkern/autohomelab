@@ -380,16 +380,25 @@ def mde_two_prop(n: float, p: float, alpha: float = 0.05, power: float = 0.80) -
     return 0.5 * (lo + hi)
 
 
+def mcnemar_psi_floor(psi: float, delta: float):
+    """(psi_used, was_repaired). |p01-p10| <= p01+p10 by construction: a pair of configs cannot
+    differ by more than they discord, so psi < delta describes an impossible world. The honest
+    repair is to raise psi to delta -- but the CALLER has to say so, which is why this is a
+    separate function returning the flag rather than a silent clamp inside n_mcnemar()."""
+    if delta > 0 and 0 < psi < delta:
+        return delta, True
+    return psi, False
+
+
 def n_mcnemar(psi: float, delta: float, alpha: float = 0.05, power: float = 0.80) -> float:
     """Number of PAIRS for a two-sided McNemar test (Connor 1987).
-    psi = discordance rate p01+p10, delta = |p01-p10| = the accuracy difference in proportion."""
+    psi = discordance rate p01+p10, delta = |p01-p10| = the accuracy difference in proportion.
+
+    psi < delta is repaired to psi = delta (see mcnemar_psi_floor); every caller that prints
+    the user's psi beside this answer must print the repair too."""
     if delta <= 0 or psi <= 0:
         return float("inf")
-    # |p01-p10| <= p01+p10 by construction: a pair of configs cannot differ by more than they
-    # discord. A caller asking for delta > psi has specified an impossible world; the honest
-    # repair is to raise psi to delta, not to answer the impossible question.
-    if psi < delta:
-        psi = delta
+    psi, _ = mcnemar_psi_floor(psi, delta)
     za = norm_ppf(1.0 - alpha / 2.0)
     zb = norm_ppf(power)
     num = za * math.sqrt(psi) + zb * math.sqrt(psi - delta * delta)
@@ -428,7 +437,14 @@ def diff_sd(cv: float, n_cand: int, n_ref: int, estimator: str = "median",
     """SD of log(median_cand / median_ref) under relative noise of size cv.
 
     For cv <~ 10% the log- and linear-relative scales agree to better than 1%, and the log
-    scale keeps the ratio symmetric, which is what a '>3%' rule is really about."""
+    scale keeps the ratio symmetric, which is what a '>3%' rule is really about.
+
+    cv must be >= 0. A NEGATIVE cv used to sail straight through as |log1p(-cv)| and produce a
+    full, confident report; a spread cannot be negative, so that is refused at the CLI.
+    cv == 0 IS legitimate -- two benches that matched to the printed precision give a measured
+    CV of exactly zero -- and yields sd = 0, which the decision functions handle as a limit."""
+    if cv < 0:
+        raise ValueError("cv must be >= 0, got %r" % (cv,))
     s = math.log1p(cv) if cv < 0.5 else math.log(1.0 + cv)
     a = estimator_sd_factor(n_cand, estimator) * s
     if paired_ref:
@@ -437,11 +453,18 @@ def diff_sd(cv: float, n_cand: int, n_ref: int, estimator: str = "median",
     return math.hypot(a, b)
 
 
+def _step(x: float) -> float:
+    """The zero-SD limit of norm_cdf(x/0): 1 above, 0 below, 1/2 exactly at."""
+    return 1.0 if x > 0 else (0.0 if x < 0 else 0.5)
+
+
 def false_keep_prob(threshold: float, cv: float, n_cand: int = 3, n_ref: int = 3,
                     estimator: str = "median") -> float:
     """P(rule fires) when the two configs are actually identical. threshold is RELATIVE
     (0.03 for the repo's >3%)."""
     sd = diff_sd(cv, n_cand, n_ref, estimator)
+    if sd == 0.0:
+        return 1.0 - _step(math.log1p(threshold))
     return 1.0 - norm_cdf(math.log1p(threshold) / sd)
 
 
@@ -449,6 +472,8 @@ def keep_power(true_effect: float, threshold: float, cv: float, n_cand: int = 3,
                n_ref: int = 3, estimator: str = "median") -> float:
     """P(rule fires) when the candidate is genuinely `true_effect` relative faster."""
     sd = diff_sd(cv, n_cand, n_ref, estimator)
+    if sd == 0.0:
+        return _step(math.log1p(true_effect) - math.log1p(threshold))
     return norm_cdf((math.log1p(true_effect) - math.log1p(threshold)) / sd)
 
 
@@ -511,8 +536,23 @@ def _tps(row, level: str):
     return v if v > 0 else None
 
 
+class NoSuchModel(Exception):
+    """An exact --model that matches no row in the journals."""
+
+    def __init__(self, model, known):
+        super().__init__(model)
+        self.model = model
+        self.known = known
+
+
+def known_models(root: str = REPO_ROOT):
+    return sorted({(r.get("model") or "") for r in _rows("results/*/*/*/results.tsv", root)}
+                  - {""})
+
+
 def throughput_brackets(root: str = REPO_ROOT, level: str = "c16", model: str = None,
-                        shape: str = None, scope: str = "experiment"):
+                        shape: str = None, scope: str = "experiment",
+                        drop_first: bool = False):
     """Replicate brackets = repeated benches of ONE config that should have produced the
     same number.
 
@@ -521,20 +561,42 @@ def throughput_brackets(root: str = REPO_ROOT, level: str = "c16", model: str = 
                         rule is actually applied to.
       scope=session     same config + shape on the same calendar day, regardless of exp tag.
       scope=cross       session medians of the same config on DIFFERENT days.
+
+    `model` is matched EXACTLY against the `model` column (the full org-qualified HF repo id),
+    case-insensitively. It used to be a substring test, which silently pooled
+    `RedHatAI/Qwen3.6-35B-A3B-NVFP4` with `unsloth/Qwen3.6-35B-A3B-NVFP4-Fast` whenever the org
+    was omitted -- 12 brackets and CV 0.61% where the model actually has 11 and 0.58%. A
+    per-model variance estimate that silently spans two models is the exact failure this
+    filter exists to prevent, so a name matching nothing now RAISES rather than falling back.
     """
     rows = [r for r in _rows("results/*/*/*/results.tsv", root)]
     if model:
-        rows = [r for r in rows if model.lower() in (r.get("model") or "").lower()]
+        want = model.strip().lower()
+        rows = [r for r in rows if (r.get("model") or "").strip().lower() == want]
+        if not rows:
+            raise NoSuchModel(model, known_models(root))
     if shape:
         rows = [r for r in rows if shape in (r.get("shape") or "")]
     out = []
+
+    def _vals(pairs):
+        """run-ordered values, optionally without the first bench of the bracket.
+
+        The first bench of an experiment runs ~1.2% slow at c16 on this node, and it is a
+        BIAS, not noise -- so it inflates every bracket's CV and therefore every MDE the tool
+        publishes. Dropping it takes the global c16 pooled CV from 2.25% to 1.55%. See
+        POWER-analysis.md section 4.3."""
+        vs = [v for _, v in sorted(pairs)]
+        return vs[1:] if drop_first else vs
+
     if scope == "cross":
         g = defaultdict(lambda: defaultdict(list))
         for r in rows:
             if _row_ok_at(r, level) and _tps(r, level):
-                g[(r["model"], r["config_hash"], r["shape"])][r["run_id"][:8]].append(_tps(r, level))
+                g[(r["model"], r["config_hash"], r["shape"])][r["run_id"][:8]].append(
+                    (r["run_id"], _tps(r, level)))
         for key, byday in g.items():
-            vals = [statistics.median(v) for v in byday.values() if v]
+            vals = [statistics.median(v) for v in (_vals(p) for p in byday.values()) if v]
             if len(vals) >= 2:
                 out.append((statistics.stdev(vals) / statistics.mean(vals), len(vals), key,
                             sorted(vals)))
@@ -545,8 +607,9 @@ def throughput_brackets(root: str = REPO_ROOT, level: str = "c16", model: str = 
     g = defaultdict(list)
     for r in rows:
         if _row_ok_at(r, level) and _tps(r, level):
-            g[keyfn(r)].append(_tps(r, level))
-    for key, vals in g.items():
+            g[keyfn(r)].append((r["run_id"], _tps(r, level)))
+    for key, pairs in g.items():
+        vals = _vals(pairs)
         if len(vals) >= 2:
             out.append((statistics.stdev(vals) / statistics.mean(vals), len(vals), key,
                         sorted(vals)))
@@ -616,6 +679,21 @@ def accuracy_effective_n(task: str, limit, root: str = REPO_ROOT):
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _die(msg: str, rc: int = 2) -> int:
+    """Refuse, on stderr, with a reason. A power calculator that answers a nonsense question
+    with a confident number is worse than one that stops: the number gets quoted."""
+    print("power.py: " + msg, file=sys.stderr)
+    return rc
+
+
+def _check_alpha_power(a):
+    if not 0.0 < a.alpha < 1.0:
+        return _die("--alpha must be in (0,1), got %r" % a.alpha)
+    if not 0.0 < a.power < 1.0:
+        return _die("--power must be in (0,1), got %r" % a.power)
+    return None
+
+
 def _fmt_n(x):
     if x is None or (isinstance(x, float) and (math.isinf(x) or math.isnan(x))):
         return "n/a"
@@ -626,24 +704,45 @@ def _emit(obj, as_json, lines):
     if as_json:
         print(json.dumps(obj, indent=2, sort_keys=True))
     else:
-        print("\n".join(lines))
+        print("\n".join(x for x in lines if x is not None))
 
 
 def cmd_accuracy(a):
+    bad = _check_alpha_power(a)
+    if bad is not None:
+        return bad
     task = a.task
+    if a.n is not None and a.n <= 0:
+        return _die("--n must be positive, got %d" % a.n)
     if a.n:
         n, prov = a.n, "given on the command line"
     else:
         n, prov = accuracy_effective_n(task, a.limit, a.root)
     if not n:
-        print("cannot determine n for task=%s limit=%s; pass --n" % (task, a.limit),
-              file=sys.stderr)
-        return 2
+        return _die("cannot determine n for task=%s limit=%s; pass --n" % (task, a.limit))
     p = a.p if a.p is not None else TASK_TYPICAL_P.get(task, 0.85)
+    if not 0.0 < p < 1.0:
+        # p=0 is a REAL observation here -- the think-off zero-token failures wrote gsm8k=0.0
+        # rows -- but it is a failure signature, not a proportion to plan a tolerance around:
+        # a degenerate binomial has zero variance and nothing to drop from.
+        return _die("--p must be in (0,1), got %.4g. A score of exactly %s is a degenerate "
+                    "proportion: its binomial variance is 0 and no MDE exists. If this came "
+                    "from a real row (e.g. a think-off zero-token gsm8k=0.0), that row is a "
+                    "`zero_score` failure signature to diagnose, not a level to plan against."
+                    % (p, "0" if p <= 0 else "1"))
+    if not 0.0 < a.discordance <= 1.0:
+        return _die("--discordance is a fraction of items in (0,1], got %r" % a.discordance)
+    if a.delta <= 0:
+        return _die("--delta must be positive: it is the difference you want to be able to "
+                    "detect, got %r" % a.delta)
     delta = a.delta / 100.0 * (p if a.relative else 1.0)
+    if delta >= p:
+        return _die("--delta %.4g points is at or above the assumed accuracy p=%.4g; there is "
+                    "no such drop to detect" % (delta * 100, p))
     unpaired_mde = mde_two_prop(n, p, a.alpha, a.power)
     unpaired_n = n_two_prop(p, p - delta, a.alpha, a.power)
     paired_mde = mde_mcnemar(n, a.discordance, a.alpha, a.power)
+    psi_used, psi_repaired = mcnemar_psi_floor(a.discordance, delta)
     paired_n = n_mcnemar(a.discordance, delta, a.alpha, a.power)
     se = math.sqrt(p * (1 - p) / n)
     k = int(round(p * n))
@@ -657,7 +756,8 @@ def cmd_accuracy(a):
                se_points=se * 100, ci95_points=[lo * 100, hi * 100],
                unpaired=dict(mde_points=unpaired_mde * 100, n_required=unpaired_n,
                              resolves=resolves_unpaired),
-               paired=dict(discordance=a.discordance, mde_points=paired_mde * 100,
+               paired=dict(discordance=a.discordance, discordance_used=psi_used,
+                           discordance_repaired=psi_repaired, mde_points=paired_mde * 100,
                            n_required=paired_n, resolves=resolves_paired),
                minutes_at_n=(n * secs / 60.0) if secs else None,
                minutes_for_required_unpaired=(unpaired_n * secs / 60.0)
@@ -685,6 +785,10 @@ def cmd_accuracy(a):
          "  PAIRED / McNemar (same items both sides; needs lm-eval --log_samples)",
          "    assumed discordance psi = %.3f  (fraction of items the two configs answer differently)"
          % a.discordance,
+         ("    !! psi RAISED to %.3f for 'pairs needed' -- two configs cannot differ by %.2f "
+          "points\n       while discording on only %.1f%% of items. The MDE line below still "
+          "uses your psi = %.3f." % (psi_used, delta * 100, a.discordance * 100, a.discordance))
+         if psi_repaired else None,
          "    MDE at this n      %s"
          % (("%.2f" % (paired_mde * 100)) if not math.isnan(paired_mde) else "unreachable"),
          "    pairs needed       %s%s" % (_fmt_n(paired_n),
@@ -698,10 +802,13 @@ def cmd_accuracy(a):
                  % (n * secs / 60.0, secs))
     L.append("")
     L.append("  NOTE psi is NOT measured anywhere in this repo (eval.sh does not pass")
-    L.append("       --log_samples), so the paired column is a projection. The one datum we have")
-    L.append("       -- an identical-config mmlu repeat that moved 81.28 -> 81.32 (n=5700) --")
-    L.append("       implies psi ~ 0.001 for a config compared with ITSELF. Two DIFFERENT configs")
-    L.append("       will discord more; 0.02-0.10 is the defensible planning range.")
+    L.append("       --log_samples), so the paired column is a PROJECTION, not a measurement.")
+    L.append("       The three same-config mmlu@5,700 repeats in the journal moved 0.04, 0.59 and")
+    L.append("       0.93 points -- a repeat-difference SD of ~0.64 pt. Under a pure paired-noise")
+    L.append("       model the 0.93 pt one alone implies psi ~ 0.77, which is absurd, so a")
+    L.append("       session-level term sits underneath these numbers that no psi explains.")
+    L.append("       Do NOT put a p-value from this model into a gate until the null experiment")
+    L.append("       in research/review/POWER-analysis.md section 7 has been run.")
     _emit(obj, a.json, L)
     return 0
 
@@ -709,14 +816,14 @@ def cmd_accuracy(a):
 def _resolve_cv(a):
     if a.cv is not None:
         return a.cv / 100.0, dict(source="--cv", brackets=None), None
-    br = throughput_brackets(a.root, a.level, a.model, a.shape, a.scope)
+    br = throughput_brackets(a.root, a.level, a.model, a.shape, a.scope, a.drop_first)
     s = bracket_summary(br)
     if s and s["brackets"] >= a.min_brackets:
         return s["pooled_cv"], dict(source="repo brackets (%s, %s%s)"
                                     % (a.level, a.scope,
                                        ", model~%s" % a.model if a.model else ""), **s), br
     # fall back to the whole-repo pool at this level, and say so
-    br2 = throughput_brackets(a.root, a.level, None, a.shape, a.scope)
+    br2 = throughput_brackets(a.root, a.level, None, a.shape, a.scope, a.drop_first)
     s2 = bracket_summary(br2)
     if not s2:
         return None, dict(source="none"), None
@@ -727,7 +834,26 @@ def _resolve_cv(a):
 
 
 def cmd_throughput(a):
-    cv, meta, br = _resolve_cv(a)
+    bad = _check_alpha_power(a)
+    if bad is not None:
+        return bad
+    if a.cv is not None and a.cv < 0:
+        return _die("--cv is a relative spread in percent and cannot be negative, got %r. "
+                    "(It used to be accepted: the tool computed |log1p(cv)| and printed a full "
+                    "report.)" % a.cv)
+    if a.reps < 1 or a.reps_ref < 1:
+        return _die("--reps and --reps-ref must be >= 1")
+    if a.threshold < 0:
+        return _die("--threshold is a relative percent and cannot be negative, got %r"
+                    % a.threshold)
+    if not 0.0 < a.max_false_keep < 1.0:
+        return _die("--max-false-keep is a probability in (0,1), got %r" % a.max_false_keep)
+    try:
+        cv, meta, br = _resolve_cv(a)
+    except NoSuchModel as e:
+        return _die("--model %r matches no row in results/*/*/*/results.tsv. The filter is an "
+                    "EXACT, org-qualified match. Known models:\n    %s"
+                    % (e.model, "\n    ".join(e.known)))
     if cv is None or math.isnan(cv):
         print("no replicate brackets for level=%s scope=%s -- the repo has never measured "
               "this level twice under one config. Pass --cv to plan anyway."
@@ -748,7 +874,9 @@ def cmd_throughput(a):
                false_keep_prob=fk, power_at_delta=pw, power_at_threshold=pw_at_thr,
                mde_pct=mde * 100, reps_for_false_keep=need_fk, reps_for_mde=need_mde,
                estimator_sd_factor=sdf)
-    L = ["== throughput: %s, %s scope, estimator=%s of N=%d ==" % (a.level, a.scope, a.estimator, a.reps)]
+    L = ["== throughput: %s, %s scope, estimator=%s of N=%d%s ==" % (
+        a.level, a.scope, a.estimator, a.reps,
+        ", FIRST BENCH DROPPED" if a.drop_first else "")]
     if meta.get("brackets"):
         L.append("  replicate spread    pooled CV %.2f%%  (median %.2f%%, p75 %.2f%%, p90 %.2f%%, "
                  "max %.2f%%) over %d brackets / %d df"
@@ -764,10 +892,17 @@ def cmd_throughput(a):
           "",
           "  KEEP threshold      >%.1f%%" % a.threshold,
           "    false-keep rate    %.1f%%   (rule fires on two IDENTICAL configs)" % (fk * 100),
-          "    power at +%.1f%%    %.1f%%   (rule fires on a candidate exactly at the threshold)"
-          % (a.threshold, pw_at_thr * 100),
-          "    power at +%.1f%%    %.1f%%" % (a.delta, pw * 100),
-          "",
+          "    power AT the threshold (+%.2f%%)      %.1f%%   (a threshold fires half the time"
+          " on an effect exactly equal to it)" % (a.threshold, pw_at_thr * 100),
+          "    power at the true effect (+%.2f%%)   %.1f%%" % (a.delta, pw * 100),
+          ""]
+    if cv == 0.0:
+        L += ["  !! CV IS EXACTLY ZERO -- every number above is the zero-spread limit (a step",
+              "     function, not a distribution). A measured CV of 0 from k=2 or k=3 benches is",
+              "     an artefact of a tiny sample, NOT evidence that the box is noiseless: at k=3",
+              "     the sampling distribution of an estimated CV has real mass near zero.",
+              ""]
+    L += [
           "  two-sided test      MDE %.2f%% at alpha=%.2f power=%.2f" % (mde * 100, a.alpha, a.power),
           "    reps for MDE<=%.1f%%  N=%s per arm" % (a.delta, need_mde if need_mde > 0 else ">999"),
           "    reps for false-keep<=%.0f%%  N=%s per arm"
@@ -782,12 +917,21 @@ def cmd_throughput(a):
 
 def cmd_keep_rule(a):
     """The KEEP rule exactly as program.md states it, scored against the repo's own spread."""
+    if not 0.0 < a.discordance <= 1.0:
+        return _die("--discordance is a fraction of items in (0,1], got %r" % a.discordance)
+    try:
+        if a.model:
+            throughput_brackets(a.root, "c16", a.model, a.shape, "experiment")
+    except NoSuchModel as e:
+        return _die("--model %r matches no row (exact, org-qualified match). Known models:\n"
+                    "    %s" % (e.model, "\n    ".join(e.known)))
     out = {}
     L = ["== the KEEP rule as written, scored against this repo's measured spread ==",
          "   (program.md: median c16 beats current best by >3% AND -- for numeric-risky knobs --",
          "    accuracy within ~1%)", ""]
     for level in ("c1", "c16"):
-        br = throughput_brackets(a.root, level, a.model, a.shape, "experiment")
+        br = throughput_brackets(a.root, level, a.model, a.shape, "experiment",
+                                 a.drop_first)
         s = bracket_summary(br)
         if not s:
             L.append("  %-4s no replicate brackets" % level)
@@ -832,11 +976,19 @@ def cmd_keep_rule(a):
 
 
 def cmd_variance(a):
+    try:
+        if a.model:
+            throughput_brackets(a.root, "c16", a.model, a.shape, "experiment")
+    except NoSuchModel as e:
+        return _die("--model %r matches no row (exact, org-qualified match). Known models:\n"
+                    "    %s" % (e.model, "\n    ".join(e.known)))
     out = {"throughput": {}, "accuracy": {}}
-    L = ["== empirical variance, from this repo's own journals ==", ""]
+    L = ["== empirical variance, from this repo's own journals ==%s"
+         % ("  [FIRST BENCH OF EACH BRACKET DROPPED]" if a.drop_first else ""), ""]
     for scope in ("experiment", "session", "cross"):
         for level in LEVELS:
-            br = throughput_brackets(a.root, level, a.model, a.shape, scope)
+            br = throughput_brackets(a.root, level, a.model, a.shape, scope,
+                                     a.drop_first)
             s = bracket_summary(br)
             if not s:
                 continue
@@ -848,7 +1000,7 @@ def cmd_variance(a):
                         s["max_cv"] * 100))
         L.append("")
     # worst offenders, so an operator can see WHICH configs are noisy
-    br = throughput_brackets(a.root, "c16", a.model, a.shape, "experiment")
+    br = throughput_brackets(a.root, "c16", a.model, a.shape, "experiment", a.drop_first)
     br.sort(reverse=True)
     L.append("  noisiest c16 brackets:")
     for cv, k, key, vals in br[:6]:
@@ -912,7 +1064,7 @@ def cmd_seed(a):
     """
     runs = sorted(glob.glob(os.path.join(a.root, "results/*/*/*/data/*-chat")))
     rnd = random.Random(a.seed)
-    boot, tail, nreq, budget = [], [], [], []
+    boot, tail, tail60, nreq, budget, proxy_ratio = [], [], [], [], [], []
     for run in runs:
         p = os.path.join(run, "level_c1.json")
         if not os.path.exists(p):
@@ -933,13 +1085,28 @@ def cmd_seed(a):
         def T(seq):
             return sum(x[0] for x in seq) / sum(x[1] for x in seq)
 
+        # How far the bootstrap's statistic is from the one the JOURNAL publishes. GuideLLM's
+        # `output_tokens_per_second.successful.mean` is a TOKEN-level mean (its `count` is the
+        # token total, not the request total); T() is sum-over-sum. They are different
+        # estimators, so this ratio is reported rather than assumed to be 1 -- see
+        # POWER-analysis.md section 5.
+        try:
+            reported = b["metrics"]["output_tokens_per_second"]["successful"]["mean"]
+            if reported:
+                proxy_ratio.append(T(rows) / reported)
+        except (KeyError, TypeError):
+            pass
+
         bs = [T([rows[rnd.randrange(n)] for _ in range(n)]) for _ in range(a.boot)]
         boot.append(statistics.pstdev(bs) / statistics.mean(bs))
         # the part pairing does NOT fix: a faster config completes MORE of the same sequence,
-        # so the two sides average different prefixes of it.
-        lo = max(3, int(n * 0.85))
-        pre = [T(rows[:k]) for k in range(lo, n + 1)]
-        tail.append(statistics.pstdev(pre) / statistics.mean(pre))
+        # so the two sides average different prefixes of it. Quoted over TWO windows, because
+        # the narrow one presumes the two configs differ in speed by <=15% and 11 of the 55
+        # historical candidate deltas exceed 40%.
+        for frac, acc in ((0.85, tail), (0.60, tail60)):
+            lo = max(3, int(n * frac))
+            pre = [T(rows[:k]) for k in range(lo, n + 1)]
+            acc.append(statistics.pstdev(pre) / statistics.mean(pre))
         budget.append(statistics.pstdev([x[0] for x in rows]) / statistics.mean([x[0] for x in rows]))
     if not boot:
         print("no c1 bundles with per-request records under %s/results (they are gitignored; "
@@ -950,30 +1117,51 @@ def cmd_seed(a):
         return statistics.median(v)
     br = throughput_brackets(a.root, "c1", None, "chat", "experiment")
     s = bracket_summary(br)
+    def q(v, p):
+        v = sorted(v)
+        return v[min(len(v) - 1, int(p * (len(v) - 1)))]
     obj = dict(bundles=len(boot), median_requests=med(nreq), budget_cv=med(budget),
                workload_cv_median=med(boot), workload_cv_pooled=math.sqrt(
                    sum(x * x for x in boot) / len(boot)),
-               ragged_tail_cv=med(tail), bands={})
+               ragged_tail_cv=med(tail), ragged_tail_cv_wide=med(tail60),
+               ragged_tail_p90_wide=q(tail60, 0.90), ragged_tail_max_wide=max(tail60),
+               proxy_over_reported=med(proxy_ratio) if proxy_ratio else None, bands={})
     L = ["== what the fixed seed buys, at c1, from %d retained bundles ==" % len(boot),
          "  median requests per c1 stage      %.0f" % med(nreq),
          "  output-budget CV within a stage   %.1f%%   (this is what the seed holds identical)"
          % (med(budget) * 100),
-         "  ragged-tail residual              %.2f%%   pairing does NOT fix this: the faster"
+         "  ragged-tail residual   85-100%%     %.2f%%   pairing does NOT fix this: the faster"
          % (med(tail) * 100),
-         "                                            config completes more of the same",
+         "                         60-100%%     %.2f%%   config completes more of the same"
+         % (med(tail60) * 100),
          "                                            sequence, so the two sides average",
-         "                                            different prefixes of it.",
-         "",
-         "  band            machine SD   workload SD   unpaired SD   SD ratio   ~replicates",
-         "  ------------------------------------------------------------------------------"]
+         "                                            different prefixes of it. Quote the WIDE",
+         "                                            window: 11 of the 55 historical candidate",
+         "                                            deltas exceed 40%, so a 15% prefix",
+         "                                            window is not the regime we are in.",
+         "                         (60-100%%: p90 %.2f%%, max %.2f%%)"
+         % (q(tail60, 0.90) * 100, max(tail60) * 100)]
+    if proxy_ratio:
+        L += ["",
+              "  CAVEAT the bootstrap statistic is sum(tokens)/sum(latency); the JOURNAL records",
+              "         GuideLLM's token-level mean. Median ratio proxy/reported = %.3f, i.e. the"
+              % med(proxy_ratio),
+              "         resampled quantity runs ~%.0f%% below the number Gate 3 publishes. The"
+              % ((1 - med(proxy_ratio)) * 100),
+              "         variance decomposition below is therefore a decomposition of a PROXY.",
+              "  CAVEAT a c1 stage is TIME-limited, so its request count n is itself random. A",
+              "         fixed-n bootstrap holds n at what was observed and cannot see that term."]
+    L += ["",
+          "  band            machine SD   workload SD   unpaired SD   SD ratio   ~replicates",
+          "  ------------------------------------------------------------------------------"]
     for name, machine, workload in (("typical (median)", s["median_cv"], med(boot)),
-                                    ("planning (pooled)", s["pooled_cv"],
+                                    ("planning (MIXED BASIS)", s["pooled_cv"],
                                      math.sqrt(sum(x * x for x in boot) / len(boot)))):
         unp = math.hypot(machine, workload)
         r = unp / machine if machine else float("nan")
         obj["bands"][name] = dict(machine_cv=machine, workload_cv=workload, unpaired_cv=unp,
                                   sd_ratio=r, reps_equivalent=r * r)
-        L.append("  %-16s %8.2f%%   %9.2f%%   %9.2f%%   %7.2fx   %8.1fx"
+        L.append("  %-22s %2.2f%%   %9.2f%%   %9.2f%%   %7.2fx   %8.1fx"
                  % (name, machine * 100, workload * 100, unp * 100, r, r * r))
     # c16 scaling: the workload term shrinks like 1/sqrt(requests in the stage), and a c16
     # stage completes an order of magnitude more requests than a c1 stage.
@@ -1002,59 +1190,144 @@ def cmd_seed(a):
               % (s16["median_cv"] * 100, r16),
               "    nothing, which matters because c16 IS the tuned objective."]
     L += ["",
-          "  Read this as: the pairing is real, free, and worth keeping -- about %.1fx the"
-          % obj["bands"]["planning (pooled)"]["reps_equivalent"],
-          "  replicates at c1. But it is not what makes Gate 3 hard: at the c16 objective the",
-          "  machine term dominates and no amount of seed-pinning touches it."]
+          "  The 'planning' row is MIXED BASIS and is an upper band, not a like-for-like ratio:",
+          "  its machine column is a df-weighted pooled CV over replicate brackets, its workload",
+          "  column an UNWEIGHTED rms over per-bundle bootstrap CVs (median %.2f%% vs rms %.2f%%"
+          % (med(boot) * 100, math.sqrt(sum(x * x for x in boot) / len(boot)) * 100),
+          "  -- a between-model tail that governs no single real comparison). Read the ratio as",
+          "  an ORDER OF MAGNITUDE.",
+          "",
+          "  Read this as: the pairing is real, free, and worth keeping -- worth %.1f-%.1fx the"
+          % (obj["bands"]["typical (median)"]["reps_equivalent"],
+             obj["bands"]["planning (MIXED BASIS)"]["reps_equivalent"]),
+          "  replicates at c1, i.e. 'a couple', not a figure to quote to two decimals. But it",
+          "  is not what makes Gate 3 hard: at the c16 objective the machine term dominates and",
+          "  no amount of seed-pinning touches it."]
     _emit(obj, a.json, L)
     return 0
 
 
-def _load_sample_correctness(path: str):
-    """Map doc_id -> 0/1 from an lm-eval --log_samples jsonl."""
+_SAMPLES_RE = re.compile(r"samples_(?P<task>.+?)_\d{4}-\d{2}-\d{2}T[0-9.\-]+\.jsonl$")
+
+
+def _task_of_samples_file(path: str) -> str:
+    """The leaf task a `--log_samples` file belongs to.
+
+    lm-eval writes ONE file per LEAF subtask, named `samples_<task>_<iso-timestamp>.jsonl`, and
+    `doc_id` restarts at 0 in every one of them. `mmlu` is 57 such files. Keying on `doc_id`
+    alone therefore collapses 57 leaves onto ~100 keys, which is the difference between a
+    McNemar over n=5,700 and one over n=100 -- reported identically. Hence (task, doc_id)."""
+    base = os.path.basename(path)
+    m = _SAMPLES_RE.match(base)
+    if m:
+        return m.group("task")
+    if base.startswith("samples_") and base.endswith(".jsonl"):
+        return base[len("samples_"):-len(".jsonl")]
+    return base
+
+
+def _load_sample_correctness(paths, task_hint=None):
+    """Map (task, doc_id) -> 0/1 from one or more lm-eval `--log_samples` jsonl files.
+
+    Returns (outcomes, per_file_counts). Duplicate (task, doc_id) keys are a hard error: they
+    mean the same leaf was passed twice, and silently overwriting them is exactly the defect
+    this function was rewritten to remove."""
+    if isinstance(paths, str):
+        paths = [paths]
     out = {}
-    with open(path) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            d = json.loads(line)
-            key = d.get("doc_id", d.get("doc_hash", len(out)))
-            score = None
-            for k, v in d.items():
-                if k in ("acc", "exact_match", "acc_norm") and isinstance(v, (int, float)):
-                    score = float(v)
-                    break
-            if score is None:
-                for k, v in d.items():
-                    if k.startswith(("acc", "exact_match")) and isinstance(v, (int, float)):
+    counts = []
+    dupes = []
+    for path in paths:
+        task = task_hint or _task_of_samples_file(path)
+        n_here = 0
+        with open(path) as fh:
+            for lineno, line in enumerate(fh, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError as e:
+                    raise ValueError("%s:%d is not JSON (%s)" % (path, lineno, e))
+                # a record may name its own task; prefer that over the filename
+                rec_task = d.get("task") if isinstance(d.get("task"), str) else task
+                doc_id = d.get("doc_id", d.get("doc_hash", "line%d" % lineno))
+                score = None
+                for k in ("acc", "exact_match", "acc_norm"):
+                    v = d.get(k)
+                    if isinstance(v, (int, float)) and not isinstance(v, bool):
                         score = float(v)
                         break
-            if score is not None:
+                if score is None:
+                    for k, v in sorted(d.items()):
+                        if k.startswith(("acc", "exact_match")) and \
+                                isinstance(v, (int, float)) and not isinstance(v, bool):
+                            score = float(v)
+                            break
+                if score is None:
+                    continue
+                key = (rec_task, doc_id)
+                if key in out:
+                    dupes.append(key)
                 out[key] = 1 if score >= 0.5 else 0
-    return out
+                n_here += 1
+        counts.append((path, task, n_here))
+    if dupes:
+        raise ValueError("duplicate (task, doc_id) keys across the files on one side "
+                         "(%d, e.g. %r) -- the same leaf was passed twice"
+                         % (len(dupes), dupes[0]))
+    return out, counts
 
 
 def cmd_mcnemar(a):
-    if a.samples:
-        A = _load_sample_correctness(a.samples[0])
-        B = _load_sample_correctness(a.samples[1])
-        keys = sorted(set(A) & set(B))
+    side_a = a.samples_a or (a.samples[:1] if a.samples else None)
+    side_b = a.samples_b or (a.samples[1:] if a.samples else None)
+    if bool(side_a) != bool(side_b):
+        return _die("--samples-a and --samples-b must both be given")
+    meta = {}
+    if side_a:
+        try:
+            A, ca = _load_sample_correctness(side_a)
+            B, cb = _load_sample_correctness(side_b)
+        except (OSError, ValueError) as e:
+            return _die(str(e))
+        ka, kb = set(A), set(B)
+        keys = sorted(ka & kb)
+        only_a, only_b = len(ka - kb), len(kb - ka)
         if not keys:
-            print("no shared doc ids between the two sample files", file=sys.stderr)
-            return 2
+            return _die("no shared (task, doc_id) keys between the two sides "
+                        "(A has %d items over %d file(s), B has %d over %d) -- are these the "
+                        "same tasks?" % (len(ka), len(ca), len(kb), len(cb)))
+        if (only_a or only_b) and not a.allow_partial:
+            return _die("the two sides do not cover the same items: %d only in A, %d only in B, "
+                        "%d shared. A paired test on the intersection silently changes the "
+                        "question. Re-run both sides on the same tasks and limit, or pass "
+                        "--allow-partial to test the %d shared items anyway."
+                        % (only_a, only_b, len(keys), len(keys)))
+        tasks = sorted({t for t, _ in keys})
+        meta = dict(files_a=[list(x) for x in ca], files_b=[list(x) for x in cb],
+                    tasks=tasks, items_a=len(ka), items_b=len(kb),
+                    only_a=only_a, only_b=only_b, shared=len(keys))
         b = sum(1 for k in keys if A[k] == 1 and B[k] == 0)
         c = sum(1 for k in keys if A[k] == 0 and B[k] == 1)
         n = len(keys)
     else:
-        b, c, n = a.b, a.c, a.n or (a.b + a.c)
+        b, c = a.b, a.c
+        if b < 0 or c < 0:
+            return _die("--b and --c are counts; they cannot be negative")
+        n = a.n if a.n is not None else b + c
+        if n < b + c:
+            return _die("--n %d is smaller than the %d discordant pairs (b=%d, c=%d): a pair "
+                        "counted as discordant is also a pair" % (n, b + c, b, c))
+        if n <= 0:
+            return _die("no pairs: give --b/--c, or --n, or two sets of --log_samples files")
     disc = b + c
     p = binom_test_two_sided(b, disc, 0.5) if disc else 1.0
-    psi = disc / n if n else float("nan")
-    diff = (b - c) / n if n else float("nan")
+    psi = disc / n
+    diff = (b - c) / n
     lo, hi = clopper_pearson(b, disc, a.alpha) if disc else (float("nan"), float("nan"))
     obj = dict(n=n, b=b, c=c, discordant=disc, discordance=psi, diff_points=diff * 100,
-               exact_p=p, prop_b_ci=[lo, hi])
+               exact_p=p, prop_b_ci=[lo, hi], **meta)
     L = ["== exact McNemar ==",
          "  pairs              %s" % _fmt_n(n),
          "  A right / B wrong  %d" % b,
@@ -1064,9 +1337,20 @@ def cmd_mcnemar(a):
          "  exact two-sided p  %.4g" % p,
          "  verdict            %s at alpha=%.2f" % ("DIFFERENT" if p < a.alpha else "not separable",
                                                     a.alpha)]
-    if n:
-        L.append("  MDE at this n/psi  %.2f points (alpha .05, power .80)"
-                 % (mde_mcnemar(n, max(psi, 1e-6), 0.05, 0.80) * 100))
+    if meta:
+        L.insert(1, "  from               %d + %d file(s) over %d leaf task(s): %s"
+                 % (len(meta["files_a"]), len(meta["files_b"]), len(meta["tasks"]),
+                    ", ".join(meta["tasks"][:6]) + (" ..." if len(meta["tasks"]) > 6 else "")))
+        if meta["only_a"] or meta["only_b"]:
+            L.insert(2, "  !! PARTIAL         %d item(s) only in A, %d only in B -- tested on the "
+                        "%d shared" % (meta["only_a"], meta["only_b"], meta["shared"]))
+    if disc:
+        mde = mde_mcnemar(n, psi, 0.05, 0.80)
+        L.append("  MDE at this n/psi  %s"
+                 % (("%.2f points (alpha .05, power .80)" % (mde * 100))
+                    if not math.isnan(mde) else "unreachable at this n and psi"))
+    else:
+        L.append("  MDE at this n/psi  undefined: psi = 0, the two sides agree on every pair")
     _emit(obj, a.json, L)
     return 0
 
@@ -1242,6 +1526,46 @@ def cmd_selftest(a):
     else:
         print("  ok   reps_for_mde returns the smallest sufficient N")
 
+    print("-- degenerate inputs: limits, not ZeroDivisionError --")
+    # cv=0 is legitimate (two benches matched exactly). The rule then becomes a step function.
+    _close(false_keep_prob(0.03, 0.0, 3, 3), 0.0, 0.0, "false-keep at cv=0 is exactly 0", fails)
+    _close(keep_power(0.05, 0.03, 0.0, 3, 3), 1.0, 0.0, "keep_power at cv=0, effect>thr = 1", fails)
+    _close(keep_power(0.01, 0.03, 0.0, 3, 3), 0.0, 0.0, "keep_power at cv=0, effect<thr = 0", fails)
+    _close(keep_power(0.03, 0.03, 0.0, 3, 3), 0.5, 0.0, "keep_power at cv=0, effect==thr = 1/2", fails)
+    _close(mde_throughput(0.0, 3, 3), 0.0, 0.0, "MDE at cv=0 is 0", fails)
+    try:
+        diff_sd(-0.05, 3, 3)
+        fails.append("diff_sd accepted a negative cv")
+    except ValueError:
+        print("  ok   diff_sd refuses a negative cv")
+
+    print("-- psi repair is reported, not silent --")
+    # |p01-p10| <= p01+p10, so psi < delta is an impossible world; n_mcnemar repairs it and the
+    # caller must be able to SAY so. This is the flag that makes that possible.
+    got, rep = mcnemar_psi_floor(0.02, 0.05)
+    if not (rep and abs(got - 0.05) < 1e-15):
+        fails.append("mcnemar_psi_floor(.02,.05) = %r, %r" % (got, rep))
+    else:
+        print("  ok   mcnemar_psi_floor raises psi to delta and flags it")
+    got, rep = mcnemar_psi_floor(0.10, 0.01)
+    if rep or abs(got - 0.10) != 0.0:
+        fails.append("mcnemar_psi_floor(.10,.01) repaired when it should not")
+    else:
+        print("  ok   mcnemar_psi_floor leaves a possible psi alone")
+    _close(n_mcnemar(0.02, 0.05), n_mcnemar(0.05, 0.05), 0.0,
+           "n_mcnemar(psi<delta) == n_mcnemar(psi=delta)", fails)
+
+    print("-- lm-eval sample files: (task, doc_id), because doc_id restarts per leaf --")
+    for name, want in (
+            ("samples_mmlu_anatomy_2026-08-20T01-02-03.000000.jsonl", "mmlu_anatomy"),
+            ("/a/b/samples_gsm8k_2026-08-20T01-02-03.000000.jsonl", "gsm8k"),
+            ("samples_mmlu_pro_2026-08-20T01-02-03.000000.jsonl", "mmlu_pro")):
+        got = _task_of_samples_file(name)
+        if got != want:
+            fails.append("_task_of_samples_file(%s) = %r, want %r" % (name, got, want))
+        else:
+            print("  ok   %-52s %s" % ("leaf task from " + os.path.basename(name)[:34], got))
+
     print("-- pooled CV estimator --")
     # three synthetic brackets with known SDs must pool to the rms
     fake = [(0.02, 3, None, None), (0.04, 3, None, None), (0.06, 3, None, None)]
@@ -1294,7 +1618,10 @@ def main(argv=None):
 
     t = sub.add_parser("throughput", help="empirical power for a Gate-3 comparison")
     t.add_argument("--level", default="c16", choices=LEVELS)
-    t.add_argument("--model", help="substring filter; falls back to all models if too few brackets")
+    t.add_argument("--model", help="EXACT, org-qualified model id (e.g. "
+                                   "RedHatAI/Qwen3.6-35B-A3B-NVFP4). A name matching nothing is "
+                                   "an error; a name with too few brackets falls back to the "
+                                   "whole-repo pool and says so.")
     t.add_argument("--shape", default="chat", help="substring of the shape column")
     t.add_argument("--scope", default="experiment", choices=("experiment", "session", "cross"))
     t.add_argument("--reps", type=int, default=3, help="N for the candidate")
@@ -1307,17 +1634,23 @@ def main(argv=None):
     t.add_argument("--power", type=float, default=0.80)
     t.add_argument("--max-false-keep", type=float, default=0.05)
     t.add_argument("--min-brackets", type=int, default=8)
+    t.add_argument("--drop-first", action="store_true",
+                   help="discard the FIRST bench of every replicate bracket. The first bench of an experiment runs ~1.2% slow at c16 on this node -- a bias, not noise -- and dropping it takes the global c16 pooled CV from 2.25% to 1.55%. See POWER-analysis.md section 4.3.")
     t.set_defaults(fn=cmd_throughput)
 
     k = sub.add_parser("keep-rule", help="score the KEEP rule as written")
     k.add_argument("--model")
     k.add_argument("--shape", default="chat")
     k.add_argument("--discordance", type=float, default=0.05)
+    k.add_argument("--drop-first", action="store_true",
+                   help="discard the FIRST bench of every replicate bracket. The first bench of an experiment runs ~1.2% slow at c16 on this node -- a bias, not noise -- and dropping it takes the global c16 pooled CV from 2.25% to 1.55%. See POWER-analysis.md section 4.3.")
     k.set_defaults(fn=cmd_keep_rule)
 
     v = sub.add_parser("variance", help="dump the empirical variance tables")
     v.add_argument("--model")
     v.add_argument("--shape", default="chat")
+    v.add_argument("--drop-first", action="store_true",
+                   help="discard the FIRST bench of every replicate bracket. The first bench of an experiment runs ~1.2% slow at c16 on this node -- a bias, not noise -- and dropping it takes the global c16 pooled CV from 2.25% to 1.55%. See POWER-analysis.md section 4.3.")
     v.set_defaults(fn=cmd_variance)
 
     sd = sub.add_parser("seed", help="measure what AHL_SEED=42 pairing buys (needs raw bundles)")
@@ -1331,7 +1664,15 @@ def main(argv=None):
     m.add_argument("--c", type=int, default=0, help="A wrong, B right")
     m.add_argument("--n", type=int, help="total pairs (default b+c)")
     m.add_argument("--samples", nargs=2, metavar=("A.jsonl", "B.jsonl"),
-                   help="two lm-eval --log_samples files")
+                   help="ONE lm-eval --log_samples file per side. mmlu writes 57 of them "
+                        "(one per leaf), so for a grouped task use --samples-a/--samples-b.")
+    m.add_argument("--samples-a", nargs="+", metavar="A.jsonl",
+                   help="every --log_samples file for side A (e.g. samples_mmlu_*_*.jsonl)")
+    m.add_argument("--samples-b", nargs="+", metavar="B.jsonl",
+                   help="every --log_samples file for side B")
+    m.add_argument("--allow-partial", action="store_true",
+                   help="test the shared items even when the two sides do not cover the same "
+                        "set (default: refuse, because intersecting changes the question)")
     m.add_argument("--alpha", type=float, default=0.05)
     m.set_defaults(fn=cmd_mcnemar)
 
