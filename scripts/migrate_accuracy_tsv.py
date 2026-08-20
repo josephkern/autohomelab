@@ -40,10 +40,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from eval_validity import NA, assess  # noqa: E402
 
-LEGACY_HEADER = ["run_id", "commit", "node_fp", "model", "config_hash", "script", "suite",
-                 "tasks", "limit", "scores", "data", "think"]
-NEW_COLS = ["conc", "samples", "validity", "status"]
-HEADER = LEGACY_HEADER + NEW_COLS
+# Schema comes from eval_validity.py — one definition (see its ACCURACY_* block).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from eval_validity import (  # noqa: E402
+    ACCURACY_LEGACY_COLS as LEGACY_HEADER,
+    ACCURACY_NEW_COLS as NEW_COLS,
+    ACCURACY_COLS as HEADER,
+)
 
 
 def migrate_file(path: Path, bundle_root: Path, write: bool) -> dict:

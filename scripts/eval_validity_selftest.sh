@@ -448,13 +448,23 @@ chk "migration: idempotent" "$AFTER" "$(md5sum < "$MTSV")"
 # name it too.
 echo
 echo "=== E. no accuracy.tsv header drift =========================================="
-WANT_HDR="run_id\\tcommit\\tnode_fp\\tmodel\\tconfig_hash\\tscript\\tsuite\\ttasks\\tlimit\\tscores\\tdata\\tthink\\tconc\\tsamples\\tvalidity\\tstatus"
-STALE_HDR="scores\\tdata\\tthink'"
+# The header now has ONE definition (eval_validity.py ACCURACY_HEADER). The anti-drift property
+# is therefore no longer "every script carries the same literal" — it is "no script carries a
+# literal at all, and what each one actually emits equals the one definition". Asserting the
+# literal is present is a static word-presence check that a correct refactor breaks, which is the
+# same trap that let a green suite hide a critical defect in the throughput layer.
+ONE_HDR="$(uv run --project "$REPO_ROOT" python "$SCRIPT_DIR/eval_validity.py" accuracy-header 2>/dev/null \
+           || python3 "$SCRIPT_DIR/eval_validity.py" accuracy-header)"
+chk "the one definition is 16 columns" 16 "$(printf '%s' "$ONE_HDR" | awk -F'\t' '{print NF}')"
 for f in eval.sh eval_bfcl.sh eval_live.sh eval_livebench.sh eval_livecodebench.sh; do
-  hdrs="$(grep -cF "$WANT_HDR" "$SCRIPT_DIR/$f" || true)"
-  chk "$f carries the 16-column header" 1 "$hdrs"
-  stale="$(grep -cF "$STALE_HDR" "$SCRIPT_DIR/$f" || true)"
-  chk "$f has no stale 12-column header" 0 "$stale"
+  lit="$(grep -cE "HDR=\\$'run_id" "$SCRIPT_DIR/$f" || true)"
+  chk "$f hard-codes NO header literal" 0 "$lit"
+  # what it would actually write: run its HDR assignment in isolation.
+  # Extract exactly the HDR assignment (it spans a continuation line) and run it in isolation.
+  asn="$(sed -n '/^HDR=/,/)"$/p' "$SCRIPT_DIR/$f")"
+  got="$(cd "$SCRIPT_DIR" && SCRIPT_DIR="$SCRIPT_DIR" REPO_ROOT="$REPO_ROOT" \
+         bash -c "$asn; printf '%s' \"\$HDR\"" 2>/dev/null)"
+  chk "$f emits the one definition" "$ONE_HDR" "$got"
 done
 chk_has "AGENTS.md documents the 16-column schema" "conc samples" "$(cat "$REPO_ROOT/AGENTS.md")"
 

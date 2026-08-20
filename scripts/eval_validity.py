@@ -90,6 +90,18 @@ STATUS_VOID = "void"
 STATUS_CRASH = "crash"
 
 
+# ── accuracy.tsv schema — the ONE definition ──────────────────────────────────
+# results.tsv's header lives once, in lib/validity.py, because four hard-coded copies
+# disagreeing with the reference is the defect issue #1 opened on. The accuracy journal
+# had grown five copies of its own header across the eval scripts; they are consumed from
+# here instead. `accuracy.sh-header` prints it for the bash callers.
+ACCURACY_LEGACY_COLS = ["run_id", "commit", "node_fp", "model", "config_hash", "script",
+                        "suite", "tasks", "limit", "scores", "data", "think"]
+ACCURACY_NEW_COLS = ["conc", "samples", "validity", "status"]
+ACCURACY_COLS = ACCURACY_LEGACY_COLS + ACCURACY_NEW_COLS
+ACCURACY_HEADER = "\t".join(ACCURACY_COLS)
+
+
 def _cfg_float(name: str, default: float) -> float:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
@@ -392,8 +404,18 @@ def main(argv=None) -> int:
     a.add_argument("--status", default="", help="caller's status, floored per contract §5")
     a.add_argument("--format", default="tsv", choices=("tsv", "json"))
     a.set_defaults(fn=cmd_assess)
+
+    h = sub.add_parser("accuracy-header",
+                       help="print the accuracy.tsv header (the one definition)")
+    h.set_defaults(fn=lambda _a: _print_accuracy_header())
+
     args = ap.parse_args(argv)
     return args.fn(args)
+
+
+def _print_accuracy_header() -> int:
+    print(ACCURACY_HEADER)
+    return 0
 
 
 if __name__ == "__main__":

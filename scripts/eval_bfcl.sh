@@ -87,7 +87,10 @@ echo "scores: $SCORES" >&2
 migrate_acc(){ [ -f "$1" ] && [ "$(head -1 "$1")" != "$2" ] && \
   python3 "$SCRIPT_DIR/migrate_accuracy_tsv.py" --tsv "$1" --bundle-root "$REPO_ROOT" --write >&2
   return 0; }
-HDR=$'run_id\tcommit\tnode_fp\tmodel\tconfig_hash\tscript\tsuite\ttasks\tlimit\tscores\tdata\tthink\tconc\tsamples\tvalidity\tstatus'
+# accuracy.tsv header comes from scripts/eval_validity.py — one definition, five
+# callers. Five hard-coded copies is the exact defect issue #1 opened on.
+HDR="$(uv run --project "$REPO_ROOT" python "$SCRIPT_DIR/eval_validity.py" accuracy-header \
+        2>/dev/null || python3 "$SCRIPT_DIR/eval_validity.py" accuracy-header)"
 migrate_acc "$TSV" "$HDR"
 [ -f "$TSV" ] || printf '%s\n' "$HDR" > "$TSV"
 DATA_REL="$(realpath --relative-to="$REPO_ROOT" "$BUNDLE")"

@@ -65,7 +65,10 @@ migrate_acc(){ [ -f "$1" ] && [ "$(head -1 "$1")" != "$2" ] && \
   return 0; }
 # NOTE: this script wrote ELEVEN columns against a twelve-column header (no `think`) -- it was out
 # of sync before A9, not because of it. Fixed here in passing.
-HDR=$'run_id\tcommit\tnode_fp\tmodel\tconfig_hash\tscript\tsuite\ttasks\tlimit\tscores\tdata\tthink\tconc\tsamples\tvalidity\tstatus'
+# accuracy.tsv header comes from scripts/eval_validity.py — one definition, five
+# callers. Five hard-coded copies is the exact defect issue #1 opened on.
+HDR="$(uv run --project "$REPO_ROOT" python "$SCRIPT_DIR/eval_validity.py" accuracy-header \
+        2>/dev/null || python3 "$SCRIPT_DIR/eval_validity.py" accuracy-header)"
 migrate_acc "$TSV" "$HDR"
 [ -f "$TSV" ] || printf '%s\n' "$HDR" > "$TSV"
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
