@@ -54,6 +54,15 @@ Column order is fixed. No value is ever empty (`na`), and none contains a tab or
 
 ## 3. Verdict tokens
 
+> **SUPERSEDED IN PART — read the "v1.2 status" section at the end of this file before using this
+> table.** This document is an amendment ledger: each section records what was believed when it was
+> written, and later sections overrule earlier ones. Specifically, the `low_sample` token-budget
+> clause below was **deleted** (v1.2 A1) and `survivorship` below is **not** the shipped rule
+> (v1.2 A2, re-adjudicated after measurement — the shipped form is `ok > 0 and incomplete > ok`).
+> `no_output` and `errored_fatal` are missing from this table entirely. The authority is the
+> closing status section; the implementation is `scripts/lib/validity.py`, whose rule docstrings
+> carry the measurements.
+
 **Tokens carry the level they refer to (v1.1):** `low_sample@c1`, `no_data@c32`,
 `survivorship@c16`. Only `ok` and `nonmonotonic` are row-wide and untagged. Rationale: severity was
 per-row in v1.0, so a structurally-thin c1 sentinel condemned a campaign's c16 objective. Consumers
@@ -94,6 +103,10 @@ zero. A hung level is scored (and its token names it), not skipped. The run-leve
 authoritative over a directory listing, so a stale `level_c8.json` from a previous shape is ignored.
 
 ## 4. Physical ceiling (roofline)
+
+> **SUPERSEDED IN PART:** `SAFETY` is **3.0** (v1.1), and
+> `bench.sh` did not pass `--node-profile` until v1.2 A6, so this check was dead on the
+> primary bench path for the whole of v1.1.
 
 With batch B, one decode step reads the weights once and emits B tokens:
 
