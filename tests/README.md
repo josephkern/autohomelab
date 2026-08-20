@@ -1,15 +1,30 @@
 # tests/ — the acceptance suite for the measurement-validity layer
 
 The binding spec is [`docs/validity-contract.md`](../docs/validity-contract.md) — **v1.2**, whose
-amendment block wins wherever it differs from v1.1. **Every threshold in its §3 and §4 is a test
+amendment block wins wherever it differs from v1.1, and whose closing **"v1.2 status"** section wins
+over the amendment block: A2 and A4 were both wrong as written and were re-adjudicated after
+measuring. The tests follow the shipped forms (`survivorship` = `incomplete > ok`; `errored_fatal`
+as its own base token), not the amendment text. **Every threshold in its §3 and §4 is a test
 case here**, both sides of every boundary. This suite is the acceptance gate for issue #1 §1: if
 it is green with no skips *and `tests/mutate.sh` reports no survivors*, the layer does what the
 contract says.
+
+**Current state: `AHL_TEST_STRICT=1 tests/run.sh` = 206 tests, 0 skips, ~12 s. `tests/mutate.sh` =
+26 mutations, 26 killed, 0 survivors, 0 N/A.**
 
 Those are two different claims, and the second one is why the harness exists. Mutation testing of
 the v1.1 suite found **16 surviving mutations**: every v1.1 amendment and every enforcement path
 could be deleted or inverted with 121/121 still green. A suite that agrees with the library is not
 a test of the library.
+
+The repo's scar makes this concrete. Three separate guards here have been *correct* and
+*unreachable* — `suite.sh`'s reasoning-before-spec-decode `if/elif` (which burned a 75-minute,
+56,168-request NaN eval), `bench.sh` reading verdict globals nothing ever set, and contract v1.2's
+own `incomplete > level`, which GuideLLM makes unsatisfiable. Two of the three carried a comment
+asserting they were live. **"This condition is correct" and "this condition is reached" are
+different claims; only the second one needs an execution trace.** That is why the wiring tests run
+the real scripts against stubs, and why mutation coverage is part of the gate rather than a nicety:
+a mutation that does not turn the suite red proves the rule it broke was never exercised.
 
 This is the repo's first test suite, so it also sets the convention. Two rules shaped it:
 
@@ -67,6 +82,7 @@ any skip into a failure and prints the reasons. **The acceptance run is the stri
 | `test_bench_enforcement.py` | §5 and A6 **executed**: the real `bench.sh` runs in a scratch repo with stubbed children, and the assertions are on the emitted row, the exit code and the call log — status downgrade, exit 3 vs 4, `suspect` alone still exiting 4, the row surviving its own verdict, `--node-profile` reaching the library, the roofline firing on the vLLM path and being skipped without a bandwidth figure, and failing **closed** when the library errors. |
 | `test_consumers.py` | §1 and §5 **executed**: the header's single definition (rename the library's last column and watch `validity.sh` and `bench.sh` follow), and `aggregate.py`'s default view holding back void / suspect / crash / `na` / *and a `measured` row whose `validity` is fatal* — the status-only filter's blind spot. |
 | `test_reachability.py` | Runs `scripts/citability_selftest.sh` (68 checks) as part of the suite. It already exercised `promote.sh`, `suite.sh`, `validate.sh` and both runners the right way — by executing them — but nothing ran it, which is why four enforcement mutations survived. |
+| *(Gate 2, outside this suite)* | `scripts/eval_validity_selftest.sh` — **95 checks** on `scripts/eval_validity.py`, the Gate-2 acceptance predicate (contract A9): `no_score` / `nonfinite` / `short_sample` fatal, `zero_score` / `no_samples` suspect, task-tagged verdicts, the 16-column `accuracy.tsv`, and **execution traces proving every Gate-2 branch is reachable for all four runbook variants** — neither / reasoning / spec-decode / **both**, the combination that the original `if/elif` could not reach. Hermetic, synthetic bundles, no GPU. |
 | `tools/mutations.py`, `mutate.sh` | The harness (contract A8). 26 mutations: every §3/§4 rule and every enforcement link. |
 
 ## The mutation harness

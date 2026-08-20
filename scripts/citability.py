@@ -81,8 +81,9 @@ def worst(*cites: str) -> str:
 
 def unevaluated(row) -> bool:
     """True when the row's `validity` is `na` — contract §3: "rules could not be evaluated
-    (no bundle) — never `ok`". `lib.validity.parse_validity` maps `na` onto `ok` for its own
-    purposes, so the raw cell has to be read before parsing, in exactly one place: here."""
+    (no bundle) — never `ok`". `lib.validity.parse_validity` used to map `na` onto `ok`, which
+    is why this reads the raw cell; since contract v1.2 A5 it returns `["na"]` and the two agree,
+    but the check stays here, in exactly one place, so an empty cell is judged the same way."""
     raw = (row.get("validity") or "").strip().lower()
     return raw in ("", NA)
 

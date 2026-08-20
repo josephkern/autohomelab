@@ -50,7 +50,23 @@ them (override: a written `AHL_PROMOTE_OVERRIDE` justification, stamped into the
 `aggregate.py` hides them by default. Consumers filter on the **`validity`** column, never on
 `status` alone — a crash row carrying `over_roofline` would pass a status-only filter. Verdicts are
 tagged with the level they concern (`low_sample@c1`), so a consumer gates on the level it cites.
-Spec: [validity-contract.md](validity-contract.md) (v1.1); acceptance suite: `tests/run.sh`.
+**One classifier answers "may this row be cited?" for every consumer — `scripts/citability.py`**;
+it previously existed as five hand-copied `def classify` bodies inside shell heredocs, all five
+carrying the same three bugs.
+
+**Gate 2 has the same shape** since contract A9: `scripts/eval_validity.py` is the acceptance
+predicate for an lm-eval score (`no_score` / `nonfinite` / `short_sample` fatal, `zero_score` /
+`no_samples` suspect, task-tagged like `nonfinite@mmlu`), and `accuracy.tsv` carries
+`conc`/`samples`/`validity`/`status` in 16 columns. Before it, `suite.sh` judged the quality gate on
+`eval.sh`'s exit code alone — and a `nan` score, a 37-of-14,042 run and a missing results file all
+reported PASS.
+
+Spec: [validity-contract.md](validity-contract.md) **v1.2** (its amendment blocks and closing "v1.2
+status" section win over anything earlier in that file). Acceptance: `AHL_TEST_STRICT=1
+tests/run.sh` (206 tests) **and** `tests/mutate.sh` (26 mutations, 0 survivors) — the first says the
+rules hold, the second says the suite would notice if they stopped. Plus
+`scripts/citability_selftest.sh` (68 checks) and `scripts/eval_validity_selftest.sh` (95), which
+execute the real consumers against stubs rather than reading them as text.
 
 ## Why hardware-as-data matters
 

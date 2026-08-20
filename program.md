@@ -22,9 +22,13 @@ Parameters (set once up front):
   AGENTS.md → "Results model"; what to do about a failure: §4 below.)
 
 ## 0. Setup
-0. Harness sanity (seconds, no GPU): `AHL_TEST_STRICT=1 tests/run.sh` — the 121-test acceptance
-   suite for the measurement-validity layer. A SKIP means a contract rule was not checked, which is
-   why strict mode fails on one.
+0. Harness sanity (seconds, no GPU): `AHL_TEST_STRICT=1 tests/run.sh` — the **206-test** acceptance
+   suite for the measurement-validity layer, ~12 s. A SKIP means a contract rule was not checked,
+   which is why strict mode fails on one. After touching a rule or an enforcement path, also run
+   **`tests/mutate.sh`** (26 mutations, currently 0 survivors; a few minutes, it copies the repo per
+   mutation) — a rule with no mutation that turns the suite red is an untested rule. The Gate-2
+   predicate and the citability classifier have their own hermetic selftests:
+   `scripts/eval_validity_selftest.sh` (95 checks) and `scripts/citability_selftest.sh` (68).
 1. Node profile: `scripts/probe.sh` (skip if `results/<node_fp>/node_profile.json` exists). Confirm
    it carries `gpu.mem_bw_gbs` — without it the roofline check is silently skipped.
 2. Backend image: inventory local docker images before pulling; pin the **release by digest** in
@@ -111,10 +115,12 @@ measurement got into a promotion decision.
 | verdict | what happened | do this |
 |---|---|---|
 | `no_data@cN` | the stage never drained; fewer than 5 requests finished | **re-run with a larger `MAX_SECONDS`.** Coder (4096/1024) on a slow dense model needs **≥600**. The new value lands in `knobs`, so the re-run is not silently incomparable to the old one |
-| `low_sample@cN` | the level generated under 2048 output tokens, or fewer than `max(5, min(20, 4×N))` completions | raise `MAX_SECONDS` and re-run. Note this is a **token** budget: a coder level clearing 2048 tokens on two completions is adequate and will not trip. If it does trip at c1 on a slow model, the honest fix is more seconds, not a smaller expectation |
+| `low_sample@cN` | fewer than `max(5, min(20, 4×N))` completions finished at that level | raise `MAX_SECONDS` and re-run — more seconds, never a smaller expectation. **The token-budget clause is gone** (contract v1.2 A1): output length no longer rescues a thin level, and this verdict **cannot appear at c1** (the floor there collapses onto `AHL_MIN_DATA`=5, so c1 is either `no_data` or clean) |
 | `over_roofline@cN` | the number is physically impossible: the endpoint was dead or fast-failing | **investigate the endpoint, do not re-run blind.** `scripts/serve.sh` state + `docker logs ahl-vllm` (the bundle's `vllm_crash.log` if the watchdog already tore it down) + `level_c<N>.log`. Find why requests returned instantly — usually the engine died mid-stage. Fix or discard the config, then re-serve from scratch |
-| `survivorship@cN` | `incomplete ≥ successful` — the reported mean is the mean of the **faster half** | the number is biased upward, not noisy, so repeating it reproduces the same bias. Raise `MAX_SECONDS` until most requests finish; if they structurally cannot (coder at c32 discards ~46% even at 600 s), record the level as characterization and **do not tune against it** |
-| `errored@cN` | >10% of requests errored; the survivors are a biased sample | read the error out of `level_c<N>.log` / engine logs. A config that half-works is a **Gate-1 problem**, not a slow Gate-3 result — re-run `scripts/smoke.sh` before spending another sweep on it |
+| `survivorship@cN` | `incomplete > successful` — a **majority** of the work started was discarded, so the mean averages a minority of it | the number is biased upward, not noisy, so repeating it reproduces the same bias. Raise `MAX_SECONDS` until most requests finish; if they structurally cannot (coder at c32 discards ~46% even at 600 s), record the level as characterization and **do not tune against it**. **This fires only on a MAJORITY discard** — the routine 30–48% coder discard at c8+ trips nothing, so read `req_counts` yourself before citing a high-concurrency coder number |
+| `no_output@cN` | requests succeeded and the level produced **no tokens** (tok/s null, non-finite or ≤ 0) | the serve is answering and generating nothing. Check the chat-template / thinking-mode path first — NemotronH emits zero tokens under `enable_thinking=false` — then the engine log. This is not a slow config, it is a broken one |
+| `errored@cN` | 10–50% of requests errored; the survivors are a biased sample | read the error out of `level_c<N>.log` / engine logs. A config that half-works is a **Gate-1 problem**, not a slow Gate-3 result — re-run `scripts/smoke.sh` before spending another sweep on it |
+| `errored_fatal@cN` | **above 50%** errored — the endpoint is refusing, not serving | treat it as a dead or dying endpoint, exactly like `over_roofline`: `serve.sh` state, `docker logs ahl-vllm`, the bundle's `vllm_crash.log`. This is what catches a dead endpoint whose reported tok/s happens to land *under* the roofline |
 | `nonmonotonic` | a level is >10% below the one before it | check `req_counts` and `survivorship` **first** — a discarded slow half explains most apparent inversions, and starvation explains the rest. If the counts are healthy, this is a genuine finding about the config or the box: keep the row, adjudicate it in the logbook, and say why |
 | `na` | the rules could not be evaluated — no bundle | the number is unverifiable, not verified. Treat as uncitable; re-run if it matters |
 
