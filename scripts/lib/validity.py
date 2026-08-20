@@ -84,6 +84,7 @@ __all__ = [
     "AHL_DISCARD_TOL", "AHL_ROOFLINE_SAFETY", "AHL_MIN_MODEL_GB",
     "V_OK", "V_NA", "V_NO_DATA", "V_LOW_SAMPLE", "V_OVER_ROOFLINE", "V_NO_OUTPUT",
     "V_NONMONOTONIC", "V_ERRORED", "V_ERRORED_FATAL", "V_SURVIVORSHIP",
+    "V_INCOMPLETE_RUN", "add_verdict",
     "VERDICT_ORDER", "FATAL_VERDICTS", "SUSPECT_VERDICTS", "UNEVALUATED_VERDICTS",
     "ROW_WIDE_VERDICTS",
     "STATUS_MEASURED", "STATUS_DISCARD", "STATUS_CRASH",
@@ -175,6 +176,13 @@ V_LOW_SAMPLE = "low_sample"
 V_OVER_ROOFLINE = "over_roofline"
 V_NO_OUTPUT = "no_output"       # A3: the FLOOR under the roofline's ceiling.
 V_NONMONOTONIC = "nonmonotonic"
+# A sweep that was cut short: real numbers for the levels that landed, but the run as a whole was
+# never completed. ROW-WIDE and untagged on purpose -- "this run was interrupted" is a property of
+# the run, not of one concurrency level, and a row-wide token is the only kind that survives the
+# level-scoped reading a promotion gate uses. SUSPECT, not fatal: the completed levels ARE data
+# (voiding them would be the mirror-image lie), but they are not citable until a human adjudicates
+# under contract section 7. A fatal verdict still outranks it via status_floor.
+V_INCOMPLETE_RUN = "incomplete_run"
 V_ERRORED = "errored"
 V_ERRORED_FATAL = "errored_fatal"   # A4: the >50% band of `errored`.
 V_SURVIVORSHIP = "survivorship"
@@ -182,16 +190,17 @@ V_SURVIVORSHIP = "survivorship"
 # Emission order: the contract's section 3 table, with the v1.1/v1.2 additions slotted in
 # beside the rule they escalate.
 VERDICT_ORDER: tuple[str, ...] = (
-    V_NO_DATA, V_LOW_SAMPLE, V_OVER_ROOFLINE, V_NO_OUTPUT, V_NONMONOTONIC,
+    V_NO_DATA, V_LOW_SAMPLE, V_OVER_ROOFLINE, V_NO_OUTPUT, V_INCOMPLETE_RUN, V_NONMONOTONIC,
     V_ERRORED_FATAL, V_ERRORED, V_SURVIVORSHIP,
 )
 FATAL_VERDICTS = frozenset({V_NO_DATA, V_OVER_ROOFLINE, V_NO_OUTPUT, V_ERRORED_FATAL})
-SUSPECT_VERDICTS = frozenset({V_LOW_SAMPLE, V_NONMONOTONIC, V_ERRORED, V_SURVIVORSHIP})
+SUSPECT_VERDICTS = frozenset({V_LOW_SAMPLE, V_NONMONOTONIC, V_ERRORED, V_SURVIVORSHIP,
+                              V_INCOMPLETE_RUN})
 # `na` is neither: it is the ABSENCE of a verdict. It floors at `suspect` (A5) because an
 # unevaluable row is not citable, but it is not evidence of a defect the way the others are.
 UNEVALUATED_VERDICTS = frozenset({V_NA})
 # Verdicts that describe the ROW, not one level -- these stay bare (untagged).
-ROW_WIDE_VERDICTS = frozenset({V_OK, V_NA, V_NONMONOTONIC})
+ROW_WIDE_VERDICTS = frozenset({V_OK, V_NA, V_NONMONOTONIC, V_INCOMPLETE_RUN})
 
 # ---------------------------------------------------------------------------
 # Section 6 status vocabulary -- v1.3 (2026-08-20), FIVE words. `keep` is RETIRED.
@@ -742,6 +751,29 @@ def verdicts(levels: Mapping, ceiling_fn: Optional[Callable] = None) -> list:
     return sorted(found, key=_verdict_sort_key) or [V_OK]
 
 
+def add_verdict(validity, *tokens) -> str:
+    """Add verdict token(s) to an existing `validity` string, canonically.
+
+    The callers are shell scripts recording a fact the RULES cannot compute -- that a run was
+    interrupted. They must not hand-assemble the string: ordering, dedupe and the `ok`/`na`
+    placeholders are the library's business (contract section 1), and a caller that got them
+    subtly wrong would produce a verdict no consumer parses the way it intended.
+
+    `ok` and `na` are placeholders meaning "nothing to say" and "could not be evaluated"; a real
+    token replaces them rather than joining them.
+    """
+    have = [t for t in parse_validity(validity) if t not in (V_OK, V_NA)]
+    for tok in tokens:
+        base = verdict_base(tok)
+        if base not in VERDICT_ORDER:
+            raise ValueError("unknown verdict: %r" % tok)
+        if base in ROW_WIDE_VERDICTS and tok != base:
+            raise ValueError("%s is row-wide and must not be level-tagged: %r" % (base, tok))
+        if tok not in have:
+            have.append(tok)
+    return format_validity(have) if have else V_OK
+
+
 def format_validity(verds: Iterable) -> str:
     """`ok`, or the `+`-joined verdict tokens in contract order then level order.
     A bare `na` (nothing was evaluable) round-trips as `na`, not as `ok`."""
@@ -1199,6 +1231,11 @@ def main(argv: Optional[Sequence] = None) -> int:
     sp = sub.add_parser("split", help="split a verdict token into base + level")
     sp.add_argument("token")
     sp.set_defaults(func=_cmd_split)
+
+    av = sub.add_parser("addverdict", help="add verdict token(s) to a validity string")
+    av.add_argument("validity")
+    av.add_argument("tokens", nargs="+")
+    av.set_defaults(func=lambda a: (print(add_verdict(a.validity, *a.tokens)), 0)[1])
 
     args = ap.parse_args(argv)
     return args.func(args)

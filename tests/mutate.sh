@@ -54,11 +54,19 @@ trap cleanup EXIT
 # ── one scratch copy of the repo ──────────────────────────────────────────────
 # The whole point is that the repo under test is a COPY. results/ is excluded because it is
 # gitignored bundle data the suite must never read anyway, and it is gigabytes.
+# .venv is excluded because it is ~5 GB and the suite runs `uv run --no-project`, so it is never
+# read from the copy. Copying it made a full 38-mutation run hours of pointless I/O, and one run
+# aborted mid-table with `tar: ./.venv/… file changed as we read it` while another agent's suite
+# was writing there — a silent `set -e` death that looked like a passing table cut short.
+# The copy failing is now a hard, reported error rather than a truncated run.
 make_copy() {  # make_copy <dest>
   mkdir -p "$1"
-  tar -C "$REPO_ROOT" -cf - \
+  if ! tar -C "$REPO_ROOT" -cf - \
       --exclude=.git --exclude=results --exclude=source --exclude=__pycache__ \
-      --exclude=.claude --exclude='*.pyc' . | tar -C "$1" -xf -
+      --exclude=.claude --exclude=.venv --exclude='*.pyc' . | tar -C "$1" -xf - ; then
+    echo "!! make_copy FAILED for $1 — the mutation table below is INCOMPLETE, not clean" >&2
+    return 1
+  fi
 }
 
 # ── run the suite in a copy, print its failing-test names, one per line ───────

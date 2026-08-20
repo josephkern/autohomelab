@@ -295,7 +295,8 @@ emit_interrupted_row() {
   # A partial sweep should be visible from `validity` alone, but the verdict must come from
   # scripts/lib/validity.py — a hand-assembled string here would be the second implementation §1
   # forbids. When the library exposes it, the ONE line to add is, right here:
-  #     validity="$(ahl_add_verdict "$validity" incomplete_run)"
+  _iv="$(ahl_add_verdict "$validity" incomplete_run 2>/dev/null || true)"
+  [ -n "$_iv" ] && validity="$_iv"
   notes="$IR_NOTES_PREFIX${crash_level:+ hang@c$crash_level} interrupted(${reason}); partial shape, not a completed measurement${NOTES:+ $NOTES}"
   ahl_emit_row || true
   echo "  !! INTERRUPTED (${reason}) — partial row recorded: status=$status validity=$validity" >&2

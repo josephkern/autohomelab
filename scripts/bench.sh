@@ -386,8 +386,10 @@ emit_interrupted_row() {
   # interrupted row currently reads as citable at the levels that did land. The verdict must come
   # from scripts/lib/validity.py (a hand-assembled string here would be exactly the second
   # implementation §1 forbids). When the library exposes it, the ONE line to add is:
-  #     VALIDITY="$(ahl_add_verdict "$VALIDITY" incomplete_run)"
-  # placed here, before emit_row. Nothing else in this file changes.
+  # WIRED 20260820: the library now exposes it (row-wide, suspect; a fatal verdict still
+  # outranks it via status_floor). Fails closed — on error the old string is kept.
+  _iv="$(ahl_add_verdict "$VALIDITY" incomplete_run 2>/dev/null || true)"
+  [ -n "$_iv" ] && VALIDITY="$_iv"
   emit_row "$IR_RUN_ID" "$IR_SHAPE_TAG" "$IR_DATA_REL" "$status" "$notes" "na" \
     "$REQ_COUNTS" "$VALIDITY" "$knobs" \
     "${IR_TPS[0]}" "${IR_TPS[1]}" "${IR_TPS[2]}" "${IR_TPS[3]}" "${IR_TPS[4]}" || true

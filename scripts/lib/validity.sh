@@ -116,6 +116,16 @@ ahl_knobs() {
   _ahl_py knobs "$@"
 }
 
+# ahl_add_verdict <validity> <token> [token ...]
+#   Prints `validity` with the token(s) added, canonically ordered and deduped by the library.
+#   Used by the benchers to record a fact the RULES cannot compute (an interrupted run). Fails
+#   closed: non-zero with empty stdout, so a caller substituting it keeps its old string rather
+#   than silently dropping a verdict.
+ahl_add_verdict() {
+  [ "$#" -ge 2 ] || { echo "ahl_add_verdict: usage: ahl_add_verdict <validity> <token>..." >&2; return 2; }
+  _ahl_py addverdict "$@"
+}
+
 # ahl_split_verdict <token>
 #   Splits one verdict token into "<base><TAB><level>"; <level> is `na` for the row-wide
 #   tokens (`ok`, `nonmonotonic`). e.g. `low_sample@c1` -> "low_sample<TAB>1".

@@ -457,7 +457,13 @@ class TestInterruptedBeforeAnyLevelLanded(InterruptTestCase):
         row = repo.rows()[-1]
         for col in ("tps_c1", "tps_c4", "tps_c8", "tps_c16", "tps_c32", "peak_gb"):
             self.assertEqual("na", row[col], f"{col}\n" + self.show(proc, [row]))
-        self.assertEqual("na", row["validity"], self.show(proc, [row]))
+        # Was `na` until incomplete_run was registered in the library (20260820). Both facts
+        # are true of this row -- nothing was evaluable AND the run was cut short -- and the
+        # verdict is the more informative of the two, so `add_verdict` drops the `na`
+        # placeholder when a real token joins. What this test actually protects is in its
+        # name: the row is NOT `ok`, and it is not citable.
+        self.assertIn("incomplete_run", row["validity"], self.show(proc, [row]))
+        self.assertNotEqual("ok", row["validity"], self.show(proc, [row]))
         self.assertIn(row["status"], ("suspect", "void"), self.show(proc, [row]))
 
 
