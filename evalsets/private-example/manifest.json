@@ -4,6 +4,11 @@
   "visibility": "example",
   "authored": "20260820",
   "salt": "EXAMPLE-SALT-PUBLISHED-ON-PURPOSE-NEVER-REUSE-THIS",
+  "champion": {
+    "model": "example/Fake-0B",
+    "runbook": "runbooks/example/Fake-0B/EXAMPLE_final.sh",
+    "date": "20260820"
+  },
   "title": "EXAMPLE SET — FAKE, PUBLIC, NOT A QUALITY SIGNAL",
   "warning": [
     "This set is committed to a PUBLIC repository on purpose, so the schema is documentable and",
@@ -12,7 +17,14 @@
     "It has 3 live items, which is below AHL_PRIVATE_MIN_ITEMS=30, so a run against it can never",
     "produce a citable row: it records `small_n` and status=suspect. That is deliberate --",
     "the example cannot be mistaken for the gate.",
-    "The real set lives OUTSIDE this repo. See docs/private-eval.md."
+    "\"visibility\": \"example\" is NOT what makes this set public. Being THIS path with THESE",
+    "bytes is. eval_private_set.py pins the sha256 of both files; edit either one and the set",
+    "becomes private -- the runner refuses to run it from inside the repo, the pre-commit guard",
+    "blocks it, and this published salt is rejected by value. Copying this directory therefore",
+    "does not copy its exemption, which is the whole point: the copy is the thing an operator",
+    "actually fills with real questions.",
+    "The real set lives OUTSIDE this repo and is created with `scripts/eval_private.sh init`,",
+    "which generates a fresh random salt. See docs/private-eval.md."
   ],
-  "authoring_notes": "Fields consumed by the runner: schema, set_id, visibility, salt. Everything else (title, warning, authored, authoring_notes) is for humans. The real set's `salt` must be a random string generated once and never published -- it is what stops the audit digests in results/**/data/ from being a confirmation oracle for guessed questions."
+  "authoring_notes": "Fields consumed by the runner: schema, set_id, visibility, salt, champion. Everything else (title, warning, authored, authoring_notes) is for humans. A real set's `salt` must be >=32 random characters generated once and never published -- it is what stops the audit digests in results/**/data/ from being a confirmation oracle for guessed questions. `champion` records which model's verdicts calibrated the items, so a later failure can be attributed to the candidate rather than to a wrong answer key; it is required for every set except this one."
 }
