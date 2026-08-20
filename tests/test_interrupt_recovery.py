@@ -423,6 +423,23 @@ class ReconcileTestCase(unittest.TestCase):
         self.assertIn("gllm=0.6.0", row["knobs"], str(row))
         self.assertIn("stall=na", row["knobs"], "an unrecorded knob is `na`, not the default")
 
+    def test_a_level_that_started_and_left_no_json_is_reported_not_scored(self):
+        """Both real orphans on this node look like tidy sweeps until you notice a `level_cN.log`
+        with no sibling JSON: the run was cut short in that level. No measurement to score, but
+        "this sweep did not finish" is exactly what a reconstructed row must not silently lose."""
+        b = self.bundle("20260101-000000-chat", {1: api.level_json(41, tps=20.0, rate=1)})
+        (b / "level_c16.log").write_text("guidellm started c16 and never landed\n")
+        old = time.time() - 7200
+        os.utime(b / "level_c16.log", (old, old))
+        os.utime(b, (old, old))          # writing the log freshened the directory mtime too
+        self.journal()
+        proc = self.run_tool("--write")
+        row = self.rows()[0]
+        self.assertEqual("na", row["tps_c16"], str(row))
+        self.assertNotIn("c16", row["req_counts"], "an unfinished level is not scored")
+        self.assertIn("c16", row["notes"].split("did not finish:")[-1], str(row))
+        self.assertIn("started", row["notes"], proc.stdout)
+
     def test_fatal_evidence_makes_the_reconstructed_row_void(self):
         """The library's verdict still decides: a 2-request level is `no_data`, i.e. not data."""
         self.bundle("20260101-000000-chat", {16: api.level_json(2, incomplete=31, tps=256.19,
@@ -486,6 +503,17 @@ class ReconcileTestCase(unittest.TestCase):
         proc = self.run_tool("--write")
         self.assertEqual([], self.rows(), proc.stdout)
         self.assertIn("Gate-2", proc.stdout)
+
+    def test_an_unreadable_journal_claims_nothing_rather_than_everything(self):
+        """Fail closed. If the journal cannot be read, every published row looks like an orphan
+        and `--write` would duplicate the whole campaign."""
+        self.bundle("20260101-000000-chat", {1: api.level_json(41, tps=20.0, rate=1)})
+        self.tsv.write_bytes(b"\xff\xfe not a tsv \x00\x80\n")
+        before = self.tsv.read_bytes()
+        proc = self.run_tool("--write")
+        self.assertEqual(1, proc.returncode, proc.stdout + proc.stderr)
+        self.assertEqual(before, self.tsv.read_bytes(), "the journal must be untouched")
+        self.assertIn("could not be read", proc.stdout, proc.stdout + proc.stderr)
 
     def test_it_refuses_a_pre_migration_journal_rather_than_misaligning_it(self):
         self.bundle("20260101-000000-chat", {1: api.level_json(41, tps=20.0, rate=1)})

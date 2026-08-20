@@ -79,6 +79,7 @@ DEFAULT_RESULTS = REPO_ROOT / "results"
 DEFAULT_MIN_AGE = 1800          # seconds; a bundle younger than this may still be running
 
 _LEVEL_FILE = re.compile(r"^level_c(\d+)\.json$")
+_LEVEL_LOG = re.compile(r"^level_c(\d+)\.log$")
 _RUN_ID = re.compile(r"^\d{8}-\d{6}-(?P<shape>[A-Za-z0-9_]+)$")
 
 # The provenance a bundle cannot carry. Named in the row's `notes` so the `na`s are explained
@@ -97,8 +98,16 @@ class Bundle:
         self.journal = journal          # the results.tsv that WOULD own it
         self.kind = kind                # orphan | referenced | eval | empty | in_flight
         self.reason = reason
+        names = [p.name for p in _iterdir(path)]
         self.levels = sorted(int(m.group(1)) for m in
-                             (_LEVEL_FILE.match(p.name) for p in _iterdir(path)) if m)
+                             (_LEVEL_FILE.match(n) for n in names) if m)
+        # A level with a GuideLLM log but no JSON was STARTED and never landed — the fingerprint
+        # of a sweep that was cut short. It carries no measurement, so it is never scored; it is
+        # reported and written into the row's notes, because "this sweep did not finish" is
+        # exactly the fact a reconstructed row would otherwise lose. (The DavidAU orphan on this
+        # node looks like a clean two-level sweep until you notice its `level_c32.log`.)
+        self.started_only = sorted(
+            {int(m.group(1)) for m in (_LEVEL_LOG.match(n) for n in names) if m} - set(self.levels))
 
     @property
     def run_id(self) -> str:
@@ -137,19 +146,21 @@ def _referenced(journal: Path) -> set:
 
     Both, deliberately: `data` is the reference, but a row whose `data` cell is `na` (six exist)
     still accounts for its run, and re-reconstructing it would duplicate a published row.
+
+    FAILS CLOSED. A journal that exists but cannot be read raises: swallowing the error would
+    return an empty reference set, every published row would look like an orphan, and `--write`
+    would duplicate the entire campaign. "A check that degrades into a pass is worse than no
+    check" (contract v1.2 A6) applies to a reader as much as to a verdict.
     """
     names: set = set()
     if not journal.exists():
         return names
-    try:
-        with journal.open(newline="", encoding="utf-8") as fh:
-            for row in csv.DictReader(fh, delimiter="\t"):
-                for key in ("data", "run_id"):
-                    val = (row.get(key) or "").strip().rstrip("/")
-                    if val and val != NA:
-                        names.add(val.split("/")[-1])
-    except (OSError, UnicodeDecodeError, csv.Error):
-        pass
+    with journal.open(newline="", encoding="utf-8") as fh:
+        for row in csv.DictReader(fh, delimiter="\t"):
+            for key in ("data", "run_id"):
+                val = (row.get(key) or "").strip().rstrip("/")
+                if val and val != NA:
+                    names.add(val.split("/")[-1])
     return names
 
 
@@ -161,8 +172,15 @@ def scan(results_dir: Path, min_age: float) -> list:
             continue
         model_dir = data_dir.parent
         journal = model_dir / "results.tsv"
-        bench_refs = _referenced(journal)
-        eval_refs = _referenced(model_dir / "accuracy.tsv")
+        try:
+            bench_refs = _referenced(journal)
+            eval_refs = _referenced(model_dir / "accuracy.tsv")
+        except (OSError, UnicodeDecodeError, csv.Error) as exc:
+            # Cannot tell an orphan from a published row here, so claim nothing in this model.
+            for path in _iterdir(data_dir):
+                if path.is_dir():
+                    found.append(Bundle(path, journal, "journal_unreadable", str(exc)))
+            continue
         for path in _iterdir(data_dir):
             if not path.is_dir():
                 continue
@@ -270,9 +288,11 @@ def reconstruct(bundle: Bundle, results_dir: Path, node_profile: Path | None) ->
         "gllm": meta.get("guidellm_version") or NA,
     })
     today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d")
+    started = ("; level(s) started but left no JSON, so the sweep did not finish: %s"
+               % ",".join("c%d" % x for x in bundle.started_only)) if bundle.started_only else ""
     notes = ("RECONSTRUCTED %s by scripts/reconcile_bundles.py from the retained bundle; "
-             "no results.tsv row referenced it. Not recoverable from a bundle: %s."
-             % (today, ", ".join(UNRECOVERABLE)))
+             "no results.tsv row referenced it%s. Not recoverable from a bundle: %s."
+             % (today, started, ", ".join(UNRECOVERABLE)))
 
     row = {c: NA for c in RESULTS_COLS}
     row.update({
@@ -383,6 +403,15 @@ def main(argv=None) -> int:
     print("  %4d orphan, no level JSON — nothing to recover" % len(empties))
     print("  %4d ORPHAN with retained evidence" % len(orphans))
 
+    unreadable = by_kind.get("journal_unreadable", [])
+    if unreadable:
+        journals = sorted({str(b.journal) for b in unreadable})
+        print("\n!! %d bundle(s) skipped: their journal could not be read, so an orphan cannot be\n"
+              "   told apart from a published row. Nothing in these models is claimed:"
+              % len(unreadable))
+        for j in journals:
+            print("     %s" % j)
+
     eval_orphans = [b for b in by_kind.get("eval_orphan", [])
                     if any(b.path.rglob("results_*.json"))]
     if eval_orphans and not args.quiet:
@@ -393,7 +422,7 @@ def main(argv=None) -> int:
 
     if not orphans:
         print("\nnothing to reconcile.")
-        return 0
+        return 1 if unreadable else 0
 
     rows_by_journal: dict = {}
     for b in orphans:
@@ -401,7 +430,10 @@ def main(argv=None) -> int:
         rows_by_journal.setdefault(b.journal, []).append(row)
         if not args.quiet:
             print("\n%s" % _rel(b.path, results_dir))
-            print("    levels   %s" % (",".join("c%d" % x for x in b.levels) or "none"))
+            print("    levels   %s%s" % (",".join("c%d" % x for x in b.levels) or "none",
+                                         "   started, no JSON: %s"
+                                         % ",".join("c%d" % x for x in b.started_only)
+                                         if b.started_only else ""))
             print("    counts   %s" % row["req_counts"])
             print("    tps      c1=%s c4=%s c8=%s c16=%s c32=%s"
                   % (row["tps_c1"], row["tps_c4"], row["tps_c8"], row["tps_c16"], row["tps_c32"]))
@@ -420,7 +452,7 @@ def main(argv=None) -> int:
     print("\nrecorded %d reconstructed row(s). They are `%s`/`%s`, never `measured`: the "
           "evidence is real, the run's completion is not established."
           % (len(orphans), STATUS_SUSPECT, STATUS_VOID))
-    return 0
+    return 1 if unreadable else 0
 
 
 if __name__ == "__main__":              # pragma: no cover
