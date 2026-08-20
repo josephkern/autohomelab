@@ -55,8 +55,21 @@ print('livebench=see all_groups.csv')
 " || echo 'livebench=na')"
 CFG="$(sha256sum "$RUNBOOK" | cut -c1-8)"
 TSV="$OUT_DIR/accuracy.tsv"
-[ -f "$TSV" ] || echo $'run_id\tcommit\tnode_fp\tmodel\tconfig_hash\tscript\tsuite\ttasks\tlimit\tscores\tdata' > "$TSV"
-printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+# accuracy.tsv is 16 columns since docs/validity-contract.md A9. This harness is not lm-eval and
+# emits no `n-samples` bundle, so the Gate-2 predicate cannot be evaluated for its row: `samples`,
+# `validity` and `status` are recorded as `na`, which contract A5 says is NEVER `ok` -- an
+# unevaluable quality number is reported as unevaluable, not asserted clean. A legacy 12-column
+# journal is migrated in place first, so this append can never widen a narrow file.
+migrate_acc(){ [ -f "$1" ] && [ "$(head -1 "$1")" != "$2" ] && \
+  python3 "$SCRIPT_DIR/migrate_accuracy_tsv.py" --tsv "$1" --bundle-root "$REPO_ROOT" --write >&2
+  return 0; }
+# NOTE: this script wrote ELEVEN columns against a twelve-column header (no `think`) -- it was out
+# of sync before A9, not because of it. Fixed here in passing.
+HDR=$'run_id\tcommit\tnode_fp\tmodel\tconfig_hash\tscript\tsuite\ttasks\tlimit\tscores\tdata\tthink\tconc\tsamples\tvalidity\tstatus'
+migrate_acc "$TSV" "$HDR"
+[ -f "$TSV" ] || printf '%s\n' "$HDR" > "$TSV"
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
   "$(date -u +%Y%m%d-%H%M%S)-live" "$(git -C "$REPO_ROOT" rev-parse --short HEAD)" "$NODE_FP" "$MODEL" \
-  "$CFG" "$(realpath --relative-to="$REPO_ROOT" "$RUNBOOK")" "livebench" "$BENCH" "rel>=$RELEASE" "$SCORE" "source/livebench" >> "$TSV"
+  "$CFG" "$(realpath --relative-to="$REPO_ROOT" "$RUNBOOK")" "livebench" "$BENCH" "rel>=$RELEASE" "$SCORE" \
+  "source/livebench" "na" "${CONC:-na}" "na" "na" "na" >> "$TSV"
 echo ">> recorded livebench row (release-gated >= $RELEASE). Detail: $CSV" >&2

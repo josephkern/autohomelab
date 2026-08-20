@@ -118,6 +118,28 @@ measurement got into a promotion decision.
 | `nonmonotonic` | a level is >10% below the one before it | check `req_counts` and `survivorship` **first** — a discarded slow half explains most apparent inversions, and starvation explains the rest. If the counts are healthy, this is a genuine finding about the config or the box: keep the row, adjudicate it in the logbook, and say why |
 | `na` | the rules could not be evaluated — no bundle | the number is unverifiable, not verified. Treat as uncitable; re-run if it matters |
 
+### Gate 2: when the SCORE is not a measurement
+
+The same thing happens on the quality gate (docs/validity-contract.md **A9**). `eval.sh` scores its
+own lm-eval bundle before writing the row and exits **4** when the score is not citable, on the
+same ladder (**3** the harness was killed, **4** not citable, **1** other failure, **0** clean);
+`suite.sh` and `validate.sh` latch it. The row is written either way, carrying `validity`,
+`status`, `samples` (`task=effective/requested`) and `conc`.
+
+| verdict | what happened | do this |
+|---|---|---|
+| `nonfinite@<task>` | the metric came back `NaN`/`Inf` | this is §0 defect (c). Almost always **a loglikelihood task on a spec-decode serve** (`NaN` prompt_logprobs -> HTTP 400 per request, and lm-eval retries and keeps going). Check the runbook for `--speculative-config`: if it is there, `mmlu` must not run at all — use generative `gsm8k`/`mmlu_pro` |
+| `short_sample@<task>` | fewer samples scored than were requested (the `samples` cell has both numbers) | requests were dropped mid-run. Read the lm-eval log for repeated 400/timeout. **Do not quote the score**: it is over a different population than the one asked for. Raise `EVAL_TIMEOUT` if it was timeouts; fix the serve if it was errors |
+| `no_score` | no results json, unreadable, or the task is missing from it | lm-eval did not finish. Its exit code and log say why; nothing was measured |
+| `zero_score@<task>` | the metric is exactly `0.0` | **check the serve produced any tokens at all** before assuming the model is bad. NemotronH generates **zero tokens** under `enable_thinking=false` and scored gsm8k 0.0 — fixed per-model with `AHL_THINK_OFF_KWARGS`. The other common cause is an answer-extractor format mismatch (`minerva_math500` scores ~0 on `\boxed` output) |
+| `no_samples@<task>` | the bundle has no `n-samples`, so completeness could not be checked | fail-closed, not a failure of the model. Re-run; if it persists the harness version changed shape |
+| `na` | the predicate itself could not run | uncitable, same as Gate 3 |
+
+**A failing Gate 2 is not a slow Gate 3.** Do not spend a throughput sweep on a config whose
+quality number is not a measurement. And note what these rules deliberately do NOT do: they never
+compare a score to a reference. At `LIMIT=100` the binomial SE is ~4.3 points, so the in-loop
+quality check can catch gross breakage and nothing finer — see the `LIMIT=100` follow-up.
+
 ### Adjudicating a `suspect` row
 
 `suspect` is not a soft pass. To cite one, write into `results/<node_fp>/<org>/<model>/logbook.md`:

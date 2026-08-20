@@ -11,8 +11,14 @@
 # (`scripts/citability.py gate`), scoped to the objective it will cite (chat c16 by default), so
 # this report can never disagree with the gate it is supposed to predict.
 #
+# Gate 2 is CHECKED too, not just run (docs/validity-contract.md A9). eval.sh now scores the
+# lm-eval bundle it produced -- a non-finite score, a score over fewer samples than were
+# requested, or no score at all makes the row non-citable and eval.sh exits 4. A validation whose
+# quality number is `nan` is not a validation, so that is a FAIL here, with the row's `validity`,
+# `status`, `samples` and `conc` printed in the report.
+#
 # Exit codes follow the repo-wide precedence 3 (crash) > 4 (not citable) > 1 (gate failure) > 0.
-# A failed smoke no longer HIDES a non-citable Gate 3: both are reported and 4 wins.
+# A failed smoke no longer HIDES a non-citable Gate 2 or Gate 3: all are reported and 4 wins.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -49,15 +55,59 @@ echo ">> validating $(realpath --relative-to="$REPO_ROOT" "$RUNBOOK") (cfg $CFG)
 smoke_status=PASS
 "$SCRIPT_DIR/smoke.sh" "$RUNBOOK" || smoke_status=FAIL
 
-# Full quality eval (no LIMIT). Don't abort on eval error — record what we got.
-eval_status=ok
-"$SCRIPT_DIR/eval.sh" "$RUNBOOK" "$SUITE" || eval_status=error
+# Full quality eval (no LIMIT). Don't abort on eval error - record what we got. eval.sh's exit
+# code is a VERDICT now: 3 the harness was killed, 4 the row is written but the score is not a
+# measurement, 1 some other failure, 0 citable.
+EVAL_SINCE="$(date -u +%Y%m%d-%H%M%S)"
+eval_rc=0
+"$SCRIPT_DIR/eval.sh" "$RUNBOOK" "$SUITE" || eval_rc=$?
+case "$eval_rc" in
+  0) eval_status=ok ;;
+  3) eval_status=crash ;;
+  4) eval_status=invalid ;;
+  *) eval_status=error ;;
+esac
 # NOTE: `tail` on a missing accuracy.tsv fails, and under `set -euo pipefail` that killed the whole
-# script *before* it wrote a report — a validation run that produced no accuracy row vanished with
+# script *before* it wrote a report - a validation run that produced no accuracy row vanished with
 # exit 1 and no artifact. Guard the read so the report is always written.
-SCORES=""
-[ -f "$OUT_DIR/accuracy.tsv" ] && SCORES="$(tail -n +2 "$OUT_DIR/accuracy.tsv" | awk -F'\t' -v c="$CFG" '$5==c{s=$10} END{print s}')"
+#
+# Read back THIS run's row (run_id >= EVAL_SINCE) for this config: the scores plus the columns
+# that say whether the score may be quoted. Column order is fixed by eval.sh's 16-column header
+# (contract A9): $1 run_id, $5 config_hash, $10 scores, $13 conc, $14 samples, $15 validity,
+# $16 status. The long-standing $5/$10 read still works because the new columns were APPENDED --
+# which is why they were appended.
+SCORES=""; ACC_CONC=na; ACC_SAMPLES=na; ACC_VALIDITY=na; ACC_STATUS=na; ACC_FOUND=0
+if [ -f "$OUT_DIR/accuracy.tsv" ]; then
+  ACC_LINE="$(tail -n +2 "$OUT_DIR/accuracy.tsv" \
+    | awk -F'\t' -v c="$CFG" -v since="$EVAL_SINCE" \
+        '$5==c && $1>=since {s=$10; cc=($13==""?"na":$13); sm=($14==""?"na":$14); v=($15==""?"na":$15); st=($16==""?"na":$16)}
+         END{ if (s!="") printf "%s\t%s\t%s\t%s\t%s", s, cc, sm, v, st }')"
+  [ -n "$ACC_LINE" ] && { ACC_FOUND=1; IFS=$'\t' read -r SCORES ACC_CONC ACC_SAMPLES ACC_VALIDITY ACC_STATUS <<<"$ACC_LINE"; }
+fi
 [ -z "$SCORES" ] && SCORES="(see accuracy.tsv)"
+
+# Gate 2 citability, from TWO independent readings: eval.sh's exit code, and the row it wrote.
+# Either one saying "not citable" is enough. When a row for this run exists its `validity` decides
+# and `na` is never `ok` (contract A5), so a row with no verdict fails CLOSED. When NO row exists
+# the exit code decides alone -- eval.sh always writes a row and already fails closed when it
+# cannot produce a verdict, so a missing row means eval.sh did not run at all, which its exit code
+# is the authority on. This second reading is defence in depth, not the primary gate.
+G2_VERDICT=ok
+case "$eval_status" in
+  crash)   G2_VERDICT=crash ;;
+  invalid) G2_VERDICT=invalid ;;
+esac
+if [ "$G2_VERDICT" = ok ] && [ "$ACC_FOUND" = 1 ]; then
+  [ "$ACC_VALIDITY" = ok ] || G2_VERDICT=invalid
+  case "$ACC_STATUS" in void|suspect|crash) G2_VERDICT=invalid ;; esac
+fi
+if [ "$G2_VERDICT" = ok ] && [ "$eval_status" != ok ]; then G2_VERDICT=error; fi
+G2_LABEL="PASS (citable)"
+case "$G2_VERDICT" in
+  invalid) G2_LABEL="FAIL - the score is NOT a measurement, do not quote or promote on it" ;;
+  crash)   G2_LABEL="CRASH - the eval harness was killed" ;;
+  error)   G2_LABEL="ERROR - lm-eval failed (eval_status=$eval_status)" ;;
+esac
 
 "$SCRIPT_DIR/serve.sh" down >/dev/null 2>&1 || true
 
@@ -81,6 +131,7 @@ fi
 
 VERDICT=PASS
 [ "$smoke_status" = PASS ] || VERDICT=FAIL
+[ "$G2_VERDICT" = ok ] || VERDICT=FAIL
 [ "$G3_VERDICT" = invalid ] && VERDICT=FAIL
 
 {
@@ -91,7 +142,17 @@ VERDICT=PASS
   echo "- backend: $("$REPO_ROOT/backends/vllm/adapter.sh" info 2>/dev/null || echo 'n/a (down)')"
   echo "- **VALIDATION VERDICT: $VERDICT**$([ "$G3_VERDICT" = missing ] && echo '  (Gates 1+2 only — Gate 3 not run yet)' || true)"
   echo "- **Gate 1 functional (smoke): $smoke_status**"
-  echo "- **Gate 2 quality (lm-eval $SUITE): $SCORES**  (eval run: $eval_status)"
+  echo "- **Gate 2 quality (lm-eval $SUITE): $G2_LABEL**"
+  echo "    - scores: \`$SCORES\`   samples (effective/requested): $ACC_SAMPLES   conc: $ACC_CONC"
+  echo "    - status: $ACC_STATUS   validity: $ACC_VALIDITY   (eval run: $eval_status)"
+  [ "$ACC_FOUND" = 1 ] || echo "    - NOTE: no accuracy.tsv row from this run; the verdict is eval.sh's exit code alone"
+  if [ "$G2_VERDICT" = invalid ]; then
+    echo
+    echo "Gate 2 measurement-validity failure (docs/validity-contract.md A9): this score is not a"
+    echo "measurement. A non-finite value, a score computed over fewer samples than were requested,"
+    echo "no score at all, or a score of exactly 0.0 (check the serve emitted tokens - AGENTS.md"
+    echo "records NemotronH generating none under enable_thinking=false). Do NOT promote on it."
+  fi
   echo "- **Gate 3 throughput (read back from results.tsv): $G3_LABEL**"
   printf '%s\n' "$G3_DETAIL" | sed 's/^/    /'
   if [ "$G3_VERDICT" = invalid ]; then
@@ -104,13 +165,17 @@ VERDICT=PASS
   echo "Compare scores to the model card's reference (recovery %); promote only if within ~1%."
 } > "$REPORT"
 
-echo >&2; echo ">> verdict=$VERDICT smoke=$smoke_status gate3=$G3_VERDICT scores=$SCORES  report -> $(realpath --relative-to="$REPO_ROOT" "$REPORT")" >&2
+echo >&2; echo ">> verdict=$VERDICT smoke=$smoke_status gate2=$G2_VERDICT gate3=$G3_VERDICT scores=$SCORES  report -> $(realpath --relative-to="$REPO_ROOT" "$REPORT")" >&2
 
 # Exit-code precedence, repo-wide (docs/validity-contract.md §5): 3 crash > 4 not citable >
 # 1 gate failure > 0. `exit 1` used to come FIRST, so a config that failed smoke AND had
 # uncitable throughput rows reported only the smoke failure — the louder signal masked the
 # quieter, more corrosive one. 4 now wins, and both are in the report either way.
+# Gate 2 rides the same ladder: "the quality score is not a measurement" is exactly as corrosive
+# as the throughput equivalent, and until now it could not be reported at all.
 rc=0
 [ "$smoke_status" = PASS ] || rc=1
-[ "$G3_VERDICT" = invalid ] && rc=4
+[ "$G2_VERDICT" = error ] && rc=1
+{ [ "$G2_VERDICT" = invalid ] || [ "$G3_VERDICT" = invalid ]; } && rc=4
+[ "$G2_VERDICT" = crash ] && rc=3
 exit "$rc"

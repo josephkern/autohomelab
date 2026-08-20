@@ -85,9 +85,45 @@ validated-image *registry* + the default for new baselines.
 Per **(node, model)** under `results/<node_fp>/<org>/<model>/`:
 
 - **`results.tsv`** — throughput journal, one row per (run, shape). Committed.
-- **`accuracy.tsv`** — Gate-2 journal, one row per lm-eval call. Committed. Columns:
-  `run_id commit node_fp model config_hash script suite tasks limit scores data think`
-  (`think` = `on`/`off`; there is **no `conc` column** — see the accuracy-at-one-concurrency follow-up).
+- **`accuracy.tsv`** — Gate-2 journal, one row per lm-eval call. Committed. **16 columns**
+  (docs/validity-contract.md **A9**, 20260819 — was 12):
+  `run_id commit node_fp model config_hash script suite tasks limit scores data think conc samples
+  validity status`. The four new ones are **appended**, so the long-standing positional reads
+  (`$5` config_hash, `$10` scores) still work.
+  - `think` — `on`/`off`; disambiguates rows that otherwise contradict each other (35B gsm8k
+    `=42` think-on vs `=90` think-off).
+  - `conc` — the concurrency the eval ran at. Backfilled **from each bundle's own
+    `config.model_args.num_concurrent`**, not assumed: 74 of the 76 historical rows are c16, and
+    **two ds4 rows really ran at c4** — so the standing "every accuracy row is c16" claim was
+    wrong, and the two c4 rows share a `config_hash` with the two c16 rows beside them.
+  - `samples` — `task=effective/requested`, from the bundle's own `n-samples`. `mmlu --limit
+    100` legitimately requests **5,700** docs (57 subtasks x 100) out of 14,042, so the
+    denominator is computed per leaf subtask, never as a flat `limit`.
+  - `validity` — Gate-2 verdict tokens, **task-tagged** the way Gate-3 tokens are level-tagged:
+    `nonfinite@mmlu`, `short_sample@gsm8k`, `+`-joined, `ok` when clean, `na` when the rules could
+    not be evaluated (never `ok`).
+  - `status` — the same vocabulary as `results.tsv`, floored by the verdict: `measured` /
+    `suspect` / `void`.
+
+  | token | rule | severity |
+  |---|---|---|
+  | `no_score` | no results json, unparseable, or the requested task has no metric | fatal |
+  | `nonfinite` | the headline metric is `NaN` or +/-`Inf` | fatal |
+  | `short_sample` | `effective < AHL_EVAL_MIN_SAMPLE_FRAC * requested` (**0.99**) | fatal |
+  | `zero_score` | the headline metric is exactly `0.0` | suspect |
+  | `no_samples` | the bundle carries no `n-samples`, so the check could not run — fail closed | suspect |
+
+  Rules live once, in `scripts/eval_validity.py`; `eval.sh` scores its own bundle before writing
+  the row and exits **4** when the result is not citable, on the repo-wide ladder 3 > 4 > 1 > 0.
+  `suite.sh`/`validate.sh` latch that and re-read the row, so the report and the exit code cannot
+  disagree. Acceptance suite: `scripts/eval_validity_selftest.sh` (83 checks, synthetic bundles,
+  no GPU) — which includes **execution traces** proving every Gate-2 branch is reachable for
+  all four runbook variants (neither / reasoning / spec-decode / **both**). Migrate a legacy
+  journal with `scripts/migrate_accuracy_tsv.py --write` (idempotent; `eval.sh` calls it
+  automatically when it meets a 12-column file).
+  **This is a validity check, not a tolerance test** — nothing here compares a score to a
+  reference, because at `LIMIT=100` the binomial SE is ~4.3 points and any threshold on the
+  *value* would imply a precision the sample size cannot deliver.
 - **`logbook.md`** — narrative (what was tried/kept/discarded + the environment block). Committed.
 - **`SUITE-<cfg>.md`** — the per-config validation report `suite.sh` writes. Committed.
 - **`data/<run_id>/`** — raw bundle: `level_c<N>.json` (GuideLLM output, one per level — the
@@ -280,7 +316,11 @@ tuning **loop stays lean** (chat c1/c16, N=3 via `run_experiment.sh`) — never 
 per-candidate.
 
 - **Gate 1 — works** (`smoke.sh`): functional 4-check (chat / JSON / tool-call / reasoning routing).
-- **Gate 2 — good** (`eval.sh`): `general` (gsm8k, mmlu — the in-loop quality reference) **and**
+- **Gate 2 — good** (`eval.sh`): **validity is a precondition, not a post-check** (contract A9):
+  a score that is `nan`, computed over fewer samples than were requested, missing, or exactly
+  `0.0` is not a Gate-2 result at all — `eval.sh` exits **4** and the row records why
+  (`validity`/`samples`/`conc`; see the accuracy.tsv schema above). Tasks:
+  `general` (gsm8k, mmlu — the in-loop quality reference) **and**
   `resistant` (default **`mmlu_pro`**, harder/less-memorized, tier 2). `gpqa_diamond_zeroshot` is a
   **gated** HF dataset (`Idavidrein/gpqa`) — request access, then opt in with
   `TASKS=mmlu_pro,gpqa_diamond_zeroshot`. `LIMIT=100` for the in-loop reference; `FULL=1` (no cap) at
@@ -454,6 +494,17 @@ three rows that passed the invariants, not three rows that exist.
   existing rows as 16).
   **§1:** unchanged. The new columns landed on `results.tsv`; `accuracy.tsv` still has no `conc`
   column and no validity column, so this stays fully open.
+  **A9 (20260819): the RECORDING half is done, the MEASUREMENT half is still open, and the
+  premise was partly wrong.** `accuracy.tsv` now has a `conc` column and all 76 historical rows are
+  backfilled from each bundle's own `config.model_args.num_concurrent`. That evidence refutes
+  "NOTHING in the repo has ever overridden it": **two ds4 rows ran at c4**
+  (`20260808-150310-eval` gsm8k=60.0 and `20260808-153827-eval` gsm8k=76.0), while the two rows
+  beside them (`20260809-210459`, `20260809-213330`, both gsm8k=74.0) ran at c16 — and all four
+  share `config_hash` `10b02344`, which is the same corpus the host-launcher `config_hash` blind
+  spot is about. So the 60-vs-76 spread is *within* a c4 pair, not across concurrencies; c4 does
+  not explain it. What remains open is unchanged in substance: **no eval has ever been run at c1
+  or c32**, so whether quality holds across the batch range is still unmeasured. `CONC=1` /
+  `CONC=32` gsm8k on one serve settles it, and the result will now be recorded.
 - [ ] **`LIMIT=100` accuracy noise (±4–5 pts) is WIDER than the KEEP rule's ~1% tolerance.** At n=100,
   p≈0.9, binomial SE is ~4.3 pts. Measured spreads match: 35B mmlu 77.6→82.82 across 7 runs (5.2 pts),
   gemma-4 gsm8k 68→73, Qwen3-8B gsm8k 87→92. So an in-loop quality comparison at LIMIT=100 cannot
@@ -506,15 +557,21 @@ three rows that passed the invariants, not three rows that exist.
   peak). The node fingerprint was proven unchanged by the edit. **The roofline is armed today** —
   `over_roofline@c16` fires on the 449,358 row. No re-probe needed; `probe.sh` gained a
   `mem_bw_for_gpu()` platform table so new nodes get it automatically.
-- [ ] **Gate 2 has no validity layer at all.** The contract covers throughput rows only. Of the
-  three defects that motivated it, the mmlu-on-spec-decode NaN run is a *Gate-2* failure and is
-  caught by none of these verdicts — it was fixed by a specific branch-order fix (20260817), not by
-  a general invariant. `accuracy.tsv` records `scores` with no denominator: nothing says how many
-  requests errored, how many produced empty output, or what fraction of the task set actually
-  scored. The exact analogue of `req_counts`/`validity` for lm-eval rows is missing, and the same
-  class of "plausible number over a degraded subset" is still possible on the quality gate.
-  Contract v1.1 §0 now states this scope limit in the spec itself rather than leaving it implied —
-  which is the right place for it, but does not make the gap any smaller.
+- [x] **Gate 2 had no validity layer at all** — **CLOSED 20260819 (contract A9).** The original
+  finding: of the three defects that motivated the contract, the mmlu-on-spec-decode NaN run is a
+  *Gate-2* failure caught by none of the throughput verdicts; it was fixed by a specific
+  branch-order fix (20260817), not by a general invariant. Verification then found Gate 2 had **no
+  acceptance predicate whatsoever** — `suite.sh` judged it on `eval.sh`'s exit code alone, and
+  `eval.sh` exited 0 whatever came back, so `mmlu: acc = NaN`, a score over **37 of 14,042**
+  requested samples, and a missing results json each wrote a row and reported **PASS**.
+  Now: `scripts/eval_validity.py` scores every bundle (`no_score` / `nonfinite` / `short_sample`
+  fatal, `zero_score` / `no_samples` suspect), `accuracy.tsv` carries `conc`/`samples`/`validity`/
+  `status`, and a non-citable quality result exits 4 and fails the suite. The denominator the
+  finding asked for is the `samples` column: `effective/requested` per task, from the bundle's own
+  `n-samples`. Residual gaps recorded rather than papered over: lm-eval publishes no per-request
+  error count, so `errored`-style visibility does not exist on this gate, and a zero-token
+  generation is detected only through its 0.0 score (there is no output-token count in the bundle
+  without `--log_samples`).
 - [ ] **`keep` has never been written to a `results.tsv` row** (0 of 315; 297 `measured`, 12
   `crash`, 6 `discard`). Keep/discard adjudication lives in `logbook.md` prose, so no tool can
   answer "which rows support this promotion?" from the journal alone — `promote.sh` can only check

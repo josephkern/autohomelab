@@ -22,12 +22,21 @@
 # accuracy.tsv rows and writes a SUITE-<cfg>.md summary. Crash-safe: bench.sh's watchdog +
 # per-level isolation; evals/benches re-serve if a wedge tore the container down.
 #
-# The report carries an explicit SUITE VERDICT and the Gate-3 rows' `status`/`validity`/`req_counts`
-# (docs/validity-contract.md). A Gate-3 measurement-validity failure is a FAIL — never a pass with a
-# plausible number attached — whether it arrives as bench.sh exit 4 or as a `void`/`suspect` row.
-# Exit, in the repo-wide precedence 3 > 4 > 1 > 0: 3 Gate-3 crash/hang · 4 Gate-3 numbers not
-# citable · 1 any other gate failure · 0 all gates pass. A gate-1/2 failure never MASKS a
-# non-citable Gate 3 — the codes latch upward, they do not overwrite.
+# The report carries an explicit SUITE VERDICT and, for Gates 2 AND 3, the rows' own
+# `status`/`validity` (docs/validity-contract.md). A measurement-validity failure is a FAIL --
+# never a pass with a plausible number attached -- whether it arrives as an exit 4 or as a
+# `void`/`suspect` row.
+#
+# GATE 2 IS JUDGED THE SAME WAY GATE 3 IS (contract A9). It used to be judged on eval.sh's exit
+# code alone while eval.sh exited 0 whatever lm-eval returned, so a literal `nan` score, a score
+# computed over 37 of 14,042 requested samples, and a missing results json each reported PASS.
+# eval.sh now scores its own bundle and exits 4 when the result is not citable; this script
+# latches that, and additionally re-reads the accuracy.tsv rows it wrote so the report and the
+# exit code cannot disagree.
+#
+# Exit, in the repo-wide precedence 3 > 4 > 1 > 0: 3 crash/hang (either gate) . 4 numbers not
+# citable (either gate) . 1 any other gate failure . 0 all gates pass. A gate-1 failure never
+# MASKS a non-citable Gate 2 or Gate 3 -- the codes latch upward, they do not overwrite.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -69,6 +78,9 @@ ORG="${MODEL%%/*}"; [ "$ORG" = "$MODEL" ] && ORG="_"; NAME="${MODEL##*/}"
 NODE_FP="$(find "$REPO_ROOT/results" -maxdepth 2 -name node_profile.json -printf '%h\n' 2>/dev/null | head -1 | xargs -r basename)"
 CFG="$(sha256sum "$RUNBOOK" | cut -c1-8)"
 OUT_DIR="$REPO_ROOT/results/$NODE_FP/$ORG/$NAME"
+# The report is written unconditionally at the end, including when no gate produced a row,
+# so the directory has to exist before then rather than as a side effect of eval.sh/bench.sh.
+mkdir -p "$OUT_DIR"
 REPORT="$OUT_DIR/SUITE-${CFG}.md"
 DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 log(){ echo "[$(date -u +%H:%M:%S)] $*" >&2; }
@@ -97,7 +109,36 @@ SPEC=0; grep -qE '^[[:space:]]*--speculative-config' "$RUNBOOK" && SPEC=1
 smoke=PASS; "$SCRIPT_DIR/smoke.sh" "$RUNBOOK" || smoke=FAIL; log "Gate 1 smoke: $smoke"
 
 # Gate 2 — quality on the thinking-ON serve
-gen=ok; res=ok
+#
+# eval.sh's exit code is now a VERDICT, not just "did the process die" (docs/validity-contract.md
+# A9). Gate 2 used to be computed from that exit code alone while eval.sh exited 0 whatever came
+# back, so a literal `nan`, a score over 37 of 14,042 requested samples, and a missing results
+# json all reported PASS. The codes mirror Gate 3's exactly, so an operator meets ONE concept:
+#   0 citable · 3 the harness was killed · 4 the row is written but NOT citable · other = error
+# `run_eval` latches the worst verdict seen for its gate half, so a later clean pass can never
+# overwrite an earlier failure (the same latching bug the exit ladder had at the bottom of this
+# file).
+_erank(){ case "$1" in ok) echo 0 ;; error|serve_fail) echo 1 ;; invalid) echo 2 ;; crash) echo 3 ;; *) echo 1 ;; esac; }
+_ecode(){ case "$1" in 0) echo ok ;; 3) echo crash ;; 4) echo invalid ;; 70) echo serve_fail ;; *) echo error ;; esac; }
+# run_eval <result-var> <label> <eval-suite> [ENV=VALUE ...]
+run_eval(){
+  local _var="$1" _label="$2" _suite="$3"; shift 3
+  local _rc=0 _v
+  if ensure_up; then
+    env "$@" "$SCRIPT_DIR/eval.sh" "$RUNBOOK" "$_suite" || _rc=$?
+  else
+    _rc=70
+  fi
+  _v="$(_ecode "$_rc")"
+  [ "$_v" = invalid ] && log "!! Gate 2 [$_label]: QUALITY RESULT NOT CITABLE (eval.sh exit 4) — row written, NOT a pass"
+  [ "$(_erank "$_v")" -gt "$(_erank "${!_var}")" ] && printf -v "$_var" '%s' "$_v"
+  log "Gate 2 $_label: ${!_var}"
+}
+
+gen=ok; res=ok; GATE2_PLAN=""
+EVAL_SINCE="$(date -u +%Y%m%d-%H%M%S)"   # accuracy rows are run_id=<YYYYmmdd-HHMMSS>-eval;
+                                         # used to report THIS session's quality rows, not a
+                                         # stale row left by an earlier session for the cfg.
 if [ "$REASONING" = 1 ] && [ "$SPEC" = 1 ]; then
   # BOTH reasoning AND spec-decode. These two branches used to be mutually exclusive with
   # reasoning first, so this combination silently took the reasoning path and ran loglikelihood
@@ -106,16 +147,20 @@ if [ "$REASONING" = 1 ] && [ "$SPEC" = 1 ]; then
   # loglikelihood task here and spec-decode rules it out. Gate 2 is therefore entirely the
   # generative gsm8k + mmlu_pro run on the thinking-OFF serve below.
   log "Gate 2: reasoning + spec-decode -> loglikelihood mmlu SKIPPED (spec-decode NaN prompt_logprobs); Gate 2 = generative gsm8k+mmlu_pro on the think-off serve below"
+  GATE2_PLAN="reasoning+spec: think-on SKIPPED; think-off gsm8k+mmlu_pro is the whole gate"
 elif [ "$REASONING" = 1 ]; then
-  ensure_up && TASKS=mmlu "$SCRIPT_DIR/eval.sh" "$RUNBOOK" general || gen=error
-  log "Gate 2 mmlu (loglikelihood, think-on): $gen   [generative gsm8k/mmlu_pro -> think-off pass below]"
+  run_eval gen "mmlu (loglikelihood, think-on)" general TASKS=mmlu
+  log "  [generative gsm8k/mmlu_pro -> think-off pass below]"
+  GATE2_PLAN="reasoning: think-on mmlu + think-off gsm8k/mmlu_pro"
 elif [ "$SPEC" = 1 ]; then
   # spec-decode: generative-only (gsm8k for general, skip loglikelihood mmlu) + mmlu_pro (generative).
-  ensure_up && TASKS=gsm8k "$SCRIPT_DIR/eval.sh" "$RUNBOOK" general   || gen=error; log "Gate 2 general [gsm8k only, spec-decode skips loglikelihood mmlu]: $gen"
-  ensure_up &&              "$SCRIPT_DIR/eval.sh" "$RUNBOOK" resistant || res=error; log "Gate 2 resistant: $res"
+  run_eval gen "general [gsm8k only, spec-decode skips loglikelihood mmlu]" general TASKS=gsm8k
+  run_eval res "resistant" resistant
+  GATE2_PLAN="spec-decode: think-on gsm8k + mmlu_pro (loglikelihood mmlu skipped)"
 else
-  ensure_up && "$SCRIPT_DIR/eval.sh" "$RUNBOOK" general   || gen=error; log "Gate 2 general: $gen"
-  ensure_up && "$SCRIPT_DIR/eval.sh" "$RUNBOOK" resistant || res=error; log "Gate 2 resistant: $res"
+  run_eval gen "general" general
+  run_eval res "resistant" resistant
+  GATE2_PLAN="plain: think-on general + resistant"
 fi
 
 # Gate 3 — throughput, full curve, both shapes (deployed config; one bench.sh call per shape)
@@ -164,19 +209,27 @@ log "Gate 3 throughput ($SHAPES): $bench [$BENCH_DETAIL]"
 if [ "$REASONING" = 1 ]; then
   log "reasoning model -> thinking-OFF generative eval (gsm8k + mmlu_pro, chat endpoint)"
   if AHL_THINK_OFF=1 "$SCRIPT_DIR/serve.sh" "$RUNBOOK" >/dev/null 2>"$REPO_ROOT/.ahl_suite_serve.log"; then
-    THINK=off TASKS=gsm8k "$SCRIPT_DIR/eval.sh" "$RUNBOOK" general   || gen=error
-    THINK=off             "$SCRIPT_DIR/eval.sh" "$RUNBOOK" resistant || res=error
+    # This is the pass that catches a think-off serve generating ZERO tokens: NemotronH renders a
+    # pre-closed `<think></think>` from `enable_thinking=false` and scores gsm8k 0.0 (AGENTS.md;
+    # fixed per-model with AHL_THINK_OFF_KWARGS). eval.sh's predicate now flags an exactly-0.0
+    # score as `zero_score` -> status suspect -> exit 4, so that no longer reads as a PASS.
+    run_eval gen "generative gsm8k (think-off)"    general   THINK=off TASKS=gsm8k
+    run_eval res "generative mmlu_pro (think-off)" resistant THINK=off
     "$SCRIPT_DIR/serve.sh" down >/dev/null 2>&1 || true
     log "Gate 2 generative (think-off): gsm8k+mmlu_pro done"
-  else res=error; log "thinking-OFF serve failed (see .ahl_suite_serve.log)"; fi
+  else
+    [ "$(_erank serve_fail)" -gt "$(_erank "$res")" ] && res=serve_fail
+    log "thinking-OFF serve failed (see .ahl_suite_serve.log)"
+  fi
 fi
 
 # ── Summary report ────────────────────────────────────────────────────────────
 ahl_py - "$OUT_DIR" "$CFG" "$REPORT" "$DATE" "$smoke" "$gen" "$res" "$bench" "${LIMIT:-FULL}" \
         "$(realpath --relative-to="$REPO_ROOT" "$RUNBOOK")" "$BENCH_DETAIL" "$BENCH_SINCE" \
-        "$SCRIPT_DIR" <<'PY'
+        "$SCRIPT_DIR" "$GATE2_PLAN" "$EVAL_SINCE" <<'PY'
 import sys, csv, os
-out_dir, cfg, report, date, smoke, gen, res, bench, lim, rb, bench_detail, since, scripts_dir = sys.argv[1:14]
+(out_dir, cfg, report, date, smoke, gen, res, bench, lim, rb, bench_detail, since,
+ scripts_dir, gate2_plan, eval_since) = sys.argv[1:16]
 sys.path.insert(0, scripts_dir)   # this heredoc runs as `python -`, so scripts/ must be added
 # Row citability — docs/validity-contract.md §3/§5/§6. ONE implementation, in
 # scripts/citability.py, shared with promote.sh / validate.sh / run_experiment*.sh. The copy that
@@ -186,6 +239,9 @@ sys.path.insert(0, scripts_dir)   # this heredoc runs as `python -`, so scripts/
 # status column had been left alone. suite.sh judges rows ROW-WIDE (level=None): it is a
 # characterization report over the full 1..32 sweep, not a claim about one level.
 from citability import classify_row, VALID
+# Gate 2's acceptance predicate — the SAME module eval.sh scored the row with, so this report can
+# never disagree with the exit code it is summarizing (docs/validity-contract.md A9).
+from eval_validity import citable as acc_citable
 def classify(r):
     return classify_row(r)
 def rows(p):
@@ -199,20 +255,40 @@ for r in rows(os.path.join(out_dir,'results.tsv')):
     (tps if (r.get('run_id','') >= since) else stale)[r.get('shape','?')]=r
 for shape,r in stale.items():
     tps.setdefault(shape, dict(r, _stale='1'))
-# latest accuracy row per (suite, tasks, think) for this cfg — keep think-on/off rows distinct
-acc={}
+# Latest accuracy row per (suite, tasks, think, conc) for this cfg. `think` keeps the think-on and
+# think-off passes distinct (35B gsm8k=42 think-on vs =90 think-off); `conc` is in the key because
+# Gate 2 no longer has to be a single unrecorded point at c16 — two rows differing only in
+# concurrency are two different measurements, not a duplicate.
+# Rows from THIS run are preferred, exactly as the throughput table does it: a stale accuracy row
+# left by an earlier session must not be presented as this run's Gate-2 evidence.
+acc, acc_stale = {}, {}
 for r in rows(os.path.join(out_dir,'accuracy.tsv')):
-    if r.get('config_hash')==cfg:
-        acc[(r.get('suite','?'), r.get('tasks',''), r.get('think','on'))]=r
+    if r.get('config_hash')!=cfg: continue
+    key=(r.get('suite','?'), r.get('tasks',''), r.get('think','on'), r.get('conc','na'))
+    (acc if (r.get('run_id','') >= eval_since) else acc_stale)[key]=r
+for key,r in acc_stale.items():
+    acc.setdefault(key, dict(r, _stale='1'))
 
 bad_rows = {s: classify(r) for s,r in tps.items() if classify(r)!=VALID}
 gate3_pass = (bench=='ok') and not bad_rows
 gate1_pass = (smoke=='PASS')
-gate2_pass = (gen=='ok' and res=='ok')
+# Gate 2 is judged the way Gate 3 is: the exit codes AND the rows they wrote. A row whose
+# `validity` is anything but `ok` (or whose `status` is void/suspect) is written but not citable,
+# and a not-citable quality result is a Gate-2 FAILURE — never a pass with a plausible number
+# attached. Legacy rows predating the schema carry no `validity` cell at all; those read as `na`,
+# which A5 says is never `ok`, so they are reported rather than silently believed.
+bad_acc = {k: (r.get('validity','na'), r.get('status','na'))
+           for k,r in acc.items()
+           if not r.get('_stale') and not acc_citable(r.get('validity',''), r.get('status',''))}
+gate2_pass = (gen=='ok' and res=='ok') and not bad_acc
 verdict = 'PASS' if (gate1_pass and gate2_pass and gate3_pass) else 'FAIL'
 why=[]
 if not gate1_pass: why.append('Gate 1 smoke')
-if not gate2_pass: why.append(f'Gate 2 quality (general={gen}, resistant={res})')
+if not gate2_pass:
+    d=f'general={gen}, resistant={res}'
+    if bad_acc: d += ' — not citable: ' + ', '.join(
+        f"{k[0]}[{k[1]}] think={k[2]} c{k[3]}: {v[0]}/{v[1]}" for k,v in sorted(bad_acc.items()))
+    why.append(f'Gate 2 quality ({d})')
 if not gate3_pass:
     detail = bench if bench!='ok' else 'row validity'
     if bad_rows: detail += ' — ' + ', '.join(f'{s}:{v}' for s,v in sorted(bad_rows.items()))
@@ -223,9 +299,27 @@ L.append(f"# Standard suite — {rb}")
 L.append(f"- date: {date}    config_hash: {cfg}    eval cap: {lim}")
 L.append(f"- **SUITE VERDICT: {verdict}**" + (f" — failed: {'; '.join(why)}" if why else ""))
 L.append(f"- **Gate 1 functional (smoke): {smoke}**")
-L.append(f"- **Gate 2 quality:** general={gen}, resistant={res}")
-for key,r in sorted(acc.items()):
-    L.append(f"    - {r.get('suite','?')} [{r.get('tasks','')}] limit={r.get('limit','')} think={r.get('think','on')}: `{r.get('scores','')}`")
+L.append(f"- **Gate 2 quality: {'PASS' if gate2_pass else 'FAIL'}** (general={gen}, resistant={res})"
+         + (f" \u2014 plan: {gate2_plan}" if gate2_plan else ""))
+if acc:
+    L.append("")
+    L.append("| suite | tasks | limit | think | conc | scores | samples eff/req | status | validity |")
+    L.append("|---|---|---|---|---|---|---|---|---|")
+    for key,r in sorted(acc.items()):
+        v = acc_citable(r.get('validity',''), r.get('status',''))
+        mark = '' if v else ' \u26a0'
+        label = r.get('suite','?') + mark + (' _(stale)_' if r.get('_stale') else '')
+        L.append(f"| {label} | {r.get('tasks','')} | {r.get('limit','')} | {r.get('think','on')} | "
+                 f"{r.get('conc','na')} | `{r.get('scores','')}` | {r.get('samples','na')} | "
+                 f"{r.get('status','na')} | {r.get('validity','na')} |")
+if bad_acc:
+    L.append("")
+    L.append("**Gate 2 FAILURE** (docs/validity-contract.md A9): the quality row(s) above marked "
+             "\u26a0 are not a measurement \u2014 a non-finite score, a score computed over fewer "
+             "samples than were requested, no score at all, or a score of exactly 0.0 (check the "
+             "serve emitted tokens: AGENTS.md records NemotronH generating none under "
+             "`enable_thinking=false`). These numbers must NOT be quoted, compared, or used to "
+             "promote. `samples` is `effective/requested` from the bundle's own `n-samples`.")
 L.append(f"- **Gate 3 throughput: {'PASS' if gate3_pass else 'FAIL'}** (bench {bench}; {bench_detail or 'na'}) — full sweep, tok/s")
 if tps:
     L.append("")
@@ -263,10 +357,16 @@ _prec(){ case "$1" in 3) echo 3 ;; 4) echo 2 ;; 0) echo 0 ;; *) echo 1 ;; esac; 
 rc_suite=0
 latch(){ [ "$(_prec "$1")" -gt "$(_prec "$rc_suite")" ] && rc_suite="$1"; return 0; }
 
-case "$bench" in
-  crash)   latch 3 ;;
-  invalid) latch 4 ;;
-esac
+# Gate 2 rides the SAME ladder as Gate 3 (docs/validity-contract.md A9). "The quality score is
+# not a measurement" is exactly as corrosive as "the throughput number is not a measurement", and
+# it used to be unreportable: eval.sh always exited 0. A Gate-2 `invalid` now latches 4, so it can
+# never be flattened into the generic 1 by a smoke failure that happens to land beside it.
+for _g2 in "$gen" "$res" "$bench"; do
+  case "$_g2" in
+    crash)   latch 3 ;;
+    invalid) latch 4 ;;
+  esac
+done
 if [ "$smoke" != PASS ] || [ "$gen" != ok ] || [ "$res" != ok ] || [ "$bench" = error ] || [ "$bench" = serve_fail ]; then
   latch 1
 fi

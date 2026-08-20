@@ -40,7 +40,9 @@ mkrepo(){
   R="$(mktemp -d)"; trap 'rm -rf "$R"' EXIT
   mkdir -p "$R/scripts/lib" "$R/results/$NODE_FP/Org/Model" "$R/runbooks/Org/Model" \
            "$R/backends/vllm"
-  cp "$REAL_REPO/scripts/citability.py" "$R/scripts/"
+  # suite.sh consumes the Gate-2 predicate for its accuracy-row read-back (contract A9), so
+  # eval_validity.py has to be in the throwaway repo too or the summary report never renders.
+  cp "$REAL_REPO/scripts/citability.py" "$REAL_REPO/scripts/eval_validity.py" "$R/scripts/"
   cp "$REAL_REPO/scripts/lib/validity.py" "$REAL_REPO/scripts/lib/validity.sh" \
      "$REAL_REPO/scripts/lib/__init__.py" "$R/scripts/lib/" 2>/dev/null || true
   for s in promote.sh run_experiment.sh run_experiment_llamacpp.sh suite.sh validate.sh; do
