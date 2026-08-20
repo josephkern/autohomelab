@@ -23,6 +23,14 @@
 # shape (see "Interrupt safety" below). Untrappable deaths (SIGKILL, OOM-kill, power) are recovered
 # after the fact by scripts/reconcile_bundles.py.
 #
+# EXACTLY ONE ROW PER SHAPE, IN BOTH DIRECTIONS. The append is the atomic unit: signals arriving
+# during it are deferred, the flag clears as emit_row's last statement, and the interrupted writer
+# additionally refuses a run_id the journal already carries. A shape that COMPLETES cannot lose its
+# row to a signal landing between the flag and the write, and one that is interrupted cannot gain a
+# second. A signal arriving after a level was already marked hung still records the CRASH row, with
+# its `docker logs` artefact and its `adapter down` — the wedge record must not lose an event any
+# more than it may gain a phantom one.
+#
 # VALIDITY (docs/validity-contract.md): every row is checked against the measurement invariants in
 # scripts/lib/validity.{py,sh} before it is written. The row is ALWAYS written (the evidence must
 # survive in the committed journal), but a fatal verdict downgrades `status` to `void` and a suspect
@@ -120,6 +128,19 @@ tsv_safe() {
 emit_row() {
   local run_id="$1" shape_tag="$2" data_rel="$3" status="$4" notes="$5" peak="$6" \
         req_counts="$7" validity="$8" knobs="$9" t1="${10}" t4="${11}" t8="${12}" t16="${13}" t32="${14}"
+  # ── CRITICAL SECTION: the WRITE is the atomic unit, not the flag ────────────────────────────
+  # The first version of the interrupt work cleared `SHAPE_IN_FLIGHT` immediately BEFORE calling
+  # this function. That made a second row impossible and the FIRST row skippable: between the
+  # clear and the `printf … >> "$TSV"` below there are six command boundaries (`head`, `awk`,
+  # `printf|awk`, the header `echo`, two `tsv_safe` substitutions), bash runs a trap at a command
+  # boundary, and the handler found the flag already down, returned, and re-raised. A fully
+  # COMPLETED sweep then left its bundle on disk and NOTHING in the journal while stderr printed
+  # "recording the partial shape" — the exact hole the trap exists to close, in the other
+  # direction, reproducible with a slow `head` on PATH (~6 ms window per shape).
+  # So: signals arriving from here to the end of this function are DEFERRED (on_signal records
+  # them and returns), the row is appended, `SHAPE_IN_FLIGHT` is cleared as the LAST statement,
+  # and only then is the deferred signal honoured — against a flag that is now correctly down.
+  IR_CRITICAL=1
   # A pre-migration 20-column journal must never receive 23-column rows: csv.DictReader keys by
   # header, so the extra fields would land under no column at all and `status`/`notes`/`data`
   # would be read from tps cells. Refuse, and park the row beside the journal so the measurement
@@ -145,6 +166,40 @@ emit_row() {
     "${t1:-na}" "${t4:-na}" "${t8:-na}" "${t16:-na}" "${t32:-na}" "${peak:-na}" \
     "${req_counts:-na}" "${validity:-na}" "${knobs:-na}" \
     "$status" "${notes:-na}" "$data_rel" >> "$TSV"
+  SHAPE_IN_FLIGHT=0                 # LAST statement: the shape is journalled, nothing is owed
+  ir_critical_end                   # honour any signal that arrived while the row was landing
+}
+
+# ir_critical_end: leave the append's critical section and honour whatever was deferred into it.
+# Split out so `emit_row` reads as one linear write; called nowhere else.
+ir_critical_end() {
+  IR_CRITICAL=0
+  [ -n "$IR_PENDING_SIG" ] || return 0
+  local sig="$IR_PENDING_SIG"; IR_PENDING_SIG=""
+  on_signal "$sig"
+}
+
+# row_already_journalled <run_id>: does the CURRENT journal already carry a row for this run?
+# The idempotence backstop for `emit_interrupted_row`. The deferral above should make a
+# double-write unreachable, but a `set -e` abort part-way through `emit_row` reaches the EXIT
+# trap with the flag still up, and a duplicate row corrupts every median taken over the journal —
+# a worse outcome than the missing row this whole mechanism exists to prevent. One `awk`, so the
+# check itself is a single command boundary.
+row_already_journalled() {
+  local rid="${1:-}"
+  [ -n "$rid" ] && [ -f "$TSV" ] || return 1
+  awk -F'\t' -v r="$rid" 'NR>1 && $1==r {found=1} END{exit !found}' "$TSV" 2>/dev/null
+}
+
+# ahl_kill_tree <pid> [signal]: signal a pid AND its descendants, deepest first.
+# Scoped by parentage (`pgrep -P`), never by a `-f <pattern>` match: the stall-watchdog used to
+# reap its guidellm with a box-wide `pkill -f 'guidellm benchmark run'`, which on a shared box
+# kills whatever benchmark happens to be running — see the watchdog's own comment.
+ahl_kill_tree() {
+  local pid="${1:-}" sig="${2:-TERM}" child
+  [ -n "$pid" ] || return 0
+  for child in $(pgrep -P "$pid" 2>/dev/null || true); do ahl_kill_tree "$child" "$sig"; done
+  kill -s "$sig" "$pid" 2>/dev/null || true
 }
 
 # ── Validity plumbing (docs/validity-contract.md) ──────────────────────────────
@@ -231,29 +286,86 @@ check_validity() {
 #   peak_gb=na      The run never reached the peakmem probe. Not recovered — not a default.
 #   notes           `interrupted(SIGINT)@c16`, so the reason survives in the committed journal.
 #
-# EXACTLY ONCE. `SHAPE_IN_FLIGHT` is cleared *before* either writer calls emit_row, and bash runs
-# a trap only at a command boundary, so a signal arriving during the normal emit_row is deferred
-# until after it and then sees the flag already down. A completed shape therefore writes one row,
-# not two — the property that matters most here, since a duplicate row would corrupt every median.
+# EXACTLY ONCE, IN BOTH DIRECTIONS. The write is the atomic unit: `emit_row` opens a critical
+# section, appends, and clears `SHAPE_IN_FLIGHT` as its LAST statement; a signal arriving inside
+# that section is deferred and honoured afterwards, against a flag that is by then correctly
+# down. `emit_interrupted_row` additionally refuses to write a run_id the journal already carries.
+# So a completed shape writes exactly one row (never zero, never two) and an interrupted one
+# writes exactly one — a duplicate would corrupt every median taken over the journal, and a
+# missing row is the hole this whole mechanism exists to close.
 SHAPE_IN_FLIGHT=0
+IR_CRITICAL=0            # 1 while a row is being appended: a signal here is DEFERRED, not acted on
+IR_PENDING_SIG=""        # the signal that arrived during a critical section, replayed on exit from it
+IR_HANDLING=0            # 1 while on_signal/on_exit is recording — blocks re-entry
 IR_RUN_ID=""; IR_SHAPE_TAG=""; IR_BUNDLE=""; IR_DATA_REL=""; IR_LEVEL=""
-IR_PROMPT=""; IR_OUTPUT=""; IR_SAMPLER_PID=""; IR_LEVEL_PID=""
+IR_PROMPT=""; IR_OUTPUT=""; IR_SAMPLER_PID=""; IR_LEVEL_PID=""; IR_WATCHDOG_PID=""
 IR_TPS=(na na na na na); IR_RAN_LEVELS=(); IR_RAN_TPS=()
+IR_CRASHED=0; IR_CRASH_LEVEL=""; IR_CRASH_TEARDOWN_DONE=0
+
+# HANDLER WORK IS BOUNDED. Every child the handler starts runs under `timeout`: `metrics_sampler
+# --summary`, `ahl_knobs` and `ahl_validity` all shell out, the last two through `uv`, which can
+# block on a uv lock the live bench is holding. An unbounded handler is a handler a supervisor
+# escalates past, which loses the row.
+IR_HANDLER_TIMEOUT="${IR_HANDLER_TIMEOUT:-20}"
+
+# ir_bound_python: put the handler's library calls under that bound. `scripts/lib/validity.sh`'s
+# `_ahl_py` expands `$AHL_PYTHON` UNQUOTED, so prefixing it with `timeout` bounds both `ahl_knobs`
+# and `ahl_validity` without re-implementing or re-sourcing either (contract §1 — the handler must
+# not grow its own copy of the rules). Only ever called on the abort path, so the normal bench is
+# untouched. Assumes no spaces in the interpreter path, which is already `_ahl_py`'s assumption.
+ir_bound_python() {
+  local base="${AHL_PYTHON:-}"
+  if [ -z "$base" ]; then
+    if command -v uv >/dev/null 2>&1; then base="uv run --project $AHL_REPO_ROOT --quiet python"
+    else base="python3"; fi
+  fi
+  case "$base" in timeout\ *) return 0 ;; esac       # already bounded
+  AHL_PYTHON="timeout $IR_HANDLER_TIMEOUT $base"
+}
+
+# crash_teardown: preserve the engine log, then release the GPU. IDEMPOTENT, and reachable from
+# the signal path as well as the normal one. bench.sh argues at length that a Ctrl-C must not
+# ENTER this node's wedge record; the opposite — a real wedge silently LEAVING it — was
+# unguarded: a signal in the ~0.5 s between "c$N hung" and the crash row wrote the interrupted
+# row instead, skipped `docker logs > vllm_crash.log` (the one artefact the vLLM #43885 protocol
+# asks for) and skipped `adapter down`, leaving a wedged container holding the GPU.
+crash_teardown() {
+  [ "$IR_CRASHED" = 1 ] || return 0
+  [ "$IR_CRASH_TEARDOWN_DONE" = 1 ] && return 0
+  IR_CRASH_TEARDOWN_DONE=1
+  timeout "$IR_HANDLER_TIMEOUT" docker logs "$CONTAINER" >"$IR_BUNDLE/vllm_crash.log" 2>&1 || true
+  echo "  saved engine logs -> $(realpath --relative-to="$REPO_ROOT" "$IR_BUNDLE" 2>/dev/null || echo "$IR_BUNDLE")/vllm_crash.log" >&2
+  timeout "$IR_HANDLER_TIMEOUT" "$ADAPTER" down || true
+}
 
 # emit_interrupted_row <reason>: write the row for a shape that never finished. Runs inside a
 # trap, so every step that could fail is guarded — losing the row to `set -e` in the handler
 # would reopen the exact hole this closes.
 emit_interrupted_row() {
   [ "$SHAPE_IN_FLIGHT" = 1 ] || return 0
-  SHAPE_IN_FLIGHT=0                       # claim it first: this function is the only writer now
+  # The journal, not the flag, is the record. If this run_id is already there, the shape landed.
+  row_already_journalled "$IR_RUN_ID" && { SHAPE_IN_FLIGHT=0; return 0; }
   local reason="${1:-interrupted}" thermal knobs levels_csv tps_csv status notes where
+  ir_bound_python                         # every library call below now runs under a hard bound
   # Stop the children first: the GuideLLM level still hammering the endpoint (its `timeout`
-  # wrapper forwards the signal on), and the metrics sampler, which would otherwise outlive us
-  # and keep appending to a bundle nobody is benching into.
-  [ -n "$IR_LEVEL_PID" ] && { kill "$IR_LEVEL_PID" 2>/dev/null || true; }
-  [ -n "$IR_SAMPLER_PID" ] && { kill "$IR_SAMPLER_PID" 2>/dev/null || true; \
-                                wait "$IR_SAMPLER_PID" 2>/dev/null || true; }
-  thermal="$("$SCRIPT_DIR/metrics_sampler.sh" --summary "$IR_BUNDLE/gpu_metrics.csv" 2>/dev/null || echo thermal=na)"
+  # wrapper forwards the signal on), the stall-watchdog, and the metrics sampler — each of which
+  # would otherwise outlive us.
+  #
+  # THE WATCHDOG IS NOT OPTIONAL HERE. It used to live only in `run_level`'s `local wd`, killed on
+  # the normal path and never on this one, so an interrupt orphaned it with PPID 1. It then went
+  # on polling `docker logs ahl-vllm` every 15 s forever (this path deliberately does not
+  # `adapter down`, so the container keeps serving and its loop never ends) and, the first time a
+  # LATER run genuinely stalled, fired its kill at the CURRENT run's GuideLLM. That run records
+  # `status=crash notes=hang@cN` and a PHANTOM WEDGE enters this node's wedge record — the record
+  # that feeds research/upstream/vllm-43885-gb10-wedge.md. For a project whose thesis is evidence
+  # integrity that is the worst available failure, and it was live: 12 orphans were found running
+  # on this box, leaked one per interrupt test.
+  [ -n "$IR_WATCHDOG_PID" ] && { ahl_kill_tree "$IR_WATCHDOG_PID" TERM; \
+                                 wait "$IR_WATCHDOG_PID" 2>/dev/null || true; IR_WATCHDOG_PID=""; }
+  [ -n "$IR_LEVEL_PID" ] && { ahl_kill_tree "$IR_LEVEL_PID" TERM; }
+  [ -n "$IR_SAMPLER_PID" ] && { ahl_kill_tree "$IR_SAMPLER_PID" TERM; \
+                                wait "$IR_SAMPLER_PID" 2>/dev/null || true; IR_SAMPLER_PID=""; }
+  thermal="$(timeout "$IR_HANDLER_TIMEOUT" "$SCRIPT_DIR/metrics_sampler.sh" --summary "$IR_BUNDLE/gpu_metrics.csv" 2>/dev/null || echo thermal=na)"
   knobs="$(knobs_string "$IR_PROMPT" "$IR_OUTPUT" 2>/dev/null || echo na)"
   levels_csv="$(IFS=,; echo "${IR_RAN_LEVELS[*]:-}")"; tps_csv="$(IFS=,; echo "${IR_RAN_TPS[*]:-}")"
   check_validity "$IR_BUNDLE" "$levels_csv" "$tps_csv" || true
@@ -261,6 +373,21 @@ emit_interrupted_row() {
   status="suspect"; [ "$STATUS_FLOOR" = "void" ] && status="void"
   where="${IR_LEVEL:+@c$IR_LEVEL}"
   notes="${NOTES:+$NOTES; }interrupted(${reason})${where}; partial shape, not a completed measurement; $thermal"
+  # A WEDGE THAT WAS ALREADY DETECTED STAYS A WEDGE. If the level loop had already marked this
+  # shape crashed, the signal arrived while the crash row was being assembled: `crash` is the
+  # engine-wedge signal and this shape earned it. Contract §5 — crash outranks a validity floor.
+  if [ "$IR_CRASHED" = 1 ]; then
+    status="crash"
+    notes="${NOTES:+$NOTES; }hang@c$IR_CRASH_LEVEL; interrupted(${reason}) while recording the wedge; $thermal"
+  fi
+  # ── Seam for the row-wide `incomplete_run` verdict (contract §1) ────────────────────────────
+  # This row is a partial sweep and every consumer should be able to see that from `validity`
+  # alone — `citability.py` scopes to level-tagged verdicts and ignores `status`, so an
+  # interrupted row currently reads as citable at the levels that did land. The verdict must come
+  # from scripts/lib/validity.py (a hand-assembled string here would be exactly the second
+  # implementation §1 forbids). When the library exposes it, the ONE line to add is:
+  #     VALIDITY="$(ahl_add_verdict "$VALIDITY" incomplete_run)"
+  # placed here, before emit_row. Nothing else in this file changes.
   emit_row "$IR_RUN_ID" "$IR_SHAPE_TAG" "$IR_DATA_REL" "$status" "$notes" "na" \
     "$REQ_COUNTS" "$VALIDITY" "$knobs" \
     "${IR_TPS[0]}" "${IR_TPS[1]}" "${IR_TPS[2]}" "${IR_TPS[3]}" "${IR_TPS[4]}" || true
@@ -272,22 +399,45 @@ emit_interrupted_row() {
 # on_signal <SIGNAME>: record, then re-raise with the default disposition so the exit status is
 # the conventional 128+N. Deliberately NOT exit 4: "the row is written but not citable, continue"
 # is the wrong instruction to give a caller whose operator just pressed Ctrl-C.
-# The handlers are cleared on entry, so a SECOND Ctrl-C during the write kills the script
-# outright — an operator who insists is obeyed, and reconcile_bundles.py picks up the bundle.
+#
+# IT DOES NOT DISARM ITSELF. The first version ran `trap - INT TERM HUP EXIT` on entry and then
+# spent several hundred ms in metrics_sampler / ahl_knobs / ahl_validity, so anything escalating
+# in that window — SIGINT then SIGTERM, or SIGTERM twice, i.e. ordinary process-manager behaviour,
+# not an insistent human — killed the script with the row unwritten. Instead the further signals
+# are IGNORED for the duration of a now-BOUNDED handler (IR_HANDLER_TIMEOUT caps every child it
+# starts), and the original signal is re-raised at the end with its default disposition, so the
+# caller still sees 128+N. The trade-off is deliberate and small: a second Ctrl-C no longer aborts
+# the write, it merely arrives a fraction of a second early.
 on_signal() {
   local sig="${1:-TERM}"
-  trap - INT TERM HUP EXIT
-  echo >&2; echo "== SIG$sig received — recording the partial shape before exiting ==" >&2
+  # Mid-append: the row is landing right now. Note the signal and let `emit_row` finish.
+  if [ "$IR_CRITICAL" = 1 ]; then IR_PENDING_SIG="$sig"; return 0; fi
+  # Already recording: the first signal owns the write.
+  if [ "$IR_HANDLING" = 1 ]; then IR_PENDING_SIG="$sig"; return 0; fi
+  IR_HANDLING=1
+  trap '' INT TERM HUP                    # ignored, not defaulted: an escalation must not win here
+  trap - EXIT
+  echo >&2; echo "== SIG$sig received — recording the shape in flight, if any, before exiting ==" >&2
   emit_interrupted_row "SIG$sig" || true
+  crash_teardown || true                  # a detected wedge is still torn down and still logged
+  trap - INT TERM HUP                     # back to the default disposition so the re-raise lands
   kill -s "$sig" $$ 2>/dev/null || true
   exit 1                                  # only reached if the signal is somehow ignored
 }
 
-# The EXIT arm covers the non-signal aborts: `set -e` on an unexpected failure, or a caller that
-# closed the shell. It is a no-op after a completed shape, because that path clears the flag.
+# The EXIT arm covers the non-signal aborts: `set -e` on an unexpected failure, an untrapped
+# signal (SIGPIPE, SIGUSR1) whose default action still runs this trap, or a caller that closed the
+# shell. It is a no-op after a completed shape, because emit_row clears the flag.
 on_exit() {
   local rc=$?
-  emit_interrupted_row "abort rc=$rc" || true
+  [ "$IR_HANDLING" = 1 ] && return 0
+  IR_HANDLING=1
+  IR_CRITICAL=0                # an abort INSIDE the append must still be able to write the row
+  # `rc=0` here does NOT mean a clean finish — a shape is in flight, so the shell simply had no
+  # failing command to report (an untrapped SIGPIPE gets here with $? already reset). Say
+  # "unfinished" so the journal never reads as a clean exit that somehow left a partial row.
+  emit_interrupted_row "abort rc=$rc, shape unfinished" || true
+  crash_teardown || true
   return 0
 }
 trap 'on_signal INT' INT
@@ -295,13 +445,25 @@ trap 'on_signal TERM' TERM
 trap 'on_signal HUP' HUP
 trap on_exit EXIT
 
-watchdog() {  # watchdog <hit_file>
-  local z=0
+# watchdog <hit_file> <level_pid>: trip when vLLM reports zero generation throughput with
+# requests still running, and reap ONLY the level it was started to guard.
+#
+# It takes the pid deliberately. The kill used to be `pkill -f 'guidellm benchmark run'` — an
+# unscoped pattern match across the whole box. Combined with the orphaning bug above that is how
+# a previous run's watchdog kills a current run's GuideLLM and manufactures a wedge event; even
+# without it, this box is shared and a pattern kill hits whatever else is benching. `kill -0` on
+# the guarded pid is also the loop's exit condition, so the watchdog cannot outlive its level
+# even if nobody reaps it.
+watchdog() {  # watchdog <hit_file> <level_pid>
+  local hit="$1" victim="${2:-}" z=0
   while sleep 15; do
+    [ -n "$victim" ] && { kill -0 "$victim" 2>/dev/null || return 0; }
     if docker logs --since 25s "$CONTAINER" 2>&1 | grep -E 'generation throughput' | tail -1 \
          | grep -qE 'generation throughput: 0\.0.*Running: [1-9]'; then
       z=$((z + 15)); [ "$z" -ge "$STALL_SECS" ] && {
-        echo "stalled ${z}s (gen=0, reqs running)" >"$1"; pkill -f 'guidellm benchmark run' 2>/dev/null || true; return; }
+        echo "stalled ${z}s (gen=0, reqs running)" >"$hit"
+        ahl_kill_tree "$victim" TERM
+        return; }
     else z=0; fi
   done
 }
@@ -318,18 +480,26 @@ watchdog() {  # watchdog <hit_file>
 # have been easy to ship the trap believing it worked.)
 run_level() {
   local bundle="$1" level="$2" data="$3" hit="$1/.wd_c$2" json="$1/level_c$2.json"; rm -f "$hit"; TPS_OUT="hang"
-  watchdog "$hit" & local wd=$!
   set +e
   ( cd "$bundle" && timeout "$LEVEL_TIMEOUT" uv run --project "$REPO_ROOT" guidellm benchmark run \
       --target "$TARGET" --model "$SERVED_NAME" --processor "${PROCESSOR:-$MODEL}" --random-seed "$SEED" \
       --profile concurrent --rate "$level" \
       --data "$data" --max-seconds "$MAX_SECONDS" --output-path "$json" ) >"$bundle/level_c$level.log" 2>&1 &
   IR_LEVEL_PID=$!
+  # The watchdog starts AFTER the level so it can be told which pid it guards (its first act is a
+  # 15 s sleep, so nothing is lost by the ordering). Its pid is a GLOBAL, not a `local wd`: the
+  # interrupt path never reaches the `kill` below, and a watchdog that outlives its bench goes on
+  # to kill someone else's — see the watchdog comment above.
+  watchdog "$hit" "$IR_LEVEL_PID" &
+  IR_WATCHDOG_PID=$!
   wait "$IR_LEVEL_PID"
   local rc=$?
   IR_LEVEL_PID=""
   set -e
-  kill "$wd" 2>/dev/null || true; wait "$wd" 2>/dev/null || true
+  # Reap the TREE: the watchdog's own `sleep 15` survives a kill aimed at the shell alone, and an
+  # orphaned `sleep` holding a pipe is what made the test harness leak a process per run.
+  ahl_kill_tree "$IR_WATCHDOG_PID" TERM; wait "$IR_WATCHDOG_PID" 2>/dev/null || true
+  IR_WATCHDOG_PID=""
   { [ -f "$hit" ] || [ "$rc" -ne 0 ] || [ ! -f "$json" ]; } && return 3
   TPS_OUT="$(jq -r '.benchmarks[0].metrics.output_tokens_per_second.successful.mean | (.*100|round)/100' "$json")"
   return 0
@@ -354,15 +524,20 @@ run_shape() {
   # whatever this shape had reached, and a `local` would be invisible to it. From the assignment
   # of SHAPE_IN_FLIGHT below until the row is emitted, this bundle is unreferenced evidence.
   IR_RUN_ID="$run_id"; IR_SHAPE_TAG="$shape_tag"; IR_BUNDLE="$bundle"; IR_DATA_REL="$data_rel"
-  IR_PROMPT="$prompt"; IR_OUTPUT="$output"; IR_LEVEL=""; IR_SAMPLER_PID=""
+  IR_PROMPT="$prompt"; IR_OUTPUT="$output"; IR_LEVEL=""; IR_SAMPLER_PID=""; IR_WATCHDOG_PID=""
   IR_TPS=(na na na na na); IR_RAN_LEVELS=(); IR_RAN_TPS=()
+  IR_CRASHED=0; IR_CRASH_LEVEL=""; IR_CRASH_TEARDOWN_DONE=0
   SHAPE_IN_FLIGHT=1
 
   echo "== $shape (p$prompt/o$output) per-level sweep @ c${LEVELS[*]} (max_s=$MAX_SECONDS, seed=$SEED, stall=$STALL_SECS) ==" >&2
   # Sidecar: sample GPU power/temp/util for the whole shape sweep (thermal is a tok/s confounder).
   local sp=""; "$SCRIPT_DIR/metrics_sampler.sh" "$bundle/gpu_metrics.csv" 5 >/dev/null 2>&1 & sp=$!
   IR_SAMPLER_PID="$sp"
-  local level idx crashed=0 crash_level=""
+  # The crash state is the IR_* globals, not `local crashed=0 crash_level=""`: from the moment a
+  # level is marked hung there is ~0.5 s of peakmem + thermal + knobs + validity work before the
+  # crash row lands, and a signal in that window must still produce a CRASH row with its
+  # forensics, not an interrupted one. A `local` would be invisible to the handler.
+  local level idx
   for level in "${LEVELS[@]}"; do
     idx="$(col_index "$level")"; [ "$idx" -lt 0 ] && { echo "  skip invalid level $level" >&2; continue; }
     echo "  -- c$level --" >&2
@@ -372,16 +547,16 @@ run_shape() {
       echo "     c$level tok/s=$TPS_OUT" >&2
     else
       IR_TPS[$idx]="hang"; IR_RAN_LEVELS+=("$level"); IR_RAN_TPS+=("hang"); IR_LEVEL=""
-      crashed=1; crash_level="$level"
+      IR_CRASHED=1; IR_CRASH_LEVEL="$level"
       echo "  !! c$level hung/crashed — keeping lower levels, tearing down" >&2; break
     fi
   done
 
-  kill "$sp" 2>/dev/null || true; wait "$sp" 2>/dev/null || true; IR_SAMPLER_PID=""
+  ahl_kill_tree "$sp" TERM; wait "$sp" 2>/dev/null || true; IR_SAMPLER_PID=""
   local peak status notes thermal
   peak="$("$ADAPTER" peakmem 2>/dev/null || echo na)"
   thermal="$("$SCRIPT_DIR/metrics_sampler.sh" --summary "$bundle/gpu_metrics.csv" 2>/dev/null || echo thermal=na)"
-  if [ "$crashed" = 1 ]; then status="crash"; notes="${NOTES:+$NOTES; }hang@c$crash_level; $thermal"
+  if [ "$IR_CRASHED" = 1 ]; then status="crash"; notes="${NOTES:+$NOTES; }hang@c$IR_CRASH_LEVEL; $thermal"
   else status="${STATUS:-measured}"; notes="${NOTES:+$NOTES; }$thermal"; fi
 
   # ── Validity (contract §5): record and flag, exit non-zero. The row is written either way. ──
@@ -391,7 +566,7 @@ run_shape() {
   check_validity "$bundle" "$levels_csv" "$tps_csv"
   if [ "$STATUS_FLOOR" != "ok" ]; then
     invalid=1
-    if [ "$crashed" = 1 ]; then   # a crash outranks: keep status=crash, still record the verdict
+    if [ "$IR_CRASHED" = 1 ]; then   # a crash outranks: keep status=crash, still record the verdict
       echo "  !! VALIDITY $VALIDITY (floor=$STATUS_FLOOR) — status stays crash; counts: $REQ_COUNTS" >&2
     else
       echo "  !! VALIDITY FAILURE: $VALIDITY — invariant(s) fired, status $status -> $STATUS_FLOOR" >&2
@@ -402,18 +577,16 @@ run_shape() {
     fi
   fi
 
-  # Hand the shape over to the normal writer BEFORE it writes. A signal arriving from here on is
-  # deferred to the next command boundary and then finds the flag down, so it cannot append a
-  # second row for a shape that already has one.
-  SHAPE_IN_FLIGHT=0
+  # Hand the shape over to the normal writer. `emit_row` owns the handover: it defers signals for
+  # the duration of the append and clears SHAPE_IN_FLIGHT as its last statement, so this shape can
+  # neither lose its row to a signal arriving mid-write nor gain a second one afterwards.
   emit_row "$run_id" "$shape_tag" "$data_rel" "$status" "$notes" "$peak" \
     "$REQ_COUNTS" "$VALIDITY" "$knobs" \
     "${IR_TPS[0]}" "${IR_TPS[1]}" "${IR_TPS[2]}" "${IR_TPS[3]}" "${IR_TPS[4]}"
   echo "  $shape -> c1=${IR_TPS[0]} c4=${IR_TPS[1]} c8=${IR_TPS[2]} c16=${IR_TPS[3]} c32=${IR_TPS[4]}  [$status] validity=$VALIDITY" >&2
-  if [ "$crashed" = 1 ]; then
-    docker logs "$CONTAINER" >"$bundle/vllm_crash.log" 2>&1 || true   # preserve engine error before teardown
-    echo "  saved engine logs -> $(realpath --relative-to="$REPO_ROOT" "$bundle")/vllm_crash.log" >&2
-    "$ADAPTER" down || true; return 3
+  if [ "$IR_CRASHED" = 1 ]; then
+    crash_teardown        # idempotent, and reachable from the signal path too — see its comment
+    return 3
   fi
   { [ "$invalid" = 1 ] || [ "$SCHEMA_MISMATCH" = 1 ]; } && return 4
   return 0
