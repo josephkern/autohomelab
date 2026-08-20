@@ -22,6 +22,15 @@
 # the level you cite); `otherlvl` counts rows that ARE in the median but carry a verdict at
 # some other level — reported, never blocking, never silent.
 #
+# ── WHY THIS LOOP NEVER WRITES `keep` ─────────────────────────────────────────
+# Same adjudication as run_experiment.sh (20260820), whose header carries the full argument: the
+# row `status` column is a VALIDITY state, not a verdict. `keep` had 0 of 315 rows because the
+# keep/discard decision is known only AFTER the median, is about a config rather than a row, and
+# would sit in the same column the validity layer overwrites. The affirmative keep verdict is the
+# promoted artifact (for a host backend, the launcher with the winning defaults) plus logbook.md.
+# bench_llamacpp.sh does not even read $STATUS — the guard below exists so both runners answer a
+# caller identically, and so this can never quietly become a verdict channel later.
+#
 # ── MEASUREMENT VALIDITY (docs/validity-contract.md §5/§6) ────────────────────
 # Identical policy to run_experiment.sh — the rule is the project's, not the backend's:
 #   void / suspect / crash rows are EXCLUDED from the median (a suspect row is reported loudly and
@@ -55,6 +64,19 @@ ahl_py() {
 
 STUB="${1:?usage: TAG=<slug> run_experiment_llamacpp.sh <runbook-stub.sh>}"
 [ -f "$STUB" ] || { echo "stub not found: $STUB" >&2; exit 1; }
+# See "WHY THIS LOOP NEVER WRITES `keep`" above. Refuse, don't silently ignore.
+case "${STATUS:-}" in
+  keep|discard)
+    {
+      echo "!! STATUS=$STATUS is a VERDICT, not a row state, and this loop will not write one."
+      echo "!! A row's status is its VALIDITY (measured|suspect|void|crash) — decided by the"
+      echo "!! invariants in scripts/lib/validity.py, not by the caller's opinion of the result."
+      echo "!! The keep/discard decision is made AFTER the median (tune_status.py) and recorded"
+      echo "!! where it is durable and correctly grained: the campaign logbook.md, and — for a"
+      echo "!! keep — the promoted launcher whose defaults are the winning config."
+    } >&2
+    exit 1 ;;
+esac
 TAG="${TAG:?set TAG=<config-slug> (e.g. q5km-mtp-d3)}"
 N="${N:-3}"
 export EXP_SHAPE="${EXP_SHAPE:-chat}"

@@ -13,6 +13,39 @@
 # Rows land in results.tsv tagged `exp=<id>` so the median is computed over exactly this run's
 # benches. The keep/discard decision is the caller's (compare to current best via tune_status.py).
 #
+# ── WHY THIS LOOP NEVER WRITES `keep` (AGENTS.md follow-up, adjudicated 20260820) ─────────────
+# `keep` sat in the documented status vocabulary with **0 of 315** rows ever carrying it, and the
+# obvious "fix" — have the tuning loop stamp its own verdict — is wrong for four reasons, all of
+# which are visible from right here:
+#
+#   1. WRONG TIME. The verdict is not knowable when the row is written. bench.sh writes each row
+#      as it finishes; the decision needs the MEDIAN over all N, compared against a different
+#      config's median. Stamping it means going back and rewriting rows after the fact — and
+#      contract §7 is explicit that historical status is adjudicated, never rewritten in bulk.
+#   2. WRONG GRAIN. The verdict is about a CONFIG (a config_hash, judged on a median). `status` is
+#      a per-ROW column. Marking three rows `keep` licenses citing any ONE of them as "kept" —
+#      precisely the single-run citation AGENTS.md's N=3 rule exists to prevent.
+#   3. WRONG AXIS, and this one is not hypothetical: it is the specified, tested behaviour.
+#      `status` is where the validity layer lands its answer — validity.apply_status() escalates
+#      a row to `suspect`/`void` when an invariant fires, and
+#      tests/test_status.py::test_a_suspect_verdict_downgrades_even_a_keep pins that a `keep` is
+#      overwritten by it. A human verdict in the machine's column loses, silently.
+#   4. ALREADY RECORDED, BETTER. The affirmative keep verdict has an artifact: `_final.sh`, written
+#      by promote.sh only after the gate passes, carrying the config_hash and the objective it
+#      cites, plus (since 20260820) the command that re-derives its supporting rows. That is
+#      durable, greppable, and at the right grain.
+#
+# The corpus agrees, which is the part that settles it. `discard` HAS been written — 6 of 315 —
+# and not one of the six is a tuning verdict: they are a harness error (guidellm GET /health 404),
+# a contaminated NP=32 config, and starved coder sweeps. All six are independently non-citable on
+# their `validity` column alone. So the status field has always been used as a validity axis in
+# practice; `keep` was never absent by accident, it had nothing to mean.
+#
+# So the row `status` is a VALIDITY state, not a verdict — and this loop hard-codes
+# `STATUS=measured` on every bench call rather than forwarding the caller's. A caller that tries
+# to inject a verdict is REFUSED below rather than silently overridden: a tuning loop must not
+# self-authorize a keep, and an ignored variable is how an operator comes to believe it did.
+#
 # ── MEASUREMENT VALIDITY (docs/validity-contract.md §5/§6) ────────────────────
 # `status=measured` no longer means "a row exists", it means the invariants passed. This script is
 # the project's keep/discard primitive, so it must never launder a bad row into a median:
@@ -62,6 +95,19 @@ ahl_py() {
 
 RUNBOOK="${1:?usage: run_experiment.sh <runbook.sh>}"
 [ -f "$RUNBOOK" ] || { echo "runbook not found: $RUNBOOK" >&2; exit 1; }
+# See "WHY THIS LOOP NEVER WRITES `keep`" above. Refuse, don't silently override.
+case "${STATUS:-}" in
+  keep|discard)
+    {
+      echo "!! STATUS=$STATUS is a VERDICT, not a row state, and this loop will not write one."
+      echo "!! A row's status is its VALIDITY (measured|suspect|void|crash) — decided by the"
+      echo "!! invariants in scripts/lib/validity.py, not by the caller's opinion of the result."
+      echo "!! The keep/discard decision is made AFTER the median (tune_status.py) and recorded"
+      echo "!! where it is durable and correctly grained: the campaign logbook.md, and — for a"
+      echo "!! keep — the promoted runbooks/<org>/<model>/*_final.sh that promote.sh writes."
+    } >&2
+    exit 1 ;;
+esac
 N="${N:-3}"
 export EXP_SHAPE="${EXP_SHAPE:-chat}"
 export LEVELS_SET="${LEVELS_SET:-1,16}"     # c1 sentinel + c16 objective

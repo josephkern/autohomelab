@@ -48,15 +48,31 @@ mkrepo(){
   for s in promote.sh run_experiment.sh run_experiment_llamacpp.sh suite.sh validate.sh; do
     cp "$REAL_REPO/scripts/$s" "$R/scripts/"
   done
+  # promote.sh derives the VLLM-<minor> in the promoted name from the image.lock CATALOG, so the
+  # catalog is part of the fixture. Copying the real one (not a hand-written stand-in) is
+  # deliberate: the derivation's whole job is to agree with the file the repo actually ships.
+  cp "$REAL_REPO/backends/vllm/image.lock" "$R/backends/vllm/"
   echo '{"gpu":{"mem_bw_gbs":273}}' > "$R/results/$NODE_FP/node_profile.json"
   TSV="$R/results/$NODE_FP/Org/Model/results.tsv"
   python3 "$R/scripts/lib/validity.py" header > "$TSV"
   RB="$R/runbooks/Org/Model/candidate_tuned.sh"
-  printf '#!/usr/bin/env bash\n# image v0.25.0\nMODEL=Org/Model\nSERVED_NAME=m\n' > "$RB"
-  CFG="$(sha256sum "$RB" | cut -c1-8)"
+  # A realistic runbook: a digest pin, like every runbook in the tree. v0.25.0's digest, so the
+  # promoted artifact is VLLM-25-Org_Model_final.sh as the cases below assert.
+  setrb "$(printf '#!/usr/bin/env bash\n# image v0.25.0\nMODEL=Org/Model\nSERVED_NAME=m\nVLLM_IMAGE="%s"\n' "$IMG_025")"
   LOG="$R/stub.log"; : > "$LOG"
   export AHL_PYTHON=python3     # keep the harness off the network (no uv resolve)
 }
+
+# setrb <full runbook text> — replace the fixture runbook and re-derive its config_hash. Rows
+# added with row() key off $CFG, so this must run BEFORE them.
+setrb(){ printf '%s' "$1" > "$RB"; chmod +x "$RB"; CFG="$(sha256sum "$RB" | cut -c1-8)"; }
+
+# Digests lifted from the real backends/vllm/image.lock catalog.
+IMG_022="vllm/vllm-openai@sha256:0fec7ec5f3e6bc168e54899935fb0557da908a4832a1dbc88e2debcf2f889416"
+IMG_023="vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f"
+IMG_025="vllm/vllm-openai@sha256:fc56161ee42a011aeee78b65d0a81b6683c7d04402fd40503d14d4d6c98f07cb"
+IMG_MTPFIX="vllm-openai:0.23.0-qwen3nextmtp-fix"
+IMG_NIGHTLY="vllm/vllm-openai@sha256:3dbe092ec5b2cef63b6104d33fa75d6ce53a7870962529ada69f78bbbc38e776"
 
 # row <run_id> <shape> <status> <validity> <c1> <c4> <c8> <c16> <c32> [notes] [cfg]
 row(){
@@ -156,6 +172,91 @@ contains "  ...and says so" "gating on c1" "$R/err"
 mkrepo
 row 20260819-000001-chat 'chat(512/256)' measured 'no_data@c1' 20 na na na na
 check "  ...and the fallback level still blocks on its own fatal" 4 "$(promote)"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# promote.sh — VLLM-<minor> derivation (AGENTS.md follow-up)
+#
+# The name is permanent, so the minor in it must come from the PIN, not from prose. The old
+# code took the first `vX.Y.Z` anywhere in the file: a baseline header reading
+# "image v0.22.0 -> v0.23.0" named a 0.23.0 config VLLM-22, and the standing workaround was to
+# remember VLLM_TAG. Every case here promotes for real and asserts the FILENAME that appeared.
+# ══════════════════════════════════════════════════════════════════════════════
+banner "promote.sh — VLLM-<minor> derivation"
+
+# derive <expected basename> <desc> — two clean objective rows, promote, assert the artifact name.
+derive(){
+  local want="$1" desc="$2" rc got
+  row 20260819-000001-chat 'chat(512/256)' measured ok 40 na na 400 na
+  row 20260819-000002-chat 'chat(512/256)' measured ok 41 na na 402 na
+  rc="$(promote)"
+  check "$desc — promotes" 0 "$rc"
+  got="$(ls "$R/runbooks/Org/Model/" | grep '_final\.sh$' | tr '\n' ' ')"
+  check "$desc — name" "$want " "$got"
+}
+
+# 1. THE TRACKED BUG: a migration comment in the header, a 0.23.0 digest in the pin.
+mkrepo
+setrb "$(printf '#!/usr/bin/env bash\n# baseline migrated: image v0.22.0 -> v0.23.0\nMODEL=Org/Model\nVLLM_IMAGE="%s"\n' "$IMG_023")"
+derive "VLLM-23-Org_Model_final.sh" "migration comment loses to the pin"
+[ -e "$R/runbooks/Org/Model/VLLM-22-Org_Model_final.sh" ] && bad "the old first-vX.Y.Z name was written" \
+  || ok "  ...and VLLM-22 (the old wrong name) was never written"
+
+# 2. prose can hold ANY version and still lose to the pin
+mkrepo
+setrb "$(printf '#!/usr/bin/env bash\n# tried on v0.99.9, see also v0.17.1\nMODEL=Org/Model\nVLLM_IMAGE="%s"\n' "$IMG_022")"
+derive "VLLM-22-Org_Model_final.sh" "unrelated prose versions lose to the pin"
+
+# 3. the tag-pinned local build resolves through the catalog key, not a digest
+mkrepo
+setrb "$(printf '#!/usr/bin/env bash\nMODEL=Org/Model\nVLLM_IMAGE="%s"\n' "$IMG_MTPFIX")"
+derive "VLLM-23-Org_Model_final.sh" "tag-pinned local build (0.23.0-qwen3nextmtp-fix)"
+
+# 4. an image that is NOT in the catalog falls back to its OWN line's trailing comment
+mkrepo
+setrb "$(printf '#!/usr/bin/env bash\n# migrated off v0.22.0\nMODEL=Org/Model\nVLLM_IMAGE="vllm/vllm-openai@sha256:deadbeef"   # v0.26.2\n')"
+derive "VLLM-26-Org_Model_final.sh" "uncatalogued image uses its own line's comment"
+
+# 5. VLLM_TAG still wins (the documented escape hatch is not removed)
+mkrepo
+row 20260819-000001-chat 'chat(512/256)' measured ok 40 na na 400 na
+row 20260819-000002-chat 'chat(512/256)' measured ok 41 na na 402 na
+check "VLLM_TAG overrides the catalog" 0 "$(VLLM_TAG=99 promote)"
+[ -e "$R/runbooks/Org/Model/VLLM-99-Org_Model_final.sh" ] && ok "  ...and names it VLLM-99" \
+  || bad "  ...but did not name it VLLM-99"
+
+# 6. underivable -> REFUSE. `VLLM-XX-...` would be a permanent wrong claim in a filename, and
+#    the promotion is otherwise perfectly valid, so this must be a refusal and not a warning.
+mkrepo
+setrb "$(printf '#!/usr/bin/env bash\n# image v0.25.0\nMODEL=Org/Model\nSERVED_NAME=m\n')"
+row 20260819-000001-chat 'chat(512/256)' measured ok 40 na na 400 na
+row 20260819-000002-chat 'chat(512/256)' measured ok 41 na na 402 na
+check "no VLLM_IMAGE -> refuse (exit 1), never VLLM-XX" 1 "$(promote)"
+contains "  ...with the actionable message" "cannot derive the vLLM minor" "$R/err"
+[ -z "$(ls "$R/runbooks/Org/Model/" | grep '_final\.sh$')" ] && ok "  ...and wrote no artifact" \
+  || bad "  ...but wrote an artifact anyway"
+check "  ...and VLLM_TAG rescues it" 0 "$(VLLM_TAG=25 promote)"
+
+# 7. an image that appears ONLY as the catalog's DEFAULT assignment (no `# <version> <ref>` row)
+#    still resolves, from that line's trailing comment
+mkrepo
+printf 'AHL_VLLM_DEFAULT_IMAGE="vllm/vllm-openai@sha256:cafe01"  # v0.31.0\n' \
+  > "$R/backends/vllm/image.lock"
+setrb "$(printf '#!/usr/bin/env bash\n# was v0.22.0\nMODEL=Org/Model\nVLLM_IMAGE="vllm/vllm-openai@sha256:cafe01"\n')"
+derive "VLLM-31-Org_Model_final.sh" "catalog DEFAULT assignment resolves"
+
+# 8. a catalog key that is not a version (`nightly`) does not become the minor
+mkrepo
+setrb "$(printf '#!/usr/bin/env bash\nMODEL=Org/Model\nVLLM_IMAGE="%s"\n' "$IMG_NIGHTLY")"
+row 20260819-000001-chat 'chat(512/256)' measured ok 40 na na 400 na
+row 20260819-000002-chat 'chat(512/256)' measured ok 41 na na 402 na
+check "catalog key 'nightly' is not a version -> refuse" 1 "$(promote)"
+
+# 9. the derivation is REPORTED, so an operator can see which rule fired
+mkrepo
+row 20260819-000001-chat 'chat(512/256)' measured ok 40 na na 400 na
+row 20260819-000002-chat 'chat(512/256)' measured ok 41 na na 402 na
+check "digest pin promotes" 0 "$(promote)"
+contains "  ...and says where the minor came from" ">> vLLM minor: 25 (from image.lock" "$R/err"
 
 banner "promote.sh — override forms"
 setup_blocked(){ mkrepo; row 20260819-000001-chat 'chat(512/256)' measured 'low_sample@c16' 40 na na 400 na; }
@@ -283,6 +384,74 @@ if grep -q '^bench.sh' "$LOG"; then bad "  ...bench ran after a failed serve"; e
 mkrepo; stub serve.sh 0; stub smoke.sh 1; stub bench.sh 0
 check "smoke failure is exit 1" 1 "$(runexp)"
 if grep -q '^bench.sh' "$LOG"; then bad "  ...bench ran after a failed smoke"; else ok "  ...bench never ran"; fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# The status column is a VALIDITY axis, not a keep/discard verdict
+#
+# `keep` was in the documented vocabulary with 0 of 315 rows ever carrying it. The adjudication
+# (20260820) was to keep the loop out of the verdict business entirely and record the verdict
+# where it is durable — so the property under test is that a caller CANNOT get a verdict into the
+# journal by asking, and that the promoted artifact points back at its evidence instead.
+# ══════════════════════════════════════════════════════════════════════════════
+banner "status is validity, not verdict"
+
+mkrepo; stub serve.sh 0; stub smoke.sh 0
+cat > "$R/rowwriter" <<EOS
+#!/usr/bin/env bash
+set -e
+TSV="$TSV"; CFG="$CFG"; NODE_FP="$NODE_FP"
+rid="\$(date -u +%Y%m%d-%H%M%S)-\$RANDOM-chat"
+printf '%s\tabc1234\t%s\tOrg/Model\tchat(512/256)\tvllm@0.25.0\t%s\trunbooks/Org/Model/candidate_tuned.sh\t' "\$rid" "\$NODE_FP" "\$CFG" >> "\$TSV"
+printf '12.0\t180\t42\t40.0\tna\tna\t%s\tna\tna\tna\t%s\tlevels=1|16\t%s\t%s\tna\n' "\$3" "\$2" "\$1" "\${NOTES:-na}" >> "\$TSV"
+EOS
+chmod +x "$R/rowwriter"
+export STUB_LOG="$LOG" STUB_ROW="$R/rowwriter"
+cat > "$R/scripts/bench.sh" <<'EOS'
+#!/usr/bin/env bash
+echo "bench.sh $*" >> "$STUB_LOG"
+echo "STATUS=${STATUS:-<unset>}" >> "$STUB_LOG"
+"$STUB_ROW" "${STATUS:-measured}" ok 400
+exit 0
+EOS
+chmod +x "$R/scripts/bench.sh"
+
+# 1. a caller's verdict is REFUSED, not silently overridden — an ignored variable is how an
+#    operator comes to believe the journal recorded a decision it never recorded.
+check "STATUS=keep is REFUSED" 1 "$(STATUS=keep runexp)"
+contains "  ...naming where a keep IS recorded" "_final.sh" "$R/err"
+if grep -q '^serve.sh' "$LOG"; then bad "  ...but it served first"; else ok "  ...before serving anything"; fi
+check "STATUS=discard is REFUSED too" 1 "$(STATUS=discard runexp)"
+
+# 2. a validity state is not a verdict, and still works
+check "STATUS=measured is accepted (it is a validity state)" 0 "$(STATUS=measured runexp)"
+
+# 3. every bench the loop drives is told `measured`, and no verdict reaches the column
+if grep -q '^STATUS=measured$' "$LOG"; then ok "  ...every bench is invoked with STATUS=measured"
+else bad "  ...bench saw: $(grep '^STATUS=' "$LOG" | sort -u | tr '\n' ' ')"; fi
+if awk -F'\t' 'NR>1 && ($21=="keep" || $21=="discard"){f=1} END{exit !f}' "$TSV"; then
+  bad "  ...a verdict reached the status column"; else ok "  ...no verdict reached the status column"; fi
+
+# 4. the same answer from the host-backend runner (bench_llamacpp.sh does not even read STATUS,
+#    so this guard is what keeps the two runners from answering a caller differently)
+mkrepo
+STUB2="$R/runbooks/Org/Model/launcher.smoke-runbook.sh"
+printf '#!/usr/bin/env bash\nMODEL=Org/Model\nSERVED_NAME=m\n' > "$STUB2"
+rc=$( cd "$R" && STATUS=keep TAG=t N=2 RESTART=0 SKIP_SMOKE=1 \
+        "$R/scripts/run_experiment_llamacpp.sh" "$STUB2" >"$R/out" 2>"$R/err"; echo $? )
+check "llama.cpp runner refuses STATUS=keep identically" 1 "$rc"
+contains "  ...with the same reason" "is a VERDICT, not a row state" "$R/err"
+
+# 5. the promoted artifact carries the pointer back to its evidence — the replacement for a
+#    per-row `keep` stamp, at the grain the decision was actually made on.
+mkrepo
+row 20260819-000001-chat 'chat(512/256)' measured ok 40 na na 400 na
+row 20260819-000002-chat 'chat(512/256)' measured ok 41 na na 402 na
+check "clean promotion" 0 "$(promote)"
+FINAL="$R/runbooks/Org/Model/VLLM-25-Org_Model_final.sh"
+contains "  ...records how to re-derive the supporting rows" "# Re-derive those rows:" "$FINAL"
+contains "  ...pointing at this model's journal" "results/$NODE_FP/Org/Model/results.tsv" "$FINAL"
+contains "  ...at this config_hash" "--cfg $CFG" "$FINAL"
+contains "  ...and the objective it cites" "--shape chat --level 16" "$FINAL"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # suite.sh — exit-code precedence 3 > 4 > 1 > 0 (defect #6)
