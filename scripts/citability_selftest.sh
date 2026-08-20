@@ -52,7 +52,11 @@ mkrepo(){
   TSV="$R/results/$NODE_FP/Org/Model/results.tsv"
   python3 "$R/scripts/lib/validity.py" header > "$TSV"
   RB="$R/runbooks/Org/Model/candidate_tuned.sh"
-  printf '#!/usr/bin/env bash\n# image v0.25.0\nMODEL=Org/Model\nSERVED_NAME=m\n' > "$RB"
+  # The PIN is what names the promoted artifact — promote.sh derives `VLLM-<minor>` from
+  # `VLLM_IMAGE`, never from prose (20260820). This fixture carries a migration comment that
+  # deliberately DISAGREES with the pin, so every promote case below also demonstrates the fix:
+  # the comment says 0.22.0 first, and the expected artifact is still VLLM-25-….
+  printf '#!/usr/bin/env bash\n# migrating: image v0.22.0 -> v0.25.0\nVLLM_IMAGE="vllm/vllm-openai:v0.25.0"\nMODEL=Org/Model\nSERVED_NAME=m\n' > "$RB"
   CFG="$(sha256sum "$RB" | cut -c1-8)"
   LOG="$R/stub.log"; : > "$LOG"
   export AHL_PYTHON=python3     # keep the harness off the network (no uv resolve)
@@ -380,6 +384,42 @@ mv "$R/scripts/citability.py.bak" "$R/scripts/citability.py"
 rc=$( cd "$R" && TAG=t N=2 RESTART=0 SKIP_SMOKE=1 "$R/scripts/run_experiment_llamacpp.sh" "$STUB" \
         >"$R/out" 2>"$R/err"; echo $? )
 check "no rows at all -> 4 (no_valid_data), not a crash" 4 "$rc"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BOTH RUNNERS — §6/§7 (v1.3): a tuning loop may not write a verdict into the
+# journal, and a refused INVOCATION is exit 2, not the pre-measurement 1.
+# Asserted by EXECUTION, because "the case arm is correct" and "the case arm is
+# reached" are different claims (see the AGENTS.md unreachable-branch note).
+# ══════════════════════════════════════════════════════════════════════════════
+banner "run_experiment*.sh — STATUS= refusal"
+mkrepo
+STUB="$R/runbooks/Org/Model/launcher.smoke-runbook.sh"
+printf '#!/usr/bin/env bash\nMODEL=Org/Model\nSERVED_NAME=m\n' > "$STUB"
+stub serve.sh 0; stub smoke.sh 0; stub bench.sh 0; stub bench_llamacpp.sh 0
+
+refuse(){ # refuse <script> <arg> <STATUS>
+  ( cd "$R" && TAG=t N=1 RESTART=0 SKIP_SMOKE=1 STATUS="$3" "$R/scripts/$1" "$2" \
+      >"$R/out" 2>"$R/err"; echo $? )
+}
+
+check "vLLM runner: STATUS=keep refused on the usage rung (2, not 1)" 2 \
+  "$(refuse run_experiment.sh "$RB" keep)"
+contains "  ...and names the retirement" "RETIRED" "$R/err"
+case "$(grep '^MEDIAN' "$R/out" || true)" in
+  *status=usage_error*) ok "  ...and still prints one MEDIAN line";;
+  *) bad "  ...no usage_error MEDIAN line: $(grep '^MEDIAN' "$R/out" || echo NONE)";;
+esac
+check "vLLM runner: STATUS=discard refused (an adjudication is post-hoc)" 2 \
+  "$(refuse run_experiment.sh "$RB" discard)"
+contains "  ...and points at the §7 stamp" "adjudicated@YYYYMMDD" "$R/err"
+check "llama.cpp runner: STATUS=keep refused" 2 \
+  "$(refuse run_experiment_llamacpp.sh "$STUB" keep)"
+check "llama.cpp runner: STATUS=discard refused" 2 \
+  "$(refuse run_experiment_llamacpp.sh "$STUB" discard)"
+# false-positive guard: a LEGAL status must not be refused — this one runs the stubs and comes
+# back 4 (benches ran, no citable rows), which is a different rung entirely.
+check "  ...while STATUS=measured is NOT a usage error" 4 \
+  "$(refuse run_experiment_llamacpp.sh "$STUB" measured)"
 
 # the two runners must keep ONE rule: the summarizer block is byte-identical
 a="$(sed -n '/^SUMMARIZE_RC=0$/,/^fi$/p' "$REAL_REPO/scripts/run_experiment.sh")"

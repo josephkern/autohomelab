@@ -1,9 +1,10 @@
-# Measurement-validity contract (v1.2)
+# Measurement-validity contract (v1.3)
 
 The binding spec for the §1 work of [issue #1](https://github.com/josephkern/autohomelab/issues/1).
 v1.0 authored 2026-08-19 as the fixed interface ten parallel agents built against; **v1.1 (same
 day) folds in the eleven adjudications those agents' findings forced.** Where v1.1 differs from
-v1.0, v1.1 wins — the implementation matches v1.1.
+v1.0, v1.1 wins; where v1.2 differs from v1.1, v1.2 wins; **v1.3 (2026-08-20, the status
+vocabulary — last section of this file) wins over all of them.** The implementation matches v1.3.
 
 ## 0. Why
 
@@ -141,19 +142,51 @@ A failing run is **still written**; the evidence must survive in the committed j
   written but not citable — continue"*, never as an abort.
 - `promote.sh` refuses void/suspect supporting rows; `run_experiment.sh` refuses to median over
   them; `aggregate.py` hides them by default.
+- **A USAGE ERROR IS NOT A RESULT (v1.3).** The ladder `3 > 4 > 1 > 0` ranks outcomes of work that
+  ran, and `1` is defined as *pre-measurement* — the serve or the smoke was attempted and failed.
+  A refused INVOCATION attempted nothing, so it exits **2** (`validity.EXIT_USAGE`), outside the
+  ladder, and still prints its one `MEDIAN` line. Reporting it as `1` told the caller a serve had
+  been tried; exiting silently told a caller that parses stdout nothing at all.
 
 ## 6. Status vocabulary
 
-`measured` (invariants passed) · `keep` · `discard` · `crash` · `suspect` · `void`.
+> **AMENDED by v1.3 (2026-08-20), at the end of this file: `keep` is RETIRED and `discard` is
+> redefined.** The v1.2 line read `measured · keep · discard · crash · suspect · void`; it is
+> kept here as history, not as the vocabulary.
+
+`measured` (invariants passed) · `discard` (a §7 orchestrator adjudication, signed in `notes`) ·
+`crash` · `suspect` · `void`. **Five words.**
 
 ## 7. Historical rows
 
-315 rows across 15 campaigns (v1.0 said 313 — the ctx merge added two). 309 have retained bundles;
+315 rows across 15 campaigns (v1.0 said 313 — the ctx merge added two; **317 as of 20260820**, see v1.3 for the current breakdown). 309 have retained bundles;
 **6 are permanently unauditable, the ceiling on how much of this project's record can ever be
 verified.** Backfill `req_counts`/`validity`/`knobs`; publish an audit; **status is adjudicated by
 the orchestrator, not rewritten in bulk.**
 
 Bundles are gitignored and absent from agent worktrees — read them from the main checkout.
+
+**An adjudication is signed (v1.3).** `discard` is the only status a human sets by hand, and it is
+set precisely where the invariants have nothing to say, so the authority behind it has to be
+legible. A hand-set `discard` MUST carry
+
+```
+adjudicated@YYYYMMDD who: reason
+```
+
+in `notes` (reason ≥ 12 chars — the same rule as `AHL_PROMOTE_OVERRIDE`: an adjudication is an
+argument, not a flag). The existing prose is kept; the stamp is appended, so the row stays
+greppable, dated and attributed:
+
+```
+grep -h 'adjudicated@' results/*/*/*/results.tsv
+python3 scripts/lib/validity.py status --tsv results/*/*/*/results.tsv   # 0 clean, 4 offenders
+```
+
+The write path never sets it: `bench_ds4.sh`/`bench_llamacpp.sh` hard-code `status="measured"` and
+never read `$STATUS`, and both `run_experiment*.sh` refuse `STATUS=discard` on the usage rung. A
+§7 adjudication may also leave a published `discard` standing over a **void** floor — five rows in
+this corpus do — and the stamp is what records that the human saw the floor and ruled anyway.
 
 ## 8. Rules that still bind
 
@@ -327,3 +360,50 @@ The bundles refute it: two ds4 rows ran at `num_concurrent=4`. This matters beyo
 those two rows are the 60.0 and 76.0 gsm8k scores in the tracked `config_hash` collision, and both
 sit at **c4**, so concurrency does not explain that 3.7-sigma spread. `conc` was backfilled from
 each bundle's own `model_args`, never stamped.
+
+---
+
+# v1.3 (2026-08-20) — the status vocabulary, adjudicated
+
+One change, decided on the record rather than on taste. **`keep` is RETIRED. `discard` is RETAINED
+and redefined.** Corpus at the time of the ruling: **317 rows — 284 `measured` / 12 `crash` / 8
+`suspect` / 7 `void` / 6 `discard`.**
+
+## Why `keep` goes
+
+- **It was never written: 0 of 317 rows**, across 15 campaigns and every backend.
+- **Wrong grain.** A keep verdict is a statement about a CONFIG, decided on the *median of N=3*
+  benches. `status` is a property of ONE row. There is no row that is "the kept one", so the
+  column could never hold the verdict even in principle.
+- **Wrong time.** `bench.sh` writes each row as that row finishes, and §7 forbids rewriting a
+  published row afterwards. At the only moment the column can be written, the comparison that
+  would justify `keep` has not happened yet.
+- Where the decision actually lives, and stays: `run_experiment.sh`'s `MEDIAN` line,
+  `tune_status.py`'s ranking, and the campaign `logbook.md`.
+
+Retired means *refused*, not merely undocumented: `STATUS_VOCAB` is five words, `check_status()`
+and therefore `apply_status()` raise on `keep` with its retirement notice, and both runners reject
+`STATUS=keep` before serving anything.
+
+## Why `discard` stays
+
+One row settles it. **`20260809-183024-chat`** (cfg `653a8d9c`, the FF711 `NP=32` bench) carries
+`validity=survivorship@c32` and classifies **`valid` at c16 — the tuning objective**. It is
+rejected because `NP=32 × CTX_PER_SLOT=12288` drove total context to 393,216 (~25 GiB KV) and
+over-committed unified memory into swap, and because it changes two things at once. **No invariant
+can see swap** — it leaves no trace in a GuideLLM level json. That class — numbers the rules cannot
+fault but a human can (contamination, confounded design, swap) — is non-empty and unrecoverable
+from `validity`.
+
+But `discard` is not a bench-time verdict, and never was: `bench_ds4.sh` and `bench_llamacpp.sh`
+hard-code `status="measured"` and never read `$STATUS`, and **all six** `discard` rows were applied
+by later adjudication commits — exactly what §7 sanctions. So it is redefined as **an orchestrator
+adjudication under §7, applied to the journal after the fact**, and it must be signed (§7 above).
+The six existing rows were normalised to the stamp form on 20260820: `notes` only, no other field
+touched, no `status` changed.
+
+## What this does not change
+
+`apply_status()` still downgrades a hand-set `discard` on the WRITE path (fatal → `void`, suspect →
+`suspect`). The §7 hand adjudication is the deliberate exception to that, and the stamp is its
+record — which is why the two can disagree in the journal without either being a defect.

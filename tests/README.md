@@ -150,8 +150,11 @@ tables there — not the tests. The surface the suite prefers:
 COLUMNS: list[str]        # 23 names, contract §2 order
 HEADER:  str              # "\t".join(COLUMNS)
 MIN_DATA = 5 ; MIN_SUCCESSFUL = 20 ; SAFETY = 3.0 ; MIN_MODEL_GB = 1.0
-STATUSES = {"measured", "keep", "discard", "crash", "suspect", "void"}
-EXIT_INVALID = 4
+STATUSES = {"measured", "discard", "crash", "suspect", "void"}   # §6 v1.3: `keep` is RETIRED
+EXIT_INVALID = 4 ; EXIT_USAGE = 2        # 2 = the invocation was refused, outside the 3>4>1>0 ladder
+
+def check_status(status, notes=None) -> str      # raises on `keep`, or on an unsigned `discard`
+def parse_adjudication(notes)                    # -> (YYYYMMDD, who, reason) | None
 
 def assess_bundle(bundle_dir, levels, tps=None, node_profile=None, status="measured",
                   bytes_per_token_gb=None):
